@@ -41,7 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from stardag_api.models import Deployment, DeploymentKind, SettingsRecord
 from stardag_api.models.base import generate_uuid7, utc_now
 from stardag_api.services.errors import BadRequest, Conflict, NotFound
-from stardag_api.services.tx import transaction
+from stardag_api.services.tx import retry_on_deadlock, transaction
 
 #: The ``app_name`` of a local deployment whose driver names no app.
 LOCAL_APP_NAME = "local"
@@ -257,6 +257,7 @@ async def _next_generation(
     return (previous or 0) + 1
 
 
+@retry_on_deadlock
 async def create_deployment(
     session: AsyncSession,
     environment_id: UUID,
@@ -413,6 +414,7 @@ async def _local(
     )
 
 
+@retry_on_deadlock
 async def activate_deployment(
     session: AsyncSession,
     environment_id: UUID,

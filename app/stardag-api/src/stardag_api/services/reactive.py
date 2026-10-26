@@ -24,7 +24,7 @@ from stardag_api.models.base import generate_uuid7, utc_now
 from stardag_api.services.builds import get_build
 from stardag_api.services.errors import BadRequest
 from stardag_api.services.registration import lock_build
-from stardag_api.services.tx import transaction
+from stardag_api.services.tx import retry_on_deadlock, transaction
 
 #: Size caps (compact-JSON bytes): both are echoed on hot reads.
 MAX_TICK_KWARGS_BYTES = 4096
@@ -35,6 +35,7 @@ def _size(value: Any) -> int:
     return len(json.dumps(value, separators=(",", ":")).encode("utf-8"))
 
 
+@retry_on_deadlock
 async def set_reactive_meta(
     session: AsyncSession,
     environment_id: UUID,
@@ -62,6 +63,7 @@ async def set_reactive_meta(
         return build
 
 
+@retry_on_deadlock
 async def add_tick_summary(
     session: AsyncSession,
     environment_id: UUID,

@@ -25,6 +25,37 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `functools.cached_property` raised `TypeError` once it had been read. The
   cache is now dropped before pydantic copies anything, on every pydantic
   version.
+- **Fixed: `@task` ignored `sd.Depends[T]` in a module using
+  `from __future__ import annotations`** (STA-37). Under PEP 563 the decorator
+  read every parameter annotation as its source string, so the `Depends`
+  marker was never seen: the parameter accepted a raw value as well as a task,
+  and passing a correctly typed class task warned of a bogus generic mismatch
+  against the unresolved string. The decorator now evaluates the function's
+  annotations before building the task class, so a module with the future
+  import behaves exactly like one without it.
+- **Changed: the reactive pre-flight checks for state a task's instance body
+  does not carry** (STA-126). A tick rebuilds every task from its registered
+  body, which holds neither pydantic private attributes nor fields declared
+  `exclude=True`, so a task holding such state ran with whatever the rebuild
+  produced, silently. The bootstrap's rehydration pre-flight now compares
+  each task (a root, a discovered dependency, and any model nested in
+  either) with its rebuild:
+
+  - an excluded field whose value the rebuild does not reproduce, when both
+    values are plain data, **refuses the build** before it is armed, naming
+    the class and the field. This includes an untouched excluded field that
+    has a `compat_default`, which the rebuild takes instead;
+  - an excluded field whose difference cannot be decided (an object without
+    value equality, such as a client) logs a warning;
+  - a private attribute never refuses. A plain-data value the rebuild does
+    not reproduce, such as a cache filled in `requires()`, logs a warning;
+    a lock, `uuid4` or other opaque default says nothing.
+
+  Warnings are once per class and attribute, and a failure inside the check
+  is a warning, never a failed build. Resident and hybrid builds are
+  unchanged: such a task is still sent to Modal by value, and the payload now
+  shares one rehydration round trip with its stability check.
+
 - **Fixed: the deployed resident builder claimed detached executions with
   the registry's default one-hour TTL** (STA-134). `Builder` constructed its
   `ModalTaskExecutor` without the app's worker timeouts, so a non-reactive
@@ -75,6 +106,21 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   which costs the tick one spare pass. `notify` re-asserts the flag in its
   second transaction, so every row a flagger skips is left flagged. No SDK
   change, no migration.
+- **Fixed: a v2 write that Postgres aborted as a deadlock victim was a
+  500** (STA-63). Every service call behind a v2 write route (and the
+  frontier read, which commits the closure step) is now re-run when its
+  transaction fails with `DeadlockDetected` (SQLSTATE `40P01`): up to three
+  attempts with small jittered backoff, each retry logged. A deadlock costs
+  the caller latency instead of an error. Each wrapped call is safe to
+  re-run, since its only effects are rows in the rolled-back transaction;
+  a call with two transactions (`notify`) is re-run only while it has
+  committed neither. The auth dependency now commits an API key's
+  `last_used_at` on its own and detaches the rows it loads, so a rollback
+  in the service no longer drops the one or expires the other. A test
+  requires every new service transaction to take
+  the retry or name a reason not to. Comments that claimed a
+  `SELECT … ORDER BY … FOR UPDATE` acquires its locks in order now say that
+  Postgres does not guarantee it.
 
 ## [0.28.0] — 2026-10-08
 

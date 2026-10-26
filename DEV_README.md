@@ -170,6 +170,16 @@ objects (`stardag-testing`, `stardag-testing-app`, ...) exactly where they are
 without concurrent runs colliding. A concurrency group serialises runs sharing
 an environment name, which is what makes those fixed names safe.
 
+A run deletes its environment when it finishes, except when it is cancelled:
+a push cancels the previous run, which must not delete the environment its
+successor is already using. A run cancelled by hand has no successor, so its
+environment is collected by the `Sweep stale Modal environments` job instead —
+once the PR is closed, **or** while it is open as soon as no run of this
+workflow for it is live (any status but `completed` counts as live, and an API
+error keeps the environment). The cancelled run's own sweeper does this as soon
+as its tier has stopped. Its comment in `modal-live.yml` explains why deleting
+an open PR's environment is safe.
+
 **What the tier does and does not cover.** It exercises Modal _execution_:
 real containers, detached spawn and re-attach, retries, cancellation, timeout
 semantics. It does _not_ exercise registry interaction — the registries in
@@ -237,8 +247,9 @@ They would not fail; they would quietly stop meaning anything. The
 environment stays shared, because it is the unit of teardown; only the app
 name separates them, and the image is identical so the extra deploy is
 seconds. A third, `registry-live-lapse`, exists for the same reason: a
-lapsed claim flags nothing, so S21's recovery is a watchdog sweep, which
-must reach that scenario's builds and no one else's. S37 needs no fourth
+lapsed claim flags nothing, so once no tick is alive to take it over,
+S21's recovery is a watchdog sweep, which must reach that scenario's
+builds and no one else's. S37 needs no fourth
 app: it already deploys its own per-scenario rollover app
 (`registry-live-s37-late-record`), and its watchdog sweep runs against
 that one, isolating it the same way without a separate deploy.
@@ -435,6 +446,12 @@ gh api repos/stardag-dev/stardag/actions/runs/<run-id>/jobs \
 
 The job's own `check_run_url` rather than its `id`: the two happen to be equal
 for Actions today, and nothing says they must stay so.
+
+A transport timeout during **collection** is annotated as `Registry transport
+fault at collection`, and is recorded, probed and counted like any other under
+the phase `collect` — but not retried. Every scenario module runs the guard at
+import, the guard has already retried four times before giving up, and the
+tier's retry over the same condition would be a second layer owning it.
 
 If the rate does not fall once a cause is found and fixed, the answer is to
 escalate — never to widen what the retry accepts.

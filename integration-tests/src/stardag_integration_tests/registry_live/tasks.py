@@ -490,6 +490,10 @@ class ScopedUpstreams(sd.Task[list[int]]):
         self._save([0])
 
 
+# The artifact ``DiesOnce`` records its death in (see its docstring).
+DEATH_ARTIFACT_NAME = "registry-live-death"
+
+
 class DiesOnce(sd.Task[list[int]]):
     """A worker that dies without reporting, once (S21).
 
@@ -509,9 +513,33 @@ class DiesOnce(sd.Task[list[int]]):
     that is arranged: the lapse, the takeover and the second execution are
     the registry's and the tick's own.
 
+    **The death is recorded, durably, before it happens.** The renewal's
+    answer carries the new expiry by the registry's clock, and the worker
+    uploads it as a JSON artifact (``DEATH_ARTIFACT_NAME``: the execution
+    id and ``claim_expires_at``) before exiting. That is what lets S21
+    assert "the takeover came no earlier than the lapse" on server
+    timestamps alone, after the fact, instead of polling for a transient
+    "lapsed but not yet taken over" window that a lingering tick can close
+    within a second (STA-140).
+
+    **Modal re-runs the killed input, and that cannot be switched off from
+    here.** A crashed container's input is restarted on the same function
+    call -- so under the same execution id -- whatever the function's
+    ``retries`` (that setting covers exceptions and timeouts, not crashes).
+    Any death Modal would *not* restart -- an exception, a cancellation --
+    goes through the reporter and is reported, which is the opposite of
+    the dead worker this task models. So the restart is made inert rather
+    than prevented: a container whose execution already has a recorded
+    death exits hard at once, without renewing. Left to renew, it would
+    push the expiry later by however long Modal took to restart it, and
+    the lapse would no longer be the one on record. A restart that lands
+    after the takeover never reaches ``run`` at all: the reporter's start
+    is refused ``execution_not_current`` and the container stands down.
+
     "First" is read off the registry, not off local state, because a
-    container has none that survives it: an execution whose build ledger
-    holds no other execution of this task is the first.
+    container has none that survives it: an execution alone on the build's
+    ledger is the first, and so is one whose claim a later execution has
+    since taken over.
     """
 
     salt: str
@@ -524,26 +552,66 @@ class DiesOnce(sd.Task[list[int]]):
         import sys
         from uuid import UUID
 
+        from stardag.artifact import JSONArtifact
         from stardag.registry import registry_provider
 
         registry = registry_provider.get()
         execution_id = UUID(os.environ["STARDAG_EXECUTION_ID"])
         build_id = UUID(os.environ["STARDAG_BUILD_ID"])
+        plan_id = UUID(os.environ["STARDAG_PLAN_ID"])
         mine = [
             e
             for e in registry.build_list_executions(build_id, include_ended=True)
             if e.task_id == str(self.id)
         ]
-        if len(mine) <= 1:
+        # Alone on the ledger, or the execution a takeover replaced: a Modal
+        # restart of the dead execution (same id) can pass its start just
+        # before the takeover and read the ledger just after it, and must
+        # still take the hard exit rather than run the task -- a late end
+        # report is refused, but it would still end the dead execution's
+        # ledger row, which no report from it is supposed to reach.
+        taken_over = any(
+            e.id == execution_id and e.claim_outcome == "taken_over" for e in mine
+        )
+        if len(mine) <= 1 or taken_over:
+            # Everything below exits hard, including a failed call: an
+            # exception out of ``run`` would be reported as a task failure,
+            # and this worker must not report anything.
+            what = "exiting hard, unreported"
             try:
-                registry.claim_renew(
-                    str(self.id),
-                    execution_id=execution_id,
-                    claim_ttl_seconds=self.lapse_seconds,
+                restarted = any(
+                    a.name == DEATH_ARTIFACT_NAME
+                    and (a.body or {}).get("execution_id") == str(execution_id)
+                    for a in registry.task_list_artifacts(str(self.id))
                 )
+                if restarted:
+                    what = "a restart of an execution already dead; exiting again"
+                else:
+                    renewed = registry.claim_renew(
+                        str(self.id),
+                        execution_id=execution_id,
+                        claim_ttl_seconds=self.lapse_seconds,
+                    )
+                    assert renewed.claim_expires_at is not None
+                    registry.task_upload_artifacts(
+                        plan_id,
+                        str(self.id),
+                        [
+                            JSONArtifact(
+                                name=DEATH_ARTIFACT_NAME,
+                                body={
+                                    "execution_id": str(execution_id),
+                                    "claim_expires_at": (
+                                        renewed.claim_expires_at.isoformat()
+                                    ),
+                                },
+                            )
+                        ],
+                        execution_id=execution_id,
+                    )
             finally:
                 print(
-                    f"[registry-live] DiesOnce {self.id}: exiting hard, unreported",
+                    f"[registry-live] DiesOnce {self.id}: {what}",
                     file=sys.stderr,
                     flush=True,
                 )

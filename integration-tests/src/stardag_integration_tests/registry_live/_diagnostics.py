@@ -93,6 +93,15 @@ TIMEOUT_MARKER_NAME = "transport-timeouts"
 # recovery of its own.
 NON_TIMEOUT_MARKER_NAME = "non-timeout-failures"
 
+# The phase a timeout during *collection* is recorded under, in place of
+# pytest's setup/call/teardown (STA-97). Every scenario module calls the
+# guard at import, so a registry that does not answer then fails the
+# module's collection rather than any test. Its lines in the timeout marker
+# are counted like any other occurrence, but CI keys on this tag to refuse
+# the retry: the guard already retried the round trip four times, and the
+# tier's retry over the same condition would be a second layer owning it.
+COLLECT_PHASE = "collect"
+
 # ``CLASSIFICATION_FAILED`` is imported from ``_harness`` above rather
 # than defined here: ``record_recycle`` lives there and has to fail
 # closed too, and this module already depends on that one.
@@ -674,9 +683,14 @@ def _facts(
 
 
 # What a timeout at each phase cost, which is no longer the same sentence
-# for all three. A call-phase timeout means no assertion was reached; a
+# for any two of them. A call-phase timeout means no assertion was reached; a
 # teardown one can follow a body that passed and proved what it set out to.
 _WHAT_WAS_LOST = {
+    COLLECT_PHASE: (
+        "The module was never collected -- the guard that runs at its "
+        "import gave up after its own retries -- so none of its scenarios "
+        "ran. Not retried by CI: the guard owns that retry."
+    ),
     "setup": "The scenario never started, so it proved nothing.",
     "call": "No assertion in this scenario was ever evaluated.",
     "teardown": (

@@ -67,8 +67,12 @@ async def full_limits(
 ) -> list[str]:
     """The keys among ``keys`` whose limit is full without this task.
 
-    The limit rows are locked ``FOR UPDATE`` in key order, so two claims on
-    one key serialise here and the second counts the first's slot. A slot
+    The limit rows are locked ``FOR UPDATE``, so two claims on one key
+    serialise here and the second counts the first's slot. The statement is
+    ordered by key, which keeps two claims sharing several keys to one
+    order in practice; Postgres does not guarantee that a locking
+    ``SELECT`` acquires in its ``ORDER BY`` order, and a deadlock that slips
+    through is retried at the request boundary (``services/tx.py``). A slot
     is a limit key joined to a **live** claim on its task; a key with no
     limit row is unlimited.
     """
@@ -106,9 +110,9 @@ async def full_limits(
 async def lock_held_limits(
     session: AsyncSession, environment_id: UUID, task_pk: UUID
 ) -> None:
-    """Lock the limit rows of the task's recorded keys ``FOR UPDATE``, in
-    key order — the order a claiming start locks them in (after the task
-    row, as there). A renewal takes them before it extends the expiry, so
+    """Lock the limit rows of the task's recorded keys ``FOR UPDATE``, after
+    the task row, as a claiming start does (ordered by key like it, which
+    is not a guaranteed acquisition order: see :func:`full_limits`). A renewal takes them before it extends the expiry, so
     a claim sharing a key that counted this holder as lapsed has committed
     first (and the renewal then finds its claim lapsed), or waits for the
     renewal and counts it live: ``max_concurrent`` is never exceeded."""

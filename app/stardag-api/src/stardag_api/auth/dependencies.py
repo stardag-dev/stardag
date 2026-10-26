@@ -403,6 +403,20 @@ async def verify_environment_access(
     return environment
 
 
+def _detach(db: AsyncSession, *instances: object) -> None:
+    """Detach the auth context's rows from the request session.
+
+    The route's service shares that session, and a rollback expires every
+    instance in it -- a refused write, or a deadlock retry
+    (``services/tx.py``), which re-runs the service but not this
+    dependency. An expired instance would then lazy-load on its next read,
+    which an async session cannot do (``MissingGreenlet``, a 500). Detached,
+    their loaded columns stay readable for the rest of the request.
+    """
+    for instance in instances:
+        db.expunge(instance)
+
+
 # --- API Key Authentication ---
 
 
@@ -448,6 +462,11 @@ async def get_api_key_auth(
             detail="API key configuration error",
         )
 
+    # Commit the key's ``last_used_at`` (flushed on a validation-cache miss)
+    # on its own, so a service rolling back the request's transaction --
+    # a refusal, or a deadlock retry -- does not drop it.
+    await db.commit()
+    _detach(db, api_key, environment)
     return ApiKeyAuth(api_key=api_key, environment=environment)
 
 
@@ -529,6 +548,7 @@ async def get_sdk_auth(
             db, environment_id, token.workspace_id
         )
 
+        _detach(db, user, environment)
         return SdkAuth(
             environment=environment,
             workspace_id=UUID(token.workspace_id),

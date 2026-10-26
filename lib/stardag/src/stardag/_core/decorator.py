@@ -229,7 +229,7 @@ def task(
                 "implement run()/run_aio() as a generator method on a Task subclass."
             )
 
-        signature = inspect.signature(_func)
+        signature = _resolved_signature(_func)
         return_type = signature.return_annotation
         if return_type == inspect.Parameter.empty:
             raise ValueError("Return type must be annotated")
@@ -292,6 +292,38 @@ class _DependsOnMarker:
 
 
 Depends = typing.Annotated[_DependsT, _DependsOnMarker]
+
+
+def _resolved_signature(func: typing.Callable) -> inspect.Signature:
+    """Signature of ``func`` with string annotations evaluated.
+
+    Under ``from __future__ import annotations`` (PEP 563) every annotation is
+    the source text, e.g. ``"sd.Depends[list[int]]"``. Left as a string, the
+    ``Depends`` marker is invisible to ``_get_param_annotation``, so the
+    parameter would accept a raw value and its ``TaskLoads`` generic arg would
+    be an unresolved string. The same applies to an explicitly quoted
+    annotation (``values: "sd.Depends[T]"``), with or without the future
+    import. ``typing.get_type_hints`` resolves both, including a quoted
+    annotation inside a deferred one, and ``include_extras=True`` keeps the
+    ``Annotated`` metadata intact.
+
+    If evaluation fails -- most commonly a name that only exists in an
+    enclosing function's scope, so ``func.__globals__`` cannot resolve it --
+    fall back to the unevaluated signature, which is what was used before
+    annotations were resolved here, rather than failing the decoration.
+    """
+    signature = inspect.signature(func)
+    try:
+        hints = typing.get_type_hints(func, include_extras=True)
+    except Exception:
+        return signature
+    return signature.replace(
+        parameters=[
+            param.replace(annotation=hints.get(name, param.annotation))
+            for name, param in signature.parameters.items()
+        ],
+        return_annotation=hints.get("return", signature.return_annotation),
+    )
 
 
 def _get_param_annotation(func_annotation: typing.Any) -> typing.Any:

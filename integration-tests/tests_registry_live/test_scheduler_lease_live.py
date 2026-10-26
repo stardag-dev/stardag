@@ -38,6 +38,7 @@ from these scenarios -- but it can be waited *on* rather than asserted
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 from typing import Any, Awaitable, Callable
 from uuid import UUID, uuid4
 
@@ -296,16 +297,32 @@ def test_a_lapsed_lease_is_taken_over_on_the_real_clock() -> None:
         # releasing it -- which across containers is the only way it ever
         # ends.
         #
-        # ``asked_at`` is read *before* the request, so the server's expiry
-        # is at or after ``asked_at + ttl`` whatever the wire does. That is
-        # what makes the lower bound below unfalsifiable by latency: it can
-        # fail only if the server handed a still-live lease to a second
-        # owner.
+        # The lower bound below is taken on the **server's** clock, from
+        # the two expiries it echoes, and on nothing else (STA-66). The
+        # property is "the server never grants while its own stored expiry
+        # is still ahead of it", and both sides of that comparison are
+        # server readings: the dead tick's expiry is ``now + ttl`` at its
+        # grant, and the successor's grant time is its own expiry minus the
+        # TTL it asked for. This was measured from the client's send time
+        # until a live run read 3.3s against the 5s TTL. With one registry
+        # container, one row lock and this scenario's requests strictly
+        # sequential, that cannot be a lease race; it can only be the two
+        # clocks disagreeing, because the server times the lease on its
+        # wall clock, which may step, and the client measured on its
+        # monotonic one. A client-side bound therefore tested the server's
+        # clock discipline rather than the lease, and is kept below only
+        # as context in the failure message.
+        #
+        # A retried acquire cannot make this fail falsely. The echoed
+        # expiry is the dead tick's last *answered* grant; any attempt the
+        # server processed after it only moved the stored expiry later,
+        # which makes the successor's grant later still.
         asked_at = loop.time()
         first = await registry.scheduler_lease_acquire_aio(
             build_id, owner_id="dead-tick", ttl_seconds=MIN_TTL_SECONDS
         )
         assert first.held is True
+        assert first.expires_at is not None, "the grant carried no expiry"
 
         async def takeover():
             result = await registry.scheduler_lease_acquire_aio(
@@ -313,7 +330,7 @@ def test_a_lapsed_lease_is_taken_over_on_the_real_clock() -> None:
             )
             return result if result.held else None
 
-        await _wait_for(
+        successor = await _wait_for(
             takeover,
             poll_interval=0.5,
             what=(
@@ -321,11 +338,15 @@ def test_a_lapsed_lease_is_taken_over_on_the_real_clock() -> None:
                 "it to lapse, so that a successor can take it over"
             ),
         )
-        waited = loop.time() - asked_at
-        assert waited >= MIN_TTL_SECONDS, (
-            f"the takeover was granted {waited:.1f}s after the acquire was "
-            f"sent, which is inside its {MIN_TTL_SECONDS}s TTL: a live lease "
-            "was handed to a second owner"
+        assert successor.expires_at is not None, "the takeover carried no expiry"
+        granted_at = successor.expires_at - timedelta(seconds=LIVE_TTL_SECONDS)
+        early_by = (first.expires_at - granted_at).total_seconds()
+        assert early_by <= 0, (
+            f"the server granted the takeover {early_by:.3f}s before the "
+            f"expiry it had stored for the dead tick ({first.expires_at}), "
+            "by its own clock: a live lease was handed to a second owner "
+            f"(client-side, {loop.time() - asked_at:.1f}s had passed since "
+            "the dead tick's acquire was sent)"
         )
 
         # And the dead holder cannot renew its way back in.

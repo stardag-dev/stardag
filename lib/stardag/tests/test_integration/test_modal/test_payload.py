@@ -16,6 +16,8 @@ import importlib
 import json
 from collections import UserList
 import logging
+import threading
+import uuid
 import os
 import subprocess
 import sys
@@ -93,6 +95,41 @@ class StatefulTask(sd.Task[int]):
 
     def run(self) -> None:
         self._save(self.x)
+
+
+class StatefulParams(sd.StardagBaseModel):
+    a: int = 1
+    _cache: str | None = PrivateAttr(default=None)
+
+
+class NestedStateTask(sd.Task[int]):
+    """Models whose rebuild has no same-typed counterpart: one in an ``Any``
+    field (rebuilt as a dict), one inside a tuple inside a set."""
+
+    blob: Any = None
+    pairs: frozenset[tuple[str, StatefulParams]] = frozenset()
+
+    def run(self) -> None:
+        self._save(0)
+
+
+class OpaquePrivateTask(sd.Task[int]):
+    _lock: Any = PrivateAttr(default_factory=threading.Lock)
+
+    def run(self) -> None:
+        self._save(0)
+
+
+class FixedIdTask(sd.Task[int]):
+    """A fixed UUID default is deep-copied into each instance: equal, not
+    the same object, and nothing lost."""
+
+    _id: uuid.UUID = PrivateAttr(
+        default=uuid.UUID("12345678-1234-5678-1234-567812345678")
+    )
+
+    def run(self) -> None:
+        self._save(0)
 
 
 class DriftingNoteTask(sd.Task[int]):
@@ -312,6 +349,50 @@ class TestByValueFallback:
         assert to_task_payload(with_excluded) is with_excluded
         # At their defaults, there is nothing to lose.
         assert is_task_payload(to_task_payload(StatefulTask()))
+
+    def test_runtime_state_without_a_typed_counterpart_goes_by_value(self):
+        """Compared against the declared default when the rebuild holds a
+        dict or cannot be paired by type: still kept pickled."""
+        in_any = StatefulParams(a=2)
+        in_any._cache = "runtime"
+        in_set = StatefulParams(a=3)
+        in_set._cache = "runtime"
+        any_task = NestedStateTask(blob=in_any)
+        set_task = NestedStateTask(pairs=frozenset({("x", in_set)}))
+
+        assert to_task_payload(any_task) is any_task
+        assert to_task_payload(set_task) is set_task
+        # The same shapes without state go as payloads.
+        plain = NestedStateTask(
+            blob=StatefulParams(a=2), pairs=frozenset({("x", StatefulParams(a=3))})
+        )
+        assert is_task_payload(to_task_payload(plain))
+
+    def test_a_failing_state_check_goes_by_value_saying_so(self, caplog, monkeypatch):
+        """Not reported as a rehydration failure: the round trip succeeded,
+        the state check did not."""
+
+        def broken(original, rebuilt):
+            raise RecursionError("too deep")
+
+        monkeypatch.setattr(_payload, "state_outside_body", broken)
+        monkeypatch.setattr(_payload, "_warned_by_value", set())
+        caplog.set_level(logging.WARNING, logger=_payload.__name__)
+        task = StatefulTask(x=11)
+
+        assert to_task_payload(task) is task
+        (warning,) = [r for r in caplog.records if "by value" in r.getMessage()]
+        assert "state could not be checked" in warning.getMessage()
+        assert "rehydrated" not in warning.getMessage()
+
+    def test_an_equal_opaque_default_goes_as_a_payload(self):
+        assert is_task_payload(to_task_payload(FixedIdTask()))
+
+    def test_untouched_opaque_defaults_still_go_by_value(self):
+        """Resident behaviour is unchanged: any difference keeps the pickle,
+        decidable or not, as it did before the reactive policy split."""
+        task = OpaquePrivateTask()
+        assert to_task_payload(task) is task
 
     def test_a_lossy_non_significant_field_goes_by_value(self, caplog):
         """The id check alone would pass this task; the full-body fixed

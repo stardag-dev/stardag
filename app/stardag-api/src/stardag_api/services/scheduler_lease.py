@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from stardag_api.models import Build
 from stardag_api.models.base import utc_now
 from stardag_api.services.errors import BadRequest, NotFound
-from stardag_api.services.tx import transaction
+from stardag_api.services.tx import retry_on_deadlock, transaction
 
 #: Bounds on a scheduler lease's TTL, in seconds.
 MIN_LEASE_TTL_SECONDS = 5
@@ -71,6 +71,7 @@ def _owner(owner_id: str) -> str:
     return owner_id
 
 
+@retry_on_deadlock
 async def acquire_lease(
     session: AsyncSession,
     environment_id: UUID,
@@ -94,6 +95,7 @@ async def acquire_lease(
         return LeaseState(build_id, held=True, expires_at=build.scheduler_lease_until)
 
 
+@retry_on_deadlock
 async def renew_lease(
     session: AsyncSession,
     environment_id: UUID,
@@ -114,6 +116,7 @@ async def renew_lease(
         return LeaseState(build_id, held=True, expires_at=build.scheduler_lease_until)
 
 
+@retry_on_deadlock
 async def release_lease(
     session: AsyncSession, environment_id: UUID, build_id: UUID, *, owner_id: str
 ) -> LeaseState:

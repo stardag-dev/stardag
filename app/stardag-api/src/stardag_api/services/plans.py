@@ -32,7 +32,7 @@ from stardag_api.services.errors import Conflict, RecordedConflict
 from stardag_api.services.event_log import EventClock
 from stardag_api.services.registration import PlanState, get_plan, lock_build
 from stardag_api.services.registration_chunk import admit_members, differing_fields
-from stardag_api.services.tx import transaction
+from stardag_api.services.tx import retry_on_deadlock, transaction
 
 
 @dataclass(frozen=True)
@@ -58,6 +58,7 @@ class ClosureResult:
 # ---------------------------------------------------------------------------
 
 
+@retry_on_deadlock
 async def seal_plan(
     session: AsyncSession, environment_id: UUID, plan_id: UUID
 ) -> PlanState:
@@ -206,6 +207,7 @@ _REACHABLE_NON_MEMBERS = text(
 ).columns(task_id=String, task_pk=Uuid, instance_id=Uuid, body=JSONB)
 
 
+@retry_on_deadlock
 async def closure(
     session: AsyncSession, environment_id: UUID, plan_id: UUID
 ) -> ClosureResult:
