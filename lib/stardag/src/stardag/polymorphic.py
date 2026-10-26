@@ -13,7 +13,6 @@ from typing import (
     Any,
     ClassVar,
     Literal,
-    Tuple,
     Type,
     TypeVar,
     Union,
@@ -563,7 +562,9 @@ class PolymorphicRoot(StardagBaseModel):
 
     def __class_getitem__(
         cls: Type[BaseModel],
-        params: Union[Type[Any], Tuple[Type[Any], ...]],
+        # ``Any`` rather than a type form: pydantic's own annotation for this
+        # parameter changed in 2.14, and an override must accept either.
+        params: Any,
     ) -> Type[Any]:
         """Hack to be able to access the generic type of the class from subclasses. See:
         https://github.com/pydantic/pydantic/discussions/4904#discussioncomment-4592052
