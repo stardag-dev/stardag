@@ -22,7 +22,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from stardag_api.config import settings as app_settings
 from stardag_api.models.base import utc_now
-from stardag_api.services import builds, reactive, transitions, wakeups
+from stardag_api.services import (
+    builds,
+    reactive,
+    scheduler_lease,
+    transitions,
+    wakeups,
+)
 from stardag_api.services.errors import Conflict
 from stardag_api.services.transitions import Transition
 from tests.v2_support import ENV, Harness, item, observed
@@ -409,7 +415,9 @@ async def test_notify_flags_a_running_build_and_reports_a_live_scheduler(
     await _sql(
         h, "UPDATE build_wake SET tick_requested_at = NULL WHERE build_id = :b", b=build
     )
-    await _svc(h, wakeups.acquire_lease, build, owner_id="tick-1", ttl_seconds=60)
+    await _svc(
+        h, scheduler_lease.acquire_lease, build, owner_id="tick-1", ttl_seconds=60
+    )
     state = await _svc(h, wakeups.notify, build)
     assert state.needs_tick and state.scheduler_live is True
     assert (await h.build(build))["tick_requested_at"] is None
@@ -441,7 +449,7 @@ async def test_wake_candidates_hand_each_build_out_once_per_window(h: Harness):
             b=build,
         )
     leased, quiet, not_reactive = built[0], built[1], (await h.planned([t], [t]))[0]
-    await _svc(h, wakeups.acquire_lease, leased, owner_id="o", ttl_seconds=60)
+    await _svc(h, scheduler_lease.acquire_lease, leased, owner_id="o", ttl_seconds=60)
     await _svc(h, wakeups.clear_notify, quiet)
     await _sql(
         h,
@@ -476,9 +484,9 @@ async def test_a_flag_after_the_handed_out_tick_ended_is_handed_out_again(
     await _svc(h, wakeups.notify, build, can_spawn=False)
     assert [c.build_id for c in await _svc(h, wakeups.wake_candidates)] == [build]
 
-    await _svc(h, wakeups.acquire_lease, build, owner_id="tick", ttl_seconds=60)
+    await _svc(h, scheduler_lease.acquire_lease, build, owner_id="tick", ttl_seconds=60)
     await _svc(h, wakeups.clear_notify, build)
-    await _svc(h, wakeups.release_lease, build, owner_id="tick")
+    await _svc(h, scheduler_lease.release_lease, build, owner_id="tick")
     assert await _svc(h, wakeups.wake_candidates) == []  # nothing new yet
 
     await _svc(h, wakeups.notify, build, can_spawn=False)
@@ -500,7 +508,7 @@ async def test_the_window_still_collapses_askers_until_the_tick_has_run(
         await _svc(h, wakeups.notify, build, can_spawn=False)
         assert await _svc(h, wakeups.wake_candidates) == []
 
-    await _svc(h, wakeups.acquire_lease, build, owner_id="tick", ttl_seconds=60)
+    await _svc(h, scheduler_lease.acquire_lease, build, owner_id="tick", ttl_seconds=60)
     await _svc(h, wakeups.notify, build, can_spawn=False)
     assert await _svc(h, wakeups.wake_candidates) == []
 
@@ -513,8 +521,10 @@ async def test_only_the_holders_release_spends_a_hand_out(h: Harness):
     await _reactive(h, build)
     await _svc(h, wakeups.notify, build, can_spawn=False)
     assert len(await _svc(h, wakeups.wake_candidates)) == 1  # stamped
-    await _svc(h, wakeups.acquire_lease, build, owner_id="tick", ttl_seconds=60)
-    assert not (await _svc(h, wakeups.release_lease, build, owner_id="other")).held
+    await _svc(h, scheduler_lease.acquire_lease, build, owner_id="tick", ttl_seconds=60)
+    assert not (
+        await _svc(h, scheduler_lease.release_lease, build, owner_id="other")
+    ).held
     await _sql(
         h,
         "UPDATE build SET scheduler_lease_until = now() - interval '1 second'"
@@ -524,8 +534,8 @@ async def test_only_the_holders_release_spends_a_hand_out(h: Harness):
     await _svc(h, wakeups.notify, build, can_spawn=False)
     assert await _svc(h, wakeups.wake_candidates) == []
 
-    await _svc(h, wakeups.acquire_lease, build, owner_id="tick", ttl_seconds=60)
-    await _svc(h, wakeups.release_lease, build, owner_id="tick")
+    await _svc(h, scheduler_lease.acquire_lease, build, owner_id="tick", ttl_seconds=60)
+    await _svc(h, scheduler_lease.release_lease, build, owner_id="tick")
     assert len(await _svc(h, wakeups.wake_candidates)) == 1  # spent, re-stamped
     await _svc(h, wakeups.notify, build, can_spawn=False)
     assert await _svc(h, wakeups.wake_candidates) == []  # the new stamp holds
@@ -537,7 +547,7 @@ async def test_a_lapsed_holders_release_spends_no_hand_out(h: Harness):
     t = item("T")
     build, _ = await h.planned([t], [t])
     await _reactive(h, build)
-    await _svc(h, wakeups.acquire_lease, build, owner_id="old", ttl_seconds=60)
+    await _svc(h, scheduler_lease.acquire_lease, build, owner_id="old", ttl_seconds=60)
     await _sql(
         h,
         "UPDATE build SET scheduler_lease_until = now() - interval '1 second'"
@@ -546,7 +556,7 @@ async def test_a_lapsed_holders_release_spends_no_hand_out(h: Harness):
     )
     await _svc(h, wakeups.notify, build, can_spawn=False)
     assert len(await _svc(h, wakeups.wake_candidates)) == 1  # the successor
-    assert (await _svc(h, wakeups.release_lease, build, owner_id="old")).held
+    assert (await _svc(h, scheduler_lease.release_lease, build, owner_id="old")).held
     assert (await h.build(build))["scheduler_lease_released_at"] is None
     await _svc(h, wakeups.notify, build, can_spawn=False)
     assert await _svc(h, wakeups.wake_candidates) == []
@@ -560,8 +570,8 @@ async def test_a_notify_stamp_is_newer_than_any_release_before_its_check(
     t = item("T")
     build, _ = await h.planned([t], [t])
     await _reactive(h, build)
-    await _svc(h, wakeups.acquire_lease, build, owner_id="tick", ttl_seconds=60)
-    await _svc(h, wakeups.release_lease, build, owner_id="tick")
+    await _svc(h, scheduler_lease.acquire_lease, build, owner_id="tick", ttl_seconds=60)
+    await _svc(h, scheduler_lease.release_lease, build, owner_id="tick")
     state = await _svc(h, wakeups.notify, build)
     assert not state.scheduler_live
     row = await h.build(build)
@@ -575,13 +585,311 @@ async def test_a_release_leaves_the_wake_row_unlocked_for_flaggers(h: Harness):
     t = item("T")
     build, _ = await h.planned([t], [t])
     await _reactive(h, build)
-    await _svc(h, wakeups.acquire_lease, build, owner_id="tick", ttl_seconds=60)
+    await _svc(h, scheduler_lease.acquire_lease, build, owner_id="tick", ttl_seconds=60)
     before = await h.build(build)
-    await _svc(h, wakeups.release_lease, build, owner_id="tick")
+    await _svc(h, scheduler_lease.release_lease, build, owner_id="tick")
     after = await h.build(build)
     assert after["tick_requested_at"] == before["tick_requested_at"]
     assert after["needs_tick_at"] == before["needs_tick_at"]
     assert after["scheduler_lease_released_at"] is not None
+
+
+# --------------------------------------------------------------------------
+# A clear never passes a flag (STA-122)
+# --------------------------------------------------------------------------
+
+
+async def _pid(s: Any) -> int:
+    return await s.scalar(text("SELECT pg_backend_pid()"))
+
+
+async def _blocked_by(h: Harness, waiter: int, holder: int) -> None:
+    """Wait until backend ``waiter`` is waiting on a lock ``holder`` holds:
+    the proof that two sessions actually interleaved at the lock."""
+    for _ in range(250):
+        async with h.sf() as probe:
+            blocking = await probe.scalar(
+                text("SELECT pg_blocking_pids(:p)"), {"p": waiter}
+            )
+        if holder in blocking:
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"backend {waiter} never waited on backend {holder}")
+
+
+async def _two_holders(h: Harness) -> tuple[UUID, Any, Any, UUID]:
+    """Build ``b`` (reactive, unflagged) holds T; a source build's plan runs
+    T. Returns (b, the source plan, T, the running execution)."""
+    deployment = await h.new_deployment()
+    t = item("T")
+    _, plan_a = await h.planned([t], [t], deployment_id=deployment)
+    build_b, _ = await h.planned([t], [t], deployment_id=deployment)
+    await _reactive(h, build_b)
+    execution = await h.start(plan_a.id, t)
+    await _clear(h, build_b)
+    return build_b, plan_a, t, execution
+
+
+async def test_a_flag_arriving_mid_clear_waits_for_it_and_survives(h: Harness):
+    """The issue's interleaving: a tick's clear holds the wake row when a
+    transition that is news for the build flags it. The flagger used to
+    ``SKIP LOCKED`` past the row and the clear then erased nothing it could
+    see, so the wake-up was lost. Now it waits for the clear (shown by
+    ``pg_blocking_pids``) and the flag it sets afterwards survives."""
+    build_b, plan_a, t, execution = await _two_holders(h)
+
+    async def complete(pids: list[int]) -> None:
+        async with h.sf() as s:
+            pids.append(await _pid(s))
+            await transitions.apply_member_transition(
+                s,
+                ENV,
+                plan_id=plan_a.id,
+                task_id=t.task_id,
+                transition=Transition.complete(execution),
+            )
+
+    async with h.sf() as clearing:
+        async with clearing.begin():
+            clearer = await _pid(clearing)
+            await wakeups._clear_flag(clearing, ENV, build_b)
+            pids: list[int] = []
+            flagging = asyncio.create_task(complete(pids))
+            while not pids:
+                await asyncio.sleep(0.01)
+            await _blocked_by(h, pids[0], clearer)
+            assert not flagging.done()
+    await asyncio.wait_for(flagging, 5)
+    assert await _flagged(h, build_b)
+
+
+async def _complete_in(s: Any, plan_id: UUID, it: Any, execution: UUID) -> None:
+    """A completion inside ``s``'s open transaction (not committed)."""
+    await transitions.transition_task(
+        s,
+        ENV,
+        task_pk=(await _task_pk(s, it)),
+        plan_id=plan_id,
+        transition=Transition.complete(execution),
+        now=utc_now(),
+    )
+
+
+async def _task_pk(s: Any, it: Any) -> UUID:
+    return await s.scalar(
+        text("SELECT id FROM task WHERE environment_id = :env AND task_id = :tid"),
+        {"env": ENV, "tid": it.task_id},
+    )
+
+
+async def test_a_clear_never_passes_a_flagger_in_flight_that_wrote_nothing(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+):
+    """The class behind the issue: a flagger in flight that did not write
+    the row (here it was already flagged, so step 2 has nothing to do) must
+    still keep a clear off it until it commits, or the tick reads the
+    frontier without its news and the clear leaves no flag. The clear
+    waits on the flagger's ``KEY SHARE`` (``pg_blocking_pids``), gives up
+    at its lock timeout, and leaves the flag set."""
+    monkeypatch.setattr(wakeups, "CLEAR_LOCK_TIMEOUT_MS", 1500)
+    build_b, plan_a, t, execution = await _two_holders(h)
+    await _svc(h, wakeups.notify, build_b)  # flagged, committed
+
+    async with h.sf() as flagging:
+        async with flagging.begin():
+            flagger = await _pid(flagging)
+            await asyncio.wait_for(_complete_in(flagging, plan_a.id, t, execution), 5)
+            pids: list[int] = []
+
+            async def clear() -> wakeups.NotifyState:
+                async with h.sf() as s:
+                    pids.append(await _pid(s))
+                    return await wakeups.clear_notify(s, ENV, build_b)
+
+            clearing = asyncio.create_task(clear())
+            while not pids:
+                await asyncio.sleep(0.01)
+            await _blocked_by(h, pids[0], flagger)
+            state = await asyncio.wait_for(clearing, 5)
+            assert state.needs_tick, "not cleared: a flagger is in flight"
+    assert (await h.task(t))["status"] == "completed"
+    assert await _flagged(h, build_b)
+
+
+async def test_a_clear_returns_promptly_while_a_flagger_holds_the_row(h: Harness):
+    """No starvation: ``KEY SHARE`` is granted past a queued ``FOR UPDATE``,
+    so overlapping flaggers would hold an unbounded clear off forever. The
+    clear gives up within its lock timeout and leaves the flag set."""
+    t = item("T")
+    build, _ = await h.planned([t], [t])
+    await _svc(h, wakeups.notify, build)
+    async with h.sf() as flagger:
+        async with flagger.begin():
+            await flagger.execute(
+                text("SELECT 1 FROM build_wake WHERE build_id = :b FOR KEY SHARE"),
+                {"b": build},
+            )
+            loop = asyncio.get_running_loop()
+            began = loop.time()
+            state = await asyncio.wait_for(_svc(h, wakeups.clear_notify, build), 5)
+            elapsed = loop.time() - began
+            assert state.needs_tick
+            assert elapsed < wakeups.CLEAR_LOCK_TIMEOUT_MS / 1000 + 1.0
+    assert await _flagged(h, build)
+    # Unheld, the clear clears.
+    assert not (await _svc(h, wakeups.clear_notify, build)).needs_tick
+    assert not await _flagged(h, build)
+
+
+async def test_a_clear_is_bounded_under_overlapping_flaggers(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+):
+    """``lock_timeout`` bounds each lock wait, not the clear: holders that
+    overlap, each leaving before the timeout while the next has already
+    been granted past the queued clear, would renew its wait forever. The
+    clear's whole statement is bounded, so it still gives up in time."""
+    monkeypatch.setattr(wakeups, "CLEAR_LOCK_TIMEOUT_MS", 400)
+    t = item("T")
+    build, _ = await h.planned([t], [t])
+    await _svc(h, wakeups.notify, build)
+    stop = asyncio.Event()
+
+    async def hold(release: asyncio.Event, granted: asyncio.Event) -> None:
+        async with h.sf() as s:
+            async with s.begin():
+                await s.execute(
+                    text("SELECT 1 FROM build_wake WHERE build_id = :b FOR KEY SHARE"),
+                    {"b": build},
+                )
+                granted.set()
+                await release.wait()
+
+    async def rotate() -> None:
+        # Always one holder; each is released 150 ms after the next one is
+        # granted, which is shorter than the lock timeout.
+        release, granted = asyncio.Event(), asyncio.Event()
+        current = asyncio.create_task(hold(release, granted))
+        await granted.wait()
+        while not stop.is_set():
+            await asyncio.sleep(0.15)
+            nxt_release, nxt_granted = asyncio.Event(), asyncio.Event()
+            nxt = asyncio.create_task(hold(nxt_release, nxt_granted))
+            await asyncio.wait_for(nxt_granted.wait(), 5)
+            release.set()
+            await current
+            release, current = nxt_release, nxt
+        release.set()
+        await current
+
+    rotating = asyncio.create_task(rotate())
+    try:
+        await asyncio.sleep(0.2)
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        state = await asyncio.wait_for(_svc(h, wakeups.clear_notify, build), 10)
+        elapsed = loop.time() - began
+    finally:
+        stop.set()
+        await rotating
+    assert state.needs_tick
+    assert elapsed < 0.4 + 1.0, elapsed
+    assert await _flagged(h, build)
+
+
+async def test_a_flagger_skips_an_unflagged_row_its_holder_is_flagging(
+    h: Harness,
+):
+    """Step 2 really skips: another writer holds the *unflagged* row while
+    setting the flag (as ``notify`` does), so the flagger passes it over
+    without waiting and writes nothing to it. The flag the holder commits
+    survives a clear attempted while the flagger is still in flight."""
+    build_b, plan_a, t, execution = await _two_holders(h)
+    async with h.sf() as flagging:
+        async with flagging.begin():
+            async with h.sf() as holder:
+                async with holder.begin():
+                    await holder.execute(
+                        text(
+                            "SELECT 1 FROM build_wake WHERE build_id = :b"
+                            " FOR NO KEY UPDATE"
+                        ),
+                        {"b": build_b},
+                    )
+                    await holder.execute(
+                        text(
+                            "UPDATE build_wake SET needs_tick_at = now()"
+                            " WHERE build_id = :b"
+                        ),
+                        {"b": build_b},
+                    )
+                    # Would block on the holder if it tried the row.
+                    await asyncio.wait_for(
+                        _complete_in(flagging, plan_a.id, t, execution), 5
+                    )
+                    own_view = await flagging.scalar(
+                        text(
+                            "SELECT needs_tick_at FROM build_wake WHERE build_id = :b"
+                        ),
+                        {"b": build_b},
+                    )
+                    assert own_view is None, "the flagger wrote the row"
+            state = await asyncio.wait_for(_svc(h, wakeups.clear_notify, build_b), 5)
+            assert state.needs_tick
+    assert (await h.task(t))["status"] == "completed"
+    assert await _flagged(h, build_b)
+
+
+async def test_notify_re_asserts_a_flag_cleared_between_its_transactions(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+):
+    """``notify`` holds the wake row in its second transaction, so a flagger
+    skips it there; that is safe only if the row is left flagged. A tick
+    clearing between the two transactions must therefore not leave it
+    unflagged."""
+    t = item("T")
+    build, _ = await h.planned([t], [t])
+    original = wakeups._locked_wake
+    calls = 0
+
+    async def locked_wake(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        if not kwargs.get("exclusive"):  # notify's own, not the clear's
+            calls += 1
+            if calls == 2:
+                await _clear(h, build)
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(wakeups, "_locked_wake", locked_wake)
+    state = await _svc(h, wakeups.notify, build)
+    assert calls == 2 and state.needs_tick
+    assert await _flagged(h, build)
+
+
+async def test_notify_flags_a_build_resumed_between_its_transactions(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+):
+    """The re-assertion reads the status under the second transaction's
+    lock: a build that was terminal for the first and resumed before the
+    second is RUNNING when a flagger may skip the held row, so it is left
+    flagged."""
+    t = item("T")
+    build, _ = await h.planned([t], [t])
+    await _svc(h, builds.cancel_build, build)
+    original = wakeups._locked_wake
+    calls = 0
+
+    async def locked_wake(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            await _svc(h, builds.resume_build, build)
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(wakeups, "_locked_wake", locked_wake)
+    await _svc(h, wakeups.notify, build)
+    assert calls == 2
+    assert (await h.build(build))["status"] == "running"
+    assert await _flagged(h, build)
 
 
 # --------------------------------------------------------------------------
@@ -607,13 +915,17 @@ async def test_stalled_builds_are_the_flags_and_leases_nobody_served(h: Harness)
             b=build,
         )
     await _svc(h, wakeups.notify, fresh, can_spawn=False)
-    await _svc(h, wakeups.acquire_lease, served, owner_id="live", ttl_seconds=60)
+    await _svc(
+        h, scheduler_lease.acquire_lease, served, owner_id="live", ttl_seconds=60
+    )
     for build, owner in ((lapsed, "dead"), (released, "done")):
-        await _svc(h, wakeups.acquire_lease, build, owner_id=owner, ttl_seconds=60)
+        await _svc(
+            h, scheduler_lease.acquire_lease, build, owner_id=owner, ttl_seconds=60
+        )
         await _sql(
             h, f"UPDATE build SET scheduler_lease_until = {old} WHERE id = :b", b=build
         )
-    await _svc(h, wakeups.release_lease, released, owner_id="done")
+    await _svc(h, scheduler_lease.release_lease, released, owner_id="done")
 
     stalled = await _svc(h, wakeups.stalled_builds, older_than=timedelta(minutes=5))
     assert {(s.build_id, s.reason) for s in stalled} == {
@@ -633,7 +945,9 @@ async def test_stalled_builds_are_ordered_by_the_since_they_report(h: Harness):
     lapsed, flagged = [(await h.planned([t], [t]))[0] for _ in range(2)]
     await _reactive(h, lapsed, flagged)
     await _clear(h, lapsed, flagged)
-    await _svc(h, wakeups.acquire_lease, lapsed, owner_id="dead", ttl_seconds=60)
+    await _svc(
+        h, scheduler_lease.acquire_lease, lapsed, owner_id="dead", ttl_seconds=60
+    )
     await _sql(
         h,
         "UPDATE build SET scheduler_lease_until = now() - interval '20 minutes'"
@@ -695,17 +1009,23 @@ async def test_a_late_hand_out_is_logged_as_a_delayed_wake_up(
 async def test_the_scheduler_lease_is_single_flight_and_owner_checked(h: Harness):
     t = item("T")
     build, _ = await h.planned([t], [t])
-    first = await _svc(h, wakeups.acquire_lease, build, owner_id="a", ttl_seconds=60)
+    first = await _svc(
+        h, scheduler_lease.acquire_lease, build, owner_id="a", ttl_seconds=60
+    )
     assert first.held and first.expires_at is not None
     assert not (
-        await _svc(h, wakeups.acquire_lease, build, owner_id="b", ttl_seconds=60)
+        await _svc(
+            h, scheduler_lease.acquire_lease, build, owner_id="b", ttl_seconds=60
+        )
     ).held
-    again = await _svc(h, wakeups.acquire_lease, build, owner_id="a", ttl_seconds=60)
+    again = await _svc(
+        h, scheduler_lease.acquire_lease, build, owner_id="a", ttl_seconds=60
+    )
     assert again.held  # a retried acquire is not a lost race
     assert not (
-        await _svc(h, wakeups.renew_lease, build, owner_id="b", ttl_seconds=60)
+        await _svc(h, scheduler_lease.renew_lease, build, owner_id="b", ttl_seconds=60)
     ).held
-    assert not (await _svc(h, wakeups.release_lease, build, owner_id="b")).held
+    assert not (await _svc(h, scheduler_lease.release_lease, build, owner_id="b")).held
 
     await _sql(
         h,
@@ -714,12 +1034,14 @@ async def test_the_scheduler_lease_is_single_flight_and_owner_checked(h: Harness
         b=build,
     )
     assert not (
-        await _svc(h, wakeups.renew_lease, build, owner_id="a", ttl_seconds=60)
+        await _svc(h, scheduler_lease.renew_lease, build, owner_id="a", ttl_seconds=60)
     ).held
-    taken = await _svc(h, wakeups.acquire_lease, build, owner_id="b", ttl_seconds=60)
+    taken = await _svc(
+        h, scheduler_lease.acquire_lease, build, owner_id="b", ttl_seconds=60
+    )
     assert taken.held
-    assert not (await _svc(h, wakeups.release_lease, build, owner_id="a")).held
-    assert (await _svc(h, wakeups.release_lease, build, owner_id="b")).held
+    assert not (await _svc(h, scheduler_lease.release_lease, build, owner_id="a")).held
+    assert (await _svc(h, scheduler_lease.release_lease, build, owner_id="b")).held
     assert (await h.build(build))["scheduler_lease_owner"] is None
 
 

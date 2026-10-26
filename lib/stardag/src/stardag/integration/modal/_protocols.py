@@ -51,6 +51,17 @@ class BuildFunction(typing.Protocol):
     define a custom build function in your own package and import it into
     the file you deploy, never directly in that file (see
     ``StardagApp(container_setup=...)`` for the rule and the error).
+
+    Implementations *may* additionally accept an optional keyword argument
+    ``worker_timeouts: dict[str, int] | None``, as the default ``Builder``
+    does. When the parameter is declared by name (a bare ``**kwargs`` does
+    not count), the deployed ``build`` function passes the per-worker Modal
+    ``timeout`` from the app's ``worker_settings``. Forward it to
+    ``ModalTaskExecutor(worker_timeouts=...)``: it sets the claim TTL of
+    each detached execution (the worker's timeout plus a grace period).
+    Without it, a detached execution claims with the registry's default
+    TTL (one hour), and a task running longer can be taken over by another
+    build while it is still running.
     """
 
     def __call__(
@@ -122,13 +133,29 @@ def _callable_accepts_env_overrides(fn: typing.Callable[..., typing.Any]) -> boo
     written against the older ``(task)``-only signature (before the optional
     ``env_overrides`` parameter was added).
     """
+    return _callable_accepts_keyword(fn, "env_overrides", var_keyword=True)
+
+
+def _callable_accepts_keyword(
+    fn: typing.Callable[..., typing.Any], name: str, *, var_keyword: bool
+) -> bool:
+    """Whether ``fn`` accepts a keyword argument ``name``.
+
+    ``var_keyword`` decides whether a bare ``**kwargs`` counts. It should
+    not when the callable is likely to splat its kwargs somewhere that
+    would reject the extra one (a custom build function forwarding them to
+    :func:`stardag.build`, say).
+    """
     try:
         signature = inspect.signature(fn)
     except (TypeError, ValueError):
         return False
     for param in signature.parameters.values():
-        if param.kind is inspect.Parameter.VAR_KEYWORD:
+        if var_keyword and param.kind is inspect.Parameter.VAR_KEYWORD:
             return True
-        if param.name == "env_overrides":
+        if param.name == name and param.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
             return True
     return False

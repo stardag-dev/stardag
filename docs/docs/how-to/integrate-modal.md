@@ -381,12 +381,19 @@ active stardag profile) as well as Modal credentials.
 Tasks run as detached Modal function calls by default, and workers report
 their own lifecycle to the registry — see [Orchestration on
 Modal](../concepts/modal-orchestration.md#detached-execution-and-self-reporting-workers)
-for what that buys. Two practical notes:
+for what that buys. Three practical notes:
 
 - A custom `run_function` that does not report the task lifecycle itself
   needs `ModalTaskExecutor(worker_reports_lifecycle=False)` (resident
   builds only: a reactive build needs self-reporting workers). Keep the
   deployed app on the same stardag as the driver: redeploy after upgrading.
+- Each detached execution claims with its worker's `timeout` plus a
+  grace period, so set an explicit worker `timeout` for long tasks. The
+  deployed `Builder` passes the timeouts from `worker_settings`; a
+  `ModalTaskExecutor` you construct yourself needs
+  `worker_timeouts={worker_name: seconds}`, or its claims get the
+  registry's default TTL (one hour) and a longer task can be taken over
+  while it still runs.
 - Executor metadata (app, workspace, environment, function name) is
   recorded with starts and surfaced in the UI as Modal deep links. The
   workspace is resolved from the cached Modal token; set
@@ -717,9 +724,13 @@ healer (its RUNNING task holds the slot until explicitly failed/cancelled
 via the API/UI — the worker-reporting/tick self-healing story above is
 reactive-only), and a legitimately long-running ref-less resident task can
 be force-failed once its claim lapses if it also appears in a concurrently
-ticking reactive build. Resident builds do not derive a claim TTL from an
-executor timeout, so such a task gets the registry's default expiry — keep
-that in mind if you mix modes over tasks that run longer than it.
+ticking reactive build. A resident build derives a detached execution's
+claim TTL from the worker's timeout only when its executor knows that
+timeout: the deployed `Builder` passes the app's worker timeouts, but a
+`ModalTaskExecutor` you construct yourself needs
+`worker_timeouts={worker_name: seconds}`. Without it, a task gets the
+registry's default expiry — keep that in mind if you mix modes over tasks
+that run longer than it.
 
 **Builds that overlap.** Task state is global to the environment, so a
 task another build owns holds yours back. A tick waits that out — whether
