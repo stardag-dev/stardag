@@ -41,6 +41,7 @@ from stardag.integration.modal._payload import (
 from stardag.integration.modal._reporter import report_unreadable_task
 from stardag.integration.modal._protocols import (
     _callable_accepts_env_overrides,
+    _callable_accepts_keyword,
     _RunFunctionWithEnv,
 )
 from stardag.integration.modal._selector import WorkerSelector
@@ -346,6 +347,16 @@ def _register_functions(
     # app supplied no hook, and after the first input in this container.
     container_setup = self.container_setup
     build_fn = self._build_function
+    # The workers' timeouts exist only here, at deploy time. A build
+    # function that declares ``worker_timeouts`` (the default Builder
+    # does) gets them, so its detached executions claim with the worker's
+    # timeout plus grace, as a reactive tick's do, rather than with the
+    # registry's default TTL.
+    build_fn_extra_kwargs: dict[str, typing.Any] = (
+        {"worker_timeouts": self._worker_timeouts()}
+        if _callable_accepts_keyword(build_fn, "worker_timeouts", var_keyword=False)
+        else {}
+    )
 
     def _modal_build(
         tasks: typing.Sequence[TaskOrPayload] | TaskOrPayload,
@@ -384,7 +395,13 @@ def _register_functions(
             if resume_build_id is not None:
                 _fail_build_best_effort(registry_provider.get(), resume_build_id, e)
             raise
-        return build_fn(roots, worker_selector, app_name, build_kwargs=build_kwargs)
+        return build_fn(
+            roots,
+            worker_selector,
+            app_name,
+            build_kwargs=build_kwargs,
+            **build_fn_extra_kwargs,
+        )
 
     run_fn = self._run_function
     # The ``RunFunction`` protocol gained an optional ``env_overrides``
