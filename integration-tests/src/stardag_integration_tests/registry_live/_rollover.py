@@ -180,7 +180,7 @@ def wait_until_the_deploy_serves(
     answers with its deploy's nonce, and a call answering with this one is a
     fresh container reaching the new code.
 
-    **Every probe is a fresh container** (``max_inputs=1`` on
+    **Every probe is a fresh container** (``single_use_containers`` on
     ``deploy_probe``), and that is load-bearing. Modal routes a call to a
     warm container of the previous deploy after a redeploy, and a short
     ``scaledown_window`` does not bound how long one stays warm: an idle
@@ -195,9 +195,9 @@ def wait_until_the_deploy_serves(
     throughout. It hit the second deploy of each app, the only one with a
     warm predecessor, and lengthened with the tier's load. Reproduced on an
     idle workspace with no in-flight work: the same old container answered
-    every 5 s probe for 46 s; with ``max_inputs=1`` the first probe after
-    the deploy answered with the new nonce, in 4-5 s (a cold start), also
-    with long calls still running on the old deploy.
+    every 5 s probe for 46 s; with single-use containers the first probe
+    after the deploy answered with the new nonce, in 4-5 s (a cold start),
+    also with long calls still running on the old deploy.
 
     Bounded: at ``timeout`` the deploy fails, since a scenario that carried
     on would be testing the previous deployment. The probing continues for

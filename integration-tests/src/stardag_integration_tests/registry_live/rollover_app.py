@@ -72,7 +72,7 @@ _nonce = os.environ.get(DEPLOY_NONCE_ENV, "")
     # lands now. A short ``scaledown_window`` alone did not get there (see
     # ``_rollover.wait_until_the_deploy_serves``): a warm container of the
     # previous deploy kept answering, kept alive by the probing itself.
-    max_inputs=1,
+    single_use_containers=True,
     scaledown_window=ROLLOVER_SCALEDOWN_SECONDS,
     name=DEPLOY_PROBE_FUNCTION,
 )
