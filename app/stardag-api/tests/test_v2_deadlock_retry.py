@@ -213,6 +213,25 @@ async def test_a_deadlock_before_any_commit_is_retried(async_session, monkeypatc
     assert await flaky(async_session) == tx.MAX_ATTEMPTS
 
 
+async def test_the_session_may_be_passed_by_keyword(async_session, monkeypatch):
+    monkeypatch.setattr(tx, "BACKOFF_BASE_SECONDS", 0)
+    calls = 0
+
+    class _Deadlock(Exception):
+        sqlstate = tx.DEADLOCK_DETECTED
+
+    @tx.retry_on_deadlock
+    async def flaky(session) -> int:
+        nonlocal calls
+        calls += 1
+        async with tx.transaction(session):
+            if calls == 1:
+                raise DBAPIError("SELECT 1", None, _Deadlock())
+            return calls
+
+    assert await flaky(session=async_session) == 2
+
+
 # ---------------------------------------------------------------------------
 # Every service transaction is covered
 # ---------------------------------------------------------------------------

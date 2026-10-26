@@ -113,7 +113,7 @@ def retry_on_deadlock(
 ) -> Callable[P, Awaitable[R]]:
     """Re-run the service call ``fn`` when Postgres aborts its transaction
     as a deadlock victim; see the module docstring for the contract ``fn``
-    must meet. ``fn`` takes the session as its first argument.
+    must meet. ``fn`` takes the session as its first parameter, ``session``.
 
     At most :data:`MAX_ATTEMPTS` attempts, with jittered backoff between
     them, each logged; the last attempt's deadlock propagates. A decorated
@@ -124,7 +124,9 @@ def retry_on_deadlock(
     async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         if _scope.get() is not None:
             return await fn(*args, **kwargs)
-        session = args[0]
+        # The session is the first parameter, named ``session``, passed
+        # positionally or by keyword.
+        session = args[0] if args else kwargs.get("session")
         assert isinstance(session, AsyncSession), "the session comes first"
         attempt = 1
         while True:
