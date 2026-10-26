@@ -19,12 +19,13 @@ of *this* module stands in for new code that changed a root's identity (S20)
 or added a field to a nested parameter model (S40).
 
 Every function scales down within ``ROLLOVER_SCALEDOWN_SECONDS`` of its
-last input, so no warm container of an old deploy is left for a new spawn to
-land in; and ``deploy_probe`` answers with the nonce its deploy was given, so
-the deploying scenario can wait until a fresh container reaches the new code
-(see ``_rollover.deploy_rollover_app``). The nonce rides in a secret on that one
-function rather than in the image, so a redeploy of unchanged code (S6)
-still has an unchanged image.
+last input, so a warm container of an old deploy is unlikely to be left for
+a new spawn to land in; and ``deploy_probe`` answers with the nonce its
+deploy was given, from a container started for that one call, so the
+deploying scenario can wait until a fresh container reaches the new code
+(see ``_rollover.wait_until_the_deploy_serves``). The nonce rides in a
+secret on that one function rather than in the image, so a redeploy of
+unchanged code (S6) still has an unchanged image.
 """
 
 from __future__ import annotations
@@ -66,9 +67,12 @@ _nonce = os.environ.get(DEPLOY_NONCE_ENV, "")
     image=_image,
     secrets=[modal.Secret.from_dict({DEPLOY_NONCE_ENV: _nonce})],
     timeout=60,
-    # Short, so a probe never answers from a warm container of an earlier
-    # deploy: each call the scenario makes is then a fresh container, and
-    # its answer is where a fresh container of *this* app lands now.
+    # One input per container, so every probe is answered by a container
+    # started for it: its answer is where a fresh container of *this* app
+    # lands now. A short ``scaledown_window`` alone did not get there (see
+    # ``_rollover.wait_until_the_deploy_serves``): a warm container of the
+    # previous deploy kept answering, kept alive by the probing itself.
+    max_inputs=1,
     scaledown_window=ROLLOVER_SCALEDOWN_SECONDS,
     name=DEPLOY_PROBE_FUNCTION,
 )

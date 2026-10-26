@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
@@ -28,10 +29,20 @@ from .tasks import FIELD_VARIANT_ENV, ROOT_VARIANT_ENV
 
 APP_MODULE = "stardag_integration_tests.registry_live.rollover_app"
 
-# How long a deploy may take to start serving before the scenario proceeds
-# anyway (see ``wait_until_the_deploy_serves``).
-DEPLOY_SERVING_TIMEOUT_SECONDS = 180
-PROBE_INTERVAL_SECONDS = 5
+# How long a deploy may take to start serving before the deploy fails (see
+# ``wait_until_the_deploy_serves``). Since every probe is a fresh container,
+# the wait is one cold start: in CI the deploys that already met no warm
+# container (each app's first) answered in 4.7 s median, 10.7 s p95 and
+# 14.2 s at most (119 deploys, 17 tier runs, 2026-10-19..26). The bound is
+# four times that tail. It also has to leave room inside the shortest gate a
+# rollover scenario holds its D1 task open with -- S7's 110 s pre-yield,
+# which runs from the task starting and so covers the deploy command too:
+# once the gate's bound passes, the D1 task stops waiting, and a scenario
+# carrying on would no longer overlap the rollover it exists to test.
+DEPLOY_SERVING_TIMEOUT_SECONDS = 60
+# Only to report a deploy that was late (see ``wait_until_the_deploy_serves``).
+DEPLOY_SERVING_REPORT_GRACE_SECONDS = 60
+PROBE_INTERVAL_SECONDS = 2
 
 # Every app name a rollover scenario deploys, so the log dump can collect
 # them. A scenario names its app from here and nowhere else.
@@ -111,12 +122,43 @@ def deploy_rollover_app(
     # Also for ``activate=False``: that skips only the registry's activation
     # of the deployment record, and the Modal deploy itself goes live, so
     # the new code is what the next spawn reaches either way (S37).
-    assert wait_until_the_deploy_serves(app_name, modal_environment, nonce), (
+    serving = wait_until_the_deploy_serves(app_name, modal_environment, nonce)
+    assert serving.within_bound, (
         f"The deploy of {app_name!r} as {code_id[:12]} returned, but no fresh "
-        f"call reached it within {DEPLOY_SERVING_TIMEOUT_SECONDS}s. Carrying on "
-        "would run the scenario against the previous deployment, so it would "
-        "no longer test a rollover."
+        f"call reached it within {DEPLOY_SERVING_TIMEOUT_SECONDS}s "
+        f"({serving.describe()}). Carrying on would run the scenario against "
+        "the previous deployment, so it would no longer test a rollover."
     )
+
+
+@dataclass
+class DeployServing:
+    """How the wait for a deploy to serve ended (``wait_until_the_deploy_serves``)."""
+
+    bound: float
+    # Seconds from the deploy returning to the first probe the new deploy
+    # answered; None if none did, even within the report grace.
+    answered_after: float | None = None
+    probes: int = 0
+    # Probes answered by another deploy, and probes that raised.
+    other_deploy: int = 0
+    faults: int = 0
+    last_answer: str | None = None
+
+    @property
+    def within_bound(self) -> bool:
+        return self.answered_after is not None and self.answered_after <= self.bound
+
+    def describe(self) -> str:
+        if self.answered_after is None:
+            outcome = "it never answered"
+        else:
+            outcome = f"it answered after {self.answered_after:.1f}s"
+        return (
+            f"{outcome}; {self.probes} probe(s): {self.other_deploy} answered by "
+            f"another deploy, {self.faults} raised, last answer "
+            f"{self.last_answer!r}"
+        )
 
 
 def wait_until_the_deploy_serves(
@@ -125,54 +167,78 @@ def wait_until_the_deploy_serves(
     nonce: str,
     *,
     timeout: float = DEPLOY_SERVING_TIMEOUT_SECONDS,
-) -> bool:
+    report_grace: float = DEPLOY_SERVING_REPORT_GRACE_SECONDS,
+) -> DeployServing:
     """Wait until a fresh call to the app reaches the deploy tagged ``nonce``.
 
     **``modal deploy`` returning is not the new code serving.** Measured in
     CI: a tick spawned seconds after the deploy command returned started a
-    fresh container of the *previous* version -- in S33, of a deployment
-    already superseded -- and locally a fresh container reached the new
-    code only ~16 s after the command returned. The old clock-sized windows
-    (a minute or more past every deploy) hid that; a gate released the
-    moment the deploy returns does not. So the deploy waits for the state
-    instead: ``deploy_probe`` answers with its deploy's nonce, and a call
-    answering with this one is a fresh container reaching the new code. The
-    probe scales down between calls (``ROLLOVER_SCALEDOWN_SECONDS``), so no
-    answer comes from a warm container of an earlier deploy -- which, polled
-    every two seconds, one did for three minutes straight.
+    container of the *previous* version -- in S33, of a deployment already
+    superseded. The old clock-sized windows (a minute or more past every
+    deploy) hid that; a gate released the moment the deploy returns does
+    not. So the deploy waits for the state instead: ``deploy_probe``
+    answers with its deploy's nonce, and a call answering with this one is a
+    fresh container reaching the new code.
 
-    Bounded: at ``timeout`` it says so and returns False, and the deploy
-    fails -- a scenario that carried on would be testing the previous
-    deployment.
+    **Every probe is a fresh container** (``max_inputs=1`` on
+    ``deploy_probe``), and that is load-bearing. Modal routes a call to a
+    warm container of the previous deploy after a redeploy, and a short
+    ``scaledown_window`` does not bound how long one stays warm: an idle
+    container measured outliving its 2 s window by 12 s, and a probe every
+    few seconds resets the idle clock. So a probe reusing containers kept
+    the previous deploy's probe container alive *by probing it*, and read
+    the deploy as not serving until Modal happened to reap it. In CI that
+    was every slow wait: 255 deploys over 17 runs split into 82% answered
+    within 15 s (cold starts) and a tail out to 169 s plus five 180 s
+    timeouts, with no new probe container started at all during a slow
+    wait -- the probe container of the app's previous deploy answered
+    throughout. It hit the second deploy of each app, the only one with a
+    warm predecessor, and lengthened with the tier's load. Reproduced on an
+    idle workspace with no in-flight work: the same old container answered
+    every 5 s probe for 46 s; with ``max_inputs=1`` the first probe after
+    the deploy answered with the new nonce, in 4-5 s (a cold start), also
+    with long calls still running on the old deploy.
+
+    Bounded: at ``timeout`` the deploy fails, since a scenario that carried
+    on would be testing the previous deployment. The probing continues for
+    ``report_grace`` more seconds only to say whether, and when, the deploy
+    did answer, so a late deploy reads differently from one that never
+    serves.
     """
     import modal
 
     function = modal.Function.from_name(
         app_name, DEPLOY_PROBE_FUNCTION, environment_name=modal_environment
     )
+    serving = DeployServing(bound=timeout)
     started = time.monotonic()
-    answered = None
-    while time.monotonic() - started < timeout:
+    while time.monotonic() - started < timeout + report_grace:
+        serving.probes += 1
         try:
             answered = function.remote()
         except Exception as error:  # a fault is "not yet"
             answered = f"<{type(error).__name__}>"
+            serving.faults += 1
+        serving.last_answer = answered
         if answered == nonce:
-            waited = time.monotonic() - started
-            print(
-                f"[harness] {app_name}: the new deploy serves after {waited:.1f}s",
-                file=sys.stderr,
-            )
-            return True
-        # Longer than the probe's scaledown window, so the next call is a
-        # fresh container rather than the one that just answered.
+            serving.answered_after = time.monotonic() - started
+            break
+        if not answered.startswith("<"):
+            serving.other_deploy += 1
         time.sleep(PROBE_INTERVAL_SECONDS)
-    print(
-        f"[harness] {app_name}: a fresh call still reached another deploy "
-        f"({answered!r}) {timeout:.0f}s after the deploy returned; carrying on",
-        file=sys.stderr,
-    )
-    return False
+    if serving.within_bound:
+        print(
+            f"[harness] {app_name}: the new deploy serves after "
+            f"{serving.answered_after:.1f}s ({serving.probes} probe(s))",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"[harness] {app_name}: the new deploy did not serve within "
+            f"{timeout:.0f}s of returning; {serving.describe()}",
+            file=sys.stderr,
+        )
+    return serving
 
 
 def trigger_app(app_name: str):
