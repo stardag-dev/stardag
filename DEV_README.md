@@ -170,6 +170,16 @@ objects (`stardag-testing`, `stardag-testing-app`, ...) exactly where they are
 without concurrent runs colliding. A concurrency group serialises runs sharing
 an environment name, which is what makes those fixed names safe.
 
+A run deletes its environment when it finishes, except when it is cancelled:
+a push cancels the previous run, which must not delete the environment its
+successor is already using. A run cancelled by hand has no successor, so its
+environment is collected by the `Sweep stale Modal environments` job instead —
+once the PR is closed, **or** while it is open as soon as no run of this
+workflow for it is live (any status but `completed` counts as live, and an API
+error keeps the environment). The cancelled run's own sweeper does this as soon
+as its tier has stopped. Its comment in `modal-live.yml` explains why deleting
+an open PR's environment is safe.
+
 **What the tier does and does not cover.** It exercises Modal _execution_:
 real containers, detached spawn and re-attach, retries, cancellation, timeout
 semantics. It does _not_ exercise registry interaction — the registries in
