@@ -117,6 +117,28 @@ class PreflightDerivedPrivateTask(sd.Task[int]):
         self._save(self._double)
 
 
+class PreflightAnyFieldTask(sd.Task[int]):
+    """A model in an ``Any`` field is rebuilt as a plain dict."""
+
+    blob: typing.Any = None
+
+    def run(self) -> None:
+        self._save(1)
+
+
+class PreflightSubParams(PreflightStatefulParams):
+    """Rebuilt as its declared base, which has no ``_extra``."""
+
+    _extra: str | None = PrivateAttr(default=None)
+
+
+class PreflightSetTask(sd.Task[int]):
+    pairs: frozenset[tuple[str, PreflightStatefulParams]] = frozenset()
+
+    def run(self) -> None:
+        self._save(len(self.pairs))
+
+
 class PreflightParentTask(sd.Task[int]):
     """Holds another task as a field: the nested task's body is part of
     this one's, and a tick rebuilds both from it."""
@@ -775,6 +797,53 @@ class TestPlanRehydration:
     def test_a_private_attribute_derived_from_fields_is_reconstructable(self):
         task = PreflightDerivedPrivateTask(x=4)
         assert task._double == 8
+        plan = plan_rehydration([task], [__name__])
+        assert plan.reconstructable == (task,)
+
+    def test_state_in_a_model_rebuilt_as_a_dict_is_refused(self):
+        """No model on the rebuilt side to compare with: the declared
+        default stands in, and the set attribute differs from it."""
+        params = PreflightStatefulParams(a=2)
+        params._cache = {"k": 1}
+        task = PreflightAnyFieldTask(blob=params)
+
+        plan = plan_rehydration([task], [__name__])
+
+        ((_, reason),) = plan.unreconstructable
+        assert "PreflightStatefulParams._cache is runtime state" in reason
+
+    def test_a_model_rebuilt_as_a_dict_without_state_is_reconstructable(self):
+        task = PreflightAnyFieldTask(blob=PreflightStatefulParams(a=2))
+        plan = plan_rehydration([task], [__name__])
+        assert plan.reconstructable == (task,)
+
+    def test_state_of_a_subclass_rebuilt_as_its_base_is_refused(self):
+        params = PreflightSubParams(a=3)
+        params._extra = "only-on-the-subclass"
+        task = PreflightParamsTask(params=params)
+
+        plan = plan_rehydration([task], [__name__])
+
+        ((_, reason),) = plan.unreconstructable
+        assert "PreflightSubParams._extra is runtime state" in reason
+
+    def test_state_in_a_model_inside_a_set_member_tuple_is_refused(self):
+        params = PreflightStatefulParams(a=4)
+        params._cache = {"k": 1}
+        other = PreflightStatefulParams(a=5)
+        task = PreflightSetTask(pairs=frozenset({("x", params), ("y", other)}))
+
+        plan = plan_rehydration([task], [__name__])
+
+        ((_, reason),) = plan.unreconstructable
+        assert "PreflightStatefulParams._cache is runtime state" in reason
+
+    def test_a_set_of_tuples_without_state_is_reconstructable(self):
+        task = PreflightSetTask(
+            pairs=frozenset(
+                {("x", PreflightStatefulParams(a=4)), ("y", PreflightStatefulParams())}
+            )
+        )
         plan = plan_rehydration([task], [__name__])
         assert plan.reconstructable == (task,)
 

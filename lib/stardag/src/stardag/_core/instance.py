@@ -30,11 +30,11 @@ import dataclasses
 import json
 import math
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from stardag._core.task_id import canonical_body_json
 from stardag.base_model import CONTEXT_MODE_KEY
@@ -77,7 +77,7 @@ def reachable_models(value: Any) -> list[BaseModel]:
     return found
 
 
-def state_outside_body(original: BaseModel, rebuilt: BaseModel) -> str | None:
+def state_outside_body(original: BaseModel, rebuilt: Any) -> str | None:
     """A description of state ``original`` holds that ``rebuilt`` lost, if any.
 
     ``rebuilt`` is ``original`` rehydrated from its instance body, the way a
@@ -91,12 +91,17 @@ def state_outside_body(original: BaseModel, rebuilt: BaseModel) -> str | None:
     ``model_post_init`` derives from fields are all reproduced by the
     rebuild, or not, exactly as they will be on the far side.
 
+    **Where the rebuild has no counterpart, the declared default stands in
+    for it.** A model in an ``Any`` field comes back as a ``dict``, a
+    subclass in a field annotated with its base comes back as the base, and
+    a container may not pair up item by item. Such a model's state is lost
+    in the rebuild unless it was at its default anyway, so that is what it
+    is compared against: conservative, never silent.
+
     The description names the class and the attribute, e.g.
     ``"MyTask._cache is runtime state"``. A comparison that raises counts
     as a difference: the answer has to err toward "the rebuild would lose
-    something". Structure the two objects do not share (a container whose
-    length changed) is not this function's to judge, and is skipped; the
-    body's own round-trip check covers it.
+    something".
     """
     seen: set[int] = set()
     stack: list[tuple[Any, Any]] = [(original, rebuilt)]
@@ -106,65 +111,104 @@ def state_outside_body(original: BaseModel, rebuilt: BaseModel) -> str | None:
             continue
         seen.add(id(item))
         if isinstance(item, BaseModel):
-            if type(other) is not type(item):
-                continue
-            cls = type(item)
-            mine = getattr(item, "__pydantic_private__", None) or {}
-            theirs = getattr(other, "__pydantic_private__", None) or {}
-            for name in cls.__private_attributes__:
-                if name in mine and _differs_or_raises(mine[name], theirs, name):
-                    return f"{cls.__qualname__}.{name} is runtime state"
-            for name, info in cls.model_fields.items():
-                if name not in item.__dict__:
-                    continue
-                if info.exclude:
-                    if _differs_or_raises(item.__dict__[name], other.__dict__, name):
-                        return f"{cls.__qualname__}.{name} is excluded from the body"
-                    continue
-                stack.append((item.__dict__[name], other.__dict__.get(name)))
-        elif dataclasses.is_dataclass(item) and not isinstance(item, type):
-            if type(other) is not type(item):
-                continue
+            state = _model_state_lost(item, other)
+            if state is not None:
+                return state
             stack.extend(
-                (getattr(item, f.name, None), getattr(other, f.name, None))
+                (item.__dict__[name], _field_of(other, name))
+                for name, info in type(item).model_fields.items()
+                if not info.exclude and name in item.__dict__
+            )
+        elif dataclasses.is_dataclass(item) and not isinstance(item, type):
+            stack.extend(
+                (getattr(item, f.name, None), getattr(other, f.name, _MISSING))
                 for f in dataclasses.fields(item)
             )
         elif isinstance(item, dict):
-            if isinstance(other, dict):
-                stack.extend((v, other[k]) for k, v in item.items() if k in other)
+            theirs = other if isinstance(other, dict) else {}
+            stack.extend((v, theirs.get(k, _MISSING)) for k, v in item.items())
         elif isinstance(item, (list, tuple, deque)):
             if isinstance(other, (list, tuple, deque)) and len(other) == len(item):
                 stack.extend(zip(item, other))
+            else:
+                stack.extend((v, _MISSING) for v in item)
         elif isinstance(item, (set, frozenset)):
-            if isinstance(other, (set, frozenset)) and len(other) == len(item):
-                # No order to pair by: pair the models by their body, which
-                # the rebuild reproduces (the body is what it was built from).
-                theirs_by_body = {
-                    _body_key(m): m for m in other if isinstance(m, BaseModel)
-                }
-                stack.extend(
-                    (m, theirs_by_body.get(_body_key(m)))
-                    for m in item
-                    if isinstance(m, BaseModel)
-                )
+            # No order to pair by: pair the members by their dump, which the
+            # rebuild reproduces (the body is what it was built from), and
+            # which leaves out exactly the state compared here.
+            theirs_by_key = (
+                {_dump_key(v): v for v in other}
+                if isinstance(other, (set, frozenset))
+                else {}
+            )
+            stack.extend((v, theirs_by_key.get(_dump_key(v), _MISSING)) for v in item)
     return None
 
 
-def _differs_or_raises(value: Any, other: Mapping[str, Any], name: str) -> bool:
-    if name not in other:
-        return True
+_MISSING: Any = object()
+"""No counterpart in the rebuild: compare against the declared default."""
+
+_ANY_ADAPTER: TypeAdapter[Any] = TypeAdapter(Any)
+
+
+def _model_state_lost(item: BaseModel, other: Any) -> str | None:
+    cls = type(item)
+    mine = getattr(item, "__pydantic_private__", None) or {}
+    theirs = (
+        getattr(other, "__pydantic_private__", None) or {}
+        if isinstance(other, BaseModel)
+        else {}
+    )
+    for name, attribute in cls.__private_attributes__.items():
+        if name not in mine:
+            continue
+        if name in theirs:
+            lost = _differs_from(mine[name], lambda: theirs[name])
+        else:
+            lost = _differs_from(mine[name], attribute.get_default)
+        if lost:
+            return f"{cls.__qualname__}.{name} is runtime state"
+    for name, info in cls.model_fields.items():
+        if not info.exclude or name not in item.__dict__:
+            continue
+        counterpart = _field_of(other, name)
+        if counterpart is _MISSING:
+            lost = _differs_from(
+                item.__dict__[name],
+                lambda: info.get_default(call_default_factory=True),
+            )
+        else:
+            lost = _differs_from(item.__dict__[name], lambda: counterpart)
+        if lost:
+            return f"{cls.__qualname__}.{name} is excluded from the body"
+    return None
+
+
+def _field_of(other: Any, name: str) -> Any:
+    """``other``'s value for field ``name``: from a model, or from the dict
+    a model in an untyped field is rebuilt as."""
+    if isinstance(other, BaseModel):
+        return other.__dict__.get(name, _MISSING)
+    if isinstance(other, dict):
+        return other.get(name, _MISSING)
+    return _MISSING
+
+
+def _differs_from(value: Any, reference: Callable[[], Any]) -> bool:
     try:
-        return bool(value != other[name])
+        return bool(value != reference())
     except Exception:
         return True
 
 
-def _body_key(model: BaseModel) -> tuple[str, str]:
+def _dump_key(value: Any) -> tuple[str, str]:
     try:
-        body = model.model_dump_json(context={CONTEXT_MODE_KEY: "registry"})
+        dumped = _ANY_ADAPTER.dump_json(
+            value, context={CONTEXT_MODE_KEY: "registry"}
+        ).decode()
     except Exception:
-        body = repr(model)
-    return (f"{type(model).__module__}.{type(model).__qualname__}", body)
+        dumped = repr(value)
+    return (f"{type(value).__module__}.{type(value).__qualname__}", dumped)
 
 
 def _class_label(task: "BaseTask") -> str:

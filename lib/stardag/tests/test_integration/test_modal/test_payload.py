@@ -95,6 +95,22 @@ class StatefulTask(sd.Task[int]):
         self._save(self.x)
 
 
+class StatefulParams(sd.StardagBaseModel):
+    a: int = 1
+    _cache: str | None = PrivateAttr(default=None)
+
+
+class NestedStateTask(sd.Task[int]):
+    """Models whose rebuild has no same-typed counterpart: one in an ``Any``
+    field (rebuilt as a dict), one inside a tuple inside a set."""
+
+    blob: Any = None
+    pairs: frozenset[tuple[str, StatefulParams]] = frozenset()
+
+    def run(self) -> None:
+        self._save(0)
+
+
 class DriftingNoteTask(sd.Task[int]):
     """A non-significant field whose serialization is not a fixed point:
     every round trip appends a "!". The task id survives; the value the
@@ -312,6 +328,24 @@ class TestByValueFallback:
         assert to_task_payload(with_excluded) is with_excluded
         # At their defaults, there is nothing to lose.
         assert is_task_payload(to_task_payload(StatefulTask()))
+
+    def test_runtime_state_without_a_typed_counterpart_goes_by_value(self):
+        """Compared against the declared default when the rebuild holds a
+        dict or cannot be paired by type: still kept pickled."""
+        in_any = StatefulParams(a=2)
+        in_any._cache = "runtime"
+        in_set = StatefulParams(a=3)
+        in_set._cache = "runtime"
+        any_task = NestedStateTask(blob=in_any)
+        set_task = NestedStateTask(pairs=frozenset({("x", in_set)}))
+
+        assert to_task_payload(any_task) is any_task
+        assert to_task_payload(set_task) is set_task
+        # The same shapes without state go as payloads.
+        plain = NestedStateTask(
+            blob=StatefulParams(a=2), pairs=frozenset({("x", StatefulParams(a=3))})
+        )
+        assert is_task_payload(to_task_payload(plain))
 
     def test_a_lossy_non_significant_field_goes_by_value(self, caplog):
         """The id check alone would pass this task; the full-body fixed
