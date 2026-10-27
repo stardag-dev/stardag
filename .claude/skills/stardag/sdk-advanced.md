@@ -433,12 +433,14 @@ deployed `Builder` passes those timeouts on. A `ModalTaskExecutor` you construct
 needs `worker_timeouts={worker_name: seconds}` (it warns without one), or its claims get the
 registry's default one-hour TTL and a longer task can be taken over while it still runs.
 
-**Retries.** A worker's `FunctionSettings(retries=...)` (an `int`, or a `modal.Retries` to
-set the backoff too) is Modal's own retry of an exception raised _inside_ the container, under
-the same execution. It is the knob for flaky task code, since stardag never retries a `FAILED`
-task by itself. `max_attempts` covers only a spawn failing before any container exists. The
-two multiply with resumptions: `retries=3` under `max_interruptions=20` is up to 80 container
-attempts.
+**Retries.** stardag never retries a `FAILED` task by itself. Retry transient errors
+_inside_ the task, and use `stardag tasks retry` or a re-trigger for one that failed.
+`max_attempts` covers only a spawn failing before any container exists. A worker's
+`FunctionSettings(retries=...)` (an `int`, or a `modal.Retries` to set the backoff too) does
+**not** recover an ordinary task failure under the default `Runner`. The failure report ends
+the execution, so Modal's retry stops at its start-of-attempt cancellation checkpoint without
+running anything, at the cost of one container start. It re-runs the task only when the
+failure was never recorded (a lost report, a crash before reporting).
 
 **When a build stalls.** Wake-ups ride on writes. A finished worker flags its build. Every
 tick drains flagged builds after each pass, and reads the frontier once more before exiting.
