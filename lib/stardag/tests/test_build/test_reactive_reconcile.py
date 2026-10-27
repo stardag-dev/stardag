@@ -302,3 +302,42 @@ async def test_every_holder_is_reached_across_rounds(
             break
     (fail,) = registry.calls_to("member_fail", task_id=str(dead.id))
     assert fail["execution_id"] == dead_execution
+
+
+async def test_an_unspawned_claim_under_a_superseded_plan_is_left_alone(
+    default_in_memory_fs_target: Target,
+):
+    """Its spawning deployment may not have kept the worker rule (Copilot
+    on #508): R2 applies only under the build's active plan."""
+    registry = InMemoryRegistry()
+    task = SyncOnlyTask(name=f"old-plan-{new_id()}")
+    build_id, _ = await _plan(registry, [task])
+    dead = await _dead_claim(registry, build_id, task, ref=None, age_seconds=3600)
+    registry.executions[dead].plan_id = new_id()  # an earlier plan's claim
+    executor = FakeDetachedExecutor(registry=registry)
+    from stardag.build._reactive._config import TickSummary
+
+    acted = await _reconcile.Reconciler().run(
+        registry.build_get_frontier(build_id),
+        registry=registry,
+        task_executor=executor,
+        summary=TickSummary(outcome="x"),
+        lease_lost=lambda: False,
+    )
+    assert not acted and _stops(registry) == []
+
+
+def test_a_routed_executor_needs_every_route_to_keep_the_rule():
+    from stardag.build._base import RoutedTaskExecutor
+
+    class Keeps(FakeDetachedExecutor):
+        pass
+
+    class DoesNot(FakeDetachedExecutor):
+        def reconciles_unspawned(self, executor: str) -> bool:
+            return False
+
+    both = RoutedTaskExecutor({"a": Keeps(), "b": Keeps()}, router=lambda t: "a")
+    mixed = RoutedTaskExecutor({"a": Keeps(), "b": DoesNot()}, router=lambda t: "a")
+    assert both.reconciles_unspawned(FAKE_EXECUTOR)
+    assert not mixed.reconciles_unspawned(FAKE_EXECUTOR)

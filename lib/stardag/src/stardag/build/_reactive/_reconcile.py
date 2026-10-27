@@ -68,6 +68,7 @@ import logging
 import random
 import typing
 from datetime import datetime, timezone
+from uuid import UUID
 
 from stardag.build._base import DetachedState, TaskExecutorABC
 from stardag.build._reactive._frontier_actions import is_registry_outage, rehydrate
@@ -185,6 +186,7 @@ class Reconciler:
                     lease_lost=lease_lost,
                     out_of_time=out_of_time,
                     probes=probes,
+                    active_plan_id=frontier.plan_id,
                 )
                 for execution in holders
             )
@@ -202,11 +204,19 @@ class Reconciler:
         lease_lost: typing.Callable[[], bool],
         out_of_time: typing.Callable[[], bool],
         probes: asyncio.Semaphore,
+        active_plan_id: UUID | None,
     ) -> bool:
         assert execution.executor is not None and execution.task_id is not None
         try:
             if execution.executor_ref is None:
-                if not task_executor.reconciles_unspawned(execution.executor):
+                # Only this deployment's workers are known to keep the
+                # worker rule: an execution under a superseded plan was
+                # spawned by an earlier deployment, whose run function may
+                # not have (R1 can still end it once its call finished).
+                if (
+                    execution.plan_id != active_plan_id
+                    or not task_executor.reconciles_unspawned(execution.executor)
+                ):
                     return False
                 return await self._unspawned(execution, registry, summary, lease_lost)
             if out_of_time():

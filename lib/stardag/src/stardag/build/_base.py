@@ -624,7 +624,12 @@ class RoutedTaskExecutor(TaskExecutorABC, Generic[ExecutorKeyT]):
         return any(e.reconciles(executor) for e in self.executors.values())
 
     def reconciles_unspawned(self, executor: str) -> bool:
-        return any(e.reconciles_unspawned(executor) for e in self.executors.values())
+        # Every child that answers for this executor name must keep the
+        # worker rule: the execution does not say which route ran it.
+        children = [e for e in self.executors.values() if e.reconciles(executor)]
+        return bool(children) and all(
+            e.reconciles_unspawned(executor) for e in children
+        )
 
     async def probe_detached(self, executor: str, ref: str) -> "DetachedState":
         # By the recorded executor name, not a task: the first routed
