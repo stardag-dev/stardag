@@ -198,54 +198,25 @@ async def _continue_in_a_successor(
         )
 
 
-# How long a tick that ended on a registry outage waits before handing
-# the build to a successor: long enough that a successor spawned per
-# failure cannot become a tight loop, short enough that a lone build is not
-# left to the watchdog (which is optional) for a passing outage.
-_OUTAGE_BACKOFF_SECONDS = 30.0
-# What the hand-off keeps in hand before the container's own timeout: the
-# release, the notify and the spawn, each a call that may itself be slow.
-_OUTAGE_HANDOFF_MARGIN_SECONDS = 15.0
-
-
-async def _hand_off_after_an_outage(
-    build_id: UUID,
-    *,
-    registry: RegistryABC,
-    config: TickConfig,
-    summary: TickSummary,
-    lease: SchedulerLease,
-    seconds_left: float | None,
-) -> None:
+async def _flag_for_a_successor(build_id: UUID, *, registry: RegistryABC) -> None:
     """A tick that ended on a registry outage -- an exception, or its lease
-    lapsing on unanswered renewals -- waits a backoff, then flags the build
-    and spawns one successor unless a tick already holds the lease
-    (STA-135). Not straight away (the successor would meet the same
-    outage) and not never (a lone build with no watchdog would wait for the
-    next unrelated wake-up). During a long outage this is at most one tick
-    per backoff for the build. Best-effort: the registry may still be out,
-    and then the flag waits for a drain or the watchdog.
+    lapsing on unanswered renewals -- leaves its build flagged, so the next
+    drain anywhere in the environment (any other tick's, or the watchdog's)
+    serves it, rather than leaving it unserved behind a lapsed lease
+    (STA-135).
 
-    The backoff is cut short to fit what is left of the tick's container
-    (``seconds_left``), so the hand-off is not lost to the container's own
-    timeout; the successor then backs off in its turn. And if this tick's
-    own release failed on the way out, it is asked again first: otherwise
-    the tick's still-live lease would read as a live scheduler and
-    suppress the successor."""
-    backoff = _OUTAGE_BACKOFF_SECONDS
-    if seconds_left is not None:
-        backoff = max(0.0, min(backoff, seconds_left - _OUTAGE_HANDOFF_MARGIN_SECONDS))
-    await asyncio.sleep(backoff)
-    if lease.acquired and lease.released is False:
-        lease.released = await lease.release()
+    Flagged without a hand-out (``can_spawn=False``), and nothing spawned
+    from here: a tick started now would meet the same outage, and one
+    started after a backoff would need a timer this container cannot keep
+    -- Modal has no delayed invocation, so time-based recovery is the
+    watchdog's job (docs, "The watchdog"). Best-effort: the registry may
+    still be out, and then the build waits for the watchdog."""
     try:
-        await _flag_and_spawn_unless_live(
-            build_id, registry=registry, config=config, summary=summary
-        )
+        await registry.build_notify_aio(build_id, can_spawn=False)
     except Exception as e:
         logger.warning(
-            "Tick for build %s ended on a registry outage and could not hand "
-            "it to a successor (left to a drain or the watchdog): %s",
+            "Tick for build %s ended on a registry outage and could not flag "
+            "the build (left to the watchdog): %s",
             build_id,
             e,
         )
@@ -508,12 +479,6 @@ class _Driver:
         limit is unknown."""
         return self._budget_end(now, _CLAIM_DEADLINE_FRACTION)
 
-    def seconds_left(self) -> float | None:
-        """Seconds until this tick's container hits its wall-clock limit;
-        None when the limit is unknown."""
-        end = self._budget_end(asyncio.get_running_loop().time(), 1.0)
-        return None if end is None else end - asyncio.get_running_loop().time()
-
     def _budget_end(self, now: float, fraction: float) -> float | None:
         timeout = self.config.tick_timeout_seconds
         if timeout is None:
@@ -764,16 +729,9 @@ async def _tick_body(
         if acquired and summary.outcome == "lease_lost" and not lease.taken_over:
             outage = True
         if outage:
-            # No drain and no immediate hand-off: either would spawn a tick
-            # straight into the same outage.
-            await _hand_off_after_an_outage(
-                build_id,
-                registry=registry,
-                config=config,
-                summary=summary,
-                lease=lease,
-                seconds_left=driver.seconds_left(),
-            )
+            # No drain and no hand-off: either would spawn a tick straight
+            # into the same outage.
+            await _flag_for_a_successor(build_id, registry=registry)
         elif acquired and summary.outcome == "lifetime_reached":
             # Before the drain: the successor's hand-out stamp keeps the
             # drain from spawning a second tick for this build.

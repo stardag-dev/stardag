@@ -233,8 +233,11 @@ scheduler pass anywhere on the deployment — seconds, while anything is
 running. **What it does not:** a change made while _nothing_ on the
 deployment is ticking by something without a Modal client (the UI, a
 laptop-only build), and events that nobody writes at all — a worker that
-died without reporting, whose claim expires with nothing to notice. Those
-two are what the watchdog is for.
+died without reporting, whose claim expires with nothing to notice. Nor a
+tick that ends on a registry outage: it leaves its build flagged, but does
+not start a successor straight back into the outage, so the build waits
+for the next pass anywhere on the deployment to drain it. Those cases are
+what the watchdog is for.
 
 ### The watchdog
 
@@ -269,7 +272,7 @@ The default is off, and that is usually right: a standing sweep polls the
 registry whether or not anything is building, enough to keep a
 scale-to-zero database awake. Turn it on when leaving a build stalled for
 even a few minutes is unacceptable, and pick the period from how long that
-is — it is the recovery time for the two cases above, nothing else.
+is — it is the recovery time for the cases above, nothing else.
 
 **Turn it on if you run long detached tasks.** Everything else in this
 chapter is triggered by a write: a status changes, the registry flags the

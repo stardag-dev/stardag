@@ -143,9 +143,9 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   still queued take no new claim. A tick that ends on a registry outage,
   including an outage while acquiring the lease or a lease lapsed on
   unanswered renewals, no longer drains or hands off straight into it. It
-  waits 30 seconds, then flags its build and spawns one successor unless a
-  tick holds the lease, instead of leaving the build unserved behind a
-  lapsed lease. Spawns are admitted adaptively: after a pass in
+  leaves its build flagged for the next drain anywhere in the environment,
+  instead of unserved behind a lapsed lease. Time-based recovery stays the
+  watchdog's job: deploy it for unattended builds. Spawns are admitted adaptively: after a pass in
   which the process was rate-limited, a pass admits half as many, growing
   back by an eighth of the cap per clean pass. The default
   `max_concurrent_actions` drops from 50 to 16.
