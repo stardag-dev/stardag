@@ -4,6 +4,7 @@ import { shortHash } from "../utils/ids";
 import { TASK_REF_DOCS_URL, taskRefSnippet } from "../utils/taskRef";
 import { formatRelativeTime } from "../utils/time";
 import { CopyButton } from "./ModalExecution";
+import { InfoIcon } from "./ui/InfoIcon";
 import { Tooltip } from "./ui/Tooltip";
 
 interface TaskRefSnippetProps {
@@ -52,7 +53,7 @@ export function TaskRefSnippet({
 
   return (
     <div>
-      <div className="mb-1 flex flex-wrap items-center gap-2">
+      <div className="mb-1 flex flex-wrap items-center gap-1.5">
         <h3 className="text-sm font-medium text-gray-500 dark:text-gray-400">
           Reference in code
         </h3>
@@ -62,9 +63,9 @@ export function TaskRefSnippet({
             target="_blank"
             rel="noopener noreferrer"
             aria-label="About task references (opens the docs)"
-            className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-gray-400 text-[10px] font-semibold leading-none text-gray-500 hover:border-gray-600 hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-500 dark:text-gray-400 dark:hover:border-gray-300 dark:hover:text-gray-200"
+            className="rounded p-0.5 text-gray-400 hover:bg-gray-200 hover:text-gray-600 dark:hover:bg-gray-600 dark:hover:text-gray-300"
           >
-            i
+            <InfoIcon />
           </a>
         </Tooltip>
         {options.length > 1 && instanceId && (
