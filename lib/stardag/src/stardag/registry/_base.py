@@ -28,6 +28,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from stardag.registry._base_ledger import RegistryLedgerABC
 from stardag.registry._base_reads import RegistryReadsABC, _missing
 from stardag.registry._models import (
     BuildFrontier,
@@ -37,7 +38,6 @@ from stardag.registry._models import (
     DeploymentInfo,
     DeploymentKind,
     ExclusionResult,
-    ExecutionInfo,
     FrontierMember,
     MembersResult,
     PlanInfo,
@@ -46,7 +46,6 @@ from stardag.registry._models import (
     ResumeResult,
     SchedulerLeaseResult,
     SettingsInfo,
-    StopOutcome,
     TaskArtifactInfo,
     TaskInfo,
     TransitionResult,
@@ -59,7 +58,7 @@ if TYPE_CHECKING:
     from stardag.artifact import Artifact
 
 
-class RegistryABC(RegistryReadsABC):
+class RegistryABC(RegistryLedgerABC, RegistryReadsABC):
     """The v2 registry client interface. See the module docstring. The
     inspecting reads (a plan, paged lists, a task's executions and events,
     a deployment) are in :class:`~stardag.registry._base_reads.RegistryReadsABC`."""
@@ -465,63 +464,6 @@ class RegistryABC(RegistryReadsABC):
     ) -> TransitionResult:
         return self.claim_renew(
             task_id, execution_id=execution_id, claim_ttl_seconds=claim_ttl_seconds
-        )
-
-    def build_list_executions(
-        self,
-        build_id: UUID,
-        *,
-        not_in_current_plan: bool = False,
-        include_ended: bool = False,
-    ) -> list[ExecutionInfo]:
-        """``GET /builds/{id}/executions``: the build's executions with no end
-        reported (``builds stop``, a worker's cancellation checkpoint);
-        ``not_in_current_plan`` keeps the orphans; ``include_ended`` lists
-        the whole ledger (every execution granted, ended or not)."""
-        raise _missing(self, "build_list_executions")
-
-    async def build_list_executions_aio(
-        self,
-        build_id: UUID,
-        *,
-        not_in_current_plan: bool = False,
-        include_ended: bool = False,
-    ) -> list[ExecutionInfo]:
-        return self.build_list_executions(
-            build_id,
-            not_in_current_plan=not_in_current_plan,
-            include_ended=include_ended,
-        )
-
-    def execution_report_stopped(
-        self,
-        execution_id: UUID,
-        *,
-        outcome: StopOutcome = "stopped",
-        only_if_unspawned: bool = False,
-    ) -> TransitionResult:
-        """``POST /executions/{id}/stopped``: an operator ends an execution —
-        ``stopped`` (its call was cancelled) or ``lost`` (it could not be,
-        and no report of it will ever be applied). If it is the task's
-        current execution with its claim unreleased, the claim is released
-        ``cancelled`` and the task is CANCELLED (a revocation is not a
-        result).
-
-        ``only_if_unspawned``: applied only while the execution has recorded
-        no executor ref, else refused 409 ``execution_spawned`` (a
-        reconciling tick, STA-94). A server that predates the condition
-        refuses it 422 rather than ignoring it."""
-        raise _missing(self, "execution_report_stopped")
-
-    async def execution_report_stopped_aio(
-        self,
-        execution_id: UUID,
-        *,
-        outcome: StopOutcome = "stopped",
-        only_if_unspawned: bool = False,
-    ) -> TransitionResult:
-        return self.execution_report_stopped(
-            execution_id, outcome=outcome, only_if_unspawned=only_if_unspawned
         )
 
     # -- tasks ------------------------------------------------------------------

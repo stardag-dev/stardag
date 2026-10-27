@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from stardag.registry._api_http import Request
+from stardag.registry._api_ledger import APIRegistryLedger
 from stardag.registry._api_reads import APIRegistryReads
 from stardag.registry._api_routes import (
     _artifacts_body,
@@ -25,7 +26,6 @@ from stardag.registry._api_routes import (
     _discovery_failed_req,
     _drop_none,
     _exclude_req,
-    _executions_req,
     _frontier_req,
     _lease_req,
     _member_req,
@@ -38,7 +38,6 @@ from stardag.registry._api_routes import (
     _settings_req,
     _skip_blocked_req,
     _start_req,
-    _stopped_req,
     _wake_candidates_req,
     _yield_req,
 )
@@ -51,7 +50,6 @@ from stardag.registry._models import (
     DeploymentInfo,
     DeploymentKind,
     ExclusionResult,
-    ExecutionInfo,
     FrontierMember,
     MembersResult,
     PlanInfo,
@@ -60,7 +58,6 @@ from stardag.registry._models import (
     ResumeResult,
     SchedulerLeaseResult,
     SettingsInfo,
-    StopOutcome,
     TransitionResult,
     WakeCandidate,
     YieldResult,
@@ -77,7 +74,7 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 
 
-class APIRegistry(APIRegistryReads, RegistryABC):
+class APIRegistry(APIRegistryLedger, APIRegistryReads, RegistryABC):
     """The v2 registry over HTTP.
 
     Stateless with respect to builds (every call names its build, plan or
@@ -488,44 +485,6 @@ class APIRegistry(APIRegistryReads, RegistryABC):
         claim_ttl_seconds: int | None = None,
     ) -> TransitionResult:
         return await self.acall(_renew_req(task_id, execution_id, claim_ttl_seconds))
-
-    def build_list_executions(
-        self,
-        build_id: UUID,
-        *,
-        not_in_current_plan: bool = False,
-        include_ended: bool = False,
-    ) -> list[ExecutionInfo]:
-        return self.call(_executions_req(build_id, not_in_current_plan, include_ended))
-
-    async def build_list_executions_aio(
-        self,
-        build_id: UUID,
-        *,
-        not_in_current_plan: bool = False,
-        include_ended: bool = False,
-    ) -> list[ExecutionInfo]:
-        return await self.acall(
-            _executions_req(build_id, not_in_current_plan, include_ended)
-        )
-
-    def execution_report_stopped(
-        self,
-        execution_id: UUID,
-        *,
-        outcome: StopOutcome = "stopped",
-        only_if_unspawned: bool = False,
-    ) -> TransitionResult:
-        return self.call(_stopped_req(execution_id, outcome, only_if_unspawned))
-
-    async def execution_report_stopped_aio(
-        self,
-        execution_id: UUID,
-        *,
-        outcome: StopOutcome = "stopped",
-        only_if_unspawned: bool = False,
-    ) -> TransitionResult:
-        return await self.acall(_stopped_req(execution_id, outcome, only_if_unspawned))
 
     def _artifacts_req(
         self,
