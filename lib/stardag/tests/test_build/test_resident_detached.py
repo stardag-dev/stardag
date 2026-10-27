@@ -48,6 +48,10 @@ async def test_claim_then_spawn_with_its_id_then_the_ref_recorded(
     # The claim TTL of a detached execution comes from its executor's timeout.
     assert claim["claim_ttl_seconds"] == 600 + 900
     assert claim["executor_metadata"] == {"kind": FAKE_EXECUTOR, "task": "SyncOnlyTask"}
+    # The claim names its executor before the spawn (STA-90); the ref exists
+    # only once the spawn returns, so only the ref start carries it.
+    assert claim["executor"] == FAKE_EXECUTOR
+    assert claim["executor_ref"] is None
     ((spawned_task, spawned_execution, spawned_plan),) = executor.spawns
     assert spawned_execution == claim["execution_id"]
     assert spawned_plan == registry.active_plan(summary.build_id).id  # type: ignore[union-attr]
@@ -60,6 +64,29 @@ async def test_claim_then_spawn_with_its_id_then_the_ref_recorded(
     # A non-reporting worker: the engine reports the completion.
     (complete,) = registry.calls_to("member_complete", task_id=task.id)
     assert complete["execution_id"] == claim["execution_id"]
+
+
+async def test_the_claim_names_its_executor_when_metadata_fails(
+    registry: InMemoryRegistry, default_in_memory_fs_target: Target
+):
+    """A detached claim with no executor would read as an in-process
+    execution until its spawn reports (STA-90): the executor's name does not
+    depend on the best-effort metadata lookup."""
+
+    class MetadataFails(FakeDetachedExecutor):
+        async def get_executor_metadata(self, task):
+            raise RuntimeError("metadata lookup failed")
+
+    task = SyncOnlyTask(name=f"no-metadata-{new_id()}")
+    summary = await build_aio(
+        [task], registry=registry, task_executor=MetadataFails(app_name="app")
+    )
+    assert summary.status == BuildExitStatus.SUCCESS
+    claim, _ = registry.calls_to("member_start", task_id=task.id)
+    assert claim["claim"] is True
+    assert claim["executor"] == FAKE_EXECUTOR
+    assert claim["executor_metadata"] is None
+    assert claim["executor_ref"] is None
 
 
 async def test_a_spawn_failure_fails_the_claimed_execution(

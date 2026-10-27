@@ -26,12 +26,34 @@ import type { Execution } from "../types/task";
 /** The only executor the CLI can stop. Others are listed, never acted on. */
 export const MODAL_EXECUTOR = "modal";
 
+/**
+ * What an in-process execution records as its executor: the concurrent
+ * executor's execution modes and the sequential build —
+ * `_stop.IN_PROCESS_EXECUTORS`.
+ */
+export const IN_PROCESS_EXECUTORS: ReadonlySet<string> = new Set([
+  "sequential",
+  "sync_blocking",
+  "sync_thread",
+  "sync_process",
+  "async_main_loop",
+]);
+
 export const NO_REF_YET =
   "no call id recorded yet — it was claimed but not yet spawned";
 
+export const IN_PROCESS =
+  "runs in its driver's own process — stop the driver to stop it";
+
+/**
+ * Only for a row recording neither an executor nor a metadata `kind`: an
+ * SDK since STA-90 names the executor on every claim, so this ambiguity
+ * is left to rows an older SDK wrote.
+ */
 export const NO_EXECUTOR =
-  "no executor recorded — it runs in the build's own process, or its " +
-  "spawn has not reported yet; refresh to see whether a call id appears";
+  "no executor recorded (written by an older SDK) — it runs in its " +
+  "driver's own process, or its spawn has not reported yet; refresh to " +
+  "see whether a call id appears";
 
 /**
  * The recorded executor, or the `kind` its metadata declares (a claim
@@ -49,6 +71,7 @@ export function executorOf(execution: Execution): string | null {
 export function notStoppableReason(execution: Execution): string | null {
   const executor = executorOf(execution);
   if (!executor) return NO_EXECUTOR;
+  if (IN_PROCESS_EXECUTORS.has(executor)) return IN_PROCESS;
   if (executor !== MODAL_EXECUTOR)
     return `stardag cannot stop a '${executor}' execution`;
   if (!execution.executor_ref) return NO_REF_YET;

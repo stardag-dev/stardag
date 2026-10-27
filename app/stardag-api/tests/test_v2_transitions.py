@@ -334,6 +334,23 @@ async def test_non_claiming_start_is_the_holders_self_report(h: Harness):
     assert exc.value.code == "unknown_execution"
 
 
+async def test_a_claiming_start_records_its_executor_before_any_ref(h: Harness):
+    """STA-90 — a detached claim names its executor before the spawn, so a
+    claimed-but-not-spawned execution is recognisably detached rather than
+    indistinguishable from an in-process one; the holder's start then adds
+    the ref without losing it."""
+    t = item("T")
+    _, plan = await h.planned([t], [t])
+    execution = await h.start(plan.id, t, executor="modal")
+    ledger = await h.execution(execution)
+    assert (ledger["executor"], ledger["executor_ref"]) == ("modal", None)
+    await h.transition(
+        plan.id, t, Transition.start(execution, claim=False, executor_ref="fc-1")
+    )
+    ledger = await h.execution(execution)
+    assert (ledger["executor"], ledger["executor_ref"]) == ("modal", "fc-1")
+
+
 async def test_suspend_releases_the_claim_and_is_actionable(h: Harness):
     """SUSPENDED holds no claim and is ACTIONABLE (run from scratch once its
     dynamic children are COMPLETED)."""

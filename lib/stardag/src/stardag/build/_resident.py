@@ -21,7 +21,7 @@ import contextlib
 import logging
 import traceback as tb_module
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from uuid import UUID
 
 from stardag import BaseTask, TaskStruct, flatten_task_struct
@@ -311,12 +311,24 @@ class _ResidentEngine:
 
     # -- execution ----------------------------------------------------------------
 
-    async def _details(self, task: BaseTask) -> ExecutorDetails:
+    async def _details(self, task: BaseTask, *, detached: bool) -> ExecutorDetails:
+        """What the claiming start records. Best-effort, except that a
+        detached claim always names its executor (when the executor can):
+        a claim with no executor would be indistinguishable from an
+        in-process execution until its spawn reports (STA-90)."""
         try:
-            return await self.executor.get_executor_details(task)
+            details = await self.executor.get_executor_details(task)
         except Exception:
             logger.debug(f"Executor details failed for {task.id}", exc_info=True)
-            return ExecutorDetails()
+            details = ExecutorDetails()
+        if detached and details.executor is None:
+            try:
+                name = self.executor.detached_executor_name(task)
+            except Exception:
+                logger.debug(f"Executor name failed for {task.id}", exc_info=True)
+                name = None
+            details = replace(details, executor=name)
+        return details
 
     async def submit(
         self, task: BaseTask
@@ -347,7 +359,7 @@ class _ResidentEngine:
                             if detached
                             else self.session.claim_config.in_process_ttl_seconds
                         ),
-                        executor=await self._details(task),
+                        executor=await self._details(task, detached=detached),
                     )
                 finally:
                     state.waiting_on_claim = False

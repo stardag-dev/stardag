@@ -420,6 +420,18 @@ class TaskExecutorABC(ABC):
         (one that survives the orchestrator). Default: False."""
         return False
 
+    def detached_executor_name(self, task: BaseTask) -> str | None:
+        """The ``executor`` a detached execution of ``task`` records (the
+        :attr:`DetachedHandle.executor` its spawn will return, e.g.
+        ``"modal"``), known before the spawn.
+
+        The claiming start sends it, so a claimed-but-not-yet-spawned
+        execution is recognisably detached rather than indistinguishable
+        from an in-process one — even when :meth:`get_executor_metadata`
+        fails. Must not raise or do I/O. Default: None.
+        """
+        return None
+
     async def submit_detached(
         self, task: BaseTask, *, execution_id: UUID
     ) -> DetachedHandle:
@@ -552,6 +564,10 @@ class RoutedTaskExecutor(TaskExecutorABC, Generic[ExecutorKeyT]):
     def supports_detached(self, task: BaseTask) -> bool:
         executor = self._executor_for(task)
         return False if executor is None else executor.supports_detached(task)
+
+    def detached_executor_name(self, task: BaseTask) -> str | None:
+        executor = self._executor_for(task)
+        return None if executor is None else executor.detached_executor_name(task)
 
     async def submit_detached(
         self, task: BaseTask, *, execution_id: UUID

@@ -8,6 +8,21 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **Fixed: a detached claim could record no executor** (STA-90). The
+  claiming start of a detached execution (a reactive tick's spawn, or a
+  resident build's Modal-routed task) carried only the best-effort executor
+  metadata, which is missing when the worker cannot be resolved. Until the
+  spawn reported its call id, such a row was indistinguishable from an
+  in-process execution. `TaskExecutorABC` gains
+  `detached_executor_name(task)` (default `None`; `"modal"` on
+  `ModalTaskExecutor`), and both engines now send it as `executor` on the
+  claim, whether or not the metadata lookup succeeded. `stardag builds stop`
+  now gives a certain reason for any row naming its executor: an in-process
+  execution "runs in its driver's own process", a Modal claim without a call
+  id is not spawned yet. The hedged "no executor recorded" reason is kept
+  for rows that record neither an executor nor a metadata `kind`, which only
+  an older SDK writes. No server change: `executor` on a claiming start was
+  already accepted and stored.
 - **Fixed: a class-based task that cloudpickle takes by value could not be
   unpickled** (STA-133). cloudpickle pickles a class it cannot import by
   name (one defined in `__main__` or in a function) by value, and rebuilds it
@@ -137,6 +152,13 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   the retry or name a reason not to. Comments that claimed a
   `SELECT … ORDER BY … FOR UPDATE` acquires its locks in order now say that
   Postgres does not guarantee it.
+
+### UI
+
+- The build stop panel mirrors `stardag builds stop`'s reasons (STA-90):
+  an in-process execution is shown as running in its driver's own process,
+  and the "no executor recorded" reason now says it comes from an older
+  SDK.
 
 ## [0.28.0] — 2026-10-08
 

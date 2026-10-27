@@ -3,6 +3,8 @@ import type { Execution } from "../types/task";
 import {
   executorOf,
   executorsIn,
+  IN_PROCESS,
+  IN_PROCESS_EXECUTORS,
   matchesFilters,
   NO_EXECUTOR,
   NO_REF_YET,
@@ -45,12 +47,33 @@ describe("notStoppableReason", () => {
     expect(notStoppableReason(execution({ executor_ref: null }))).toBe(NO_REF_YET);
   });
 
-  it("names the ambiguity of an execution with no executor", () => {
+  it("names the ambiguity of an execution with no executor, as an older SDK's", () => {
     expect(
       notStoppableReason(
         execution({ executor: null, executor_ref: null, executor_metadata: null }),
       ),
     ).toBe(NO_EXECUTOR);
+    expect(NO_EXECUTOR).toMatch(/older SDK/);
+  });
+
+  it("says an in-process execution runs in its driver", () => {
+    for (const kind of IN_PROCESS_EXECUTORS) {
+      expect(
+        notStoppableReason(
+          execution({
+            executor: kind,
+            executor_ref: "host:123",
+            executor_metadata: null,
+          }),
+        ),
+      ).toBe(IN_PROCESS);
+    }
+  });
+
+  it("reads a Modal claim that names its executor as not spawned yet", () => {
+    expect(
+      notStoppableReason(execution({ executor_ref: null, executor_metadata: null })),
+    ).toBe(NO_REF_YET);
   });
 
   it("refuses other executors permanently", () => {
