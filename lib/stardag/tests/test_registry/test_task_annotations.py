@@ -106,6 +106,19 @@ def test_task_list_sends_the_filters_with_repeated_tags():
     assert page.tasks[0].tags == ["best", "v2"]
 
 
+@pytest.mark.parametrize("tags", ["prod", ""])
+def test_task_list_refuses_a_bare_string_of_tags(tags):
+    """A string is a ``Sequence[str]`` too: ``"prod"`` would filter by four
+    one-character tags and ``""`` by none. Refused before anything is sent,
+    by the in-memory registry too."""
+    recorder = _Recorder({("GET", "/api/v2/tasks"): {"tasks": []}})
+    with pytest.raises(TypeError, match="not a bare string"):
+        _registry(recorder).task_list(tags=tags)
+    assert recorder.requests == []
+    with pytest.raises(TypeError, match="not a bare string"):
+        InMemoryRegistry().task_list(tags=tags)
+
+
 def test_task_list_sends_an_empty_namespace():
     recorder = _Recorder({("GET", "/api/v2/tasks"): {"tasks": []}})
     _registry(recorder).task_list(namespace="")

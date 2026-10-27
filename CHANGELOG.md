@@ -24,6 +24,20 @@ annotate <id>`, where `--tag` (or `--add-tag`) and `--remove-tag` edit
   against an older registry, annotating fails with a clear error, and a
   filtered list is refused rather than answered unfiltered (an unfiltered
   list works as before).
+- **Corrected: a worker's `retries=` does not recover a task that raises**
+  (STA-154). The docs and the `FunctionSettings.retries` docstring said
+  Modal's retry covers an exception raised inside the container. Under the
+  default `Runner` the worker records that exception `FAILED`, which ends
+  the execution, and the retry stops at its start-of-attempt checkpoint:
+  a container start that runs nothing. A retry re-runs the task only when
+  the attempt recorded nothing — an exception before the failure report
+  (in `setup()`, or a report that never landed), or a function timeout the
+  task did not catch. Retry transient errors inside the task, and a real
+  failure with `stardag tasks retry` or a re-trigger. `stardag modal
+deploy` now **warns** about a worker with `retries` above zero (an `int`
+  or a `modal.Retries`) whose run function reports its own lifecycle. A
+  warning, not a refusal, since the cases above are still covered. No
+  behaviour change otherwise.
 - **`FunctionSettings.retries` accepts a `modal.Retries`** as well as a count
   (STA-146). It was always passed through to Modal unchanged; only the type
   said `int`, so setting the retry backoff took a type ignore.

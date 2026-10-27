@@ -55,6 +55,12 @@ def _build_list_page_req(
     )
 
 
+_BARE_STRING_TAGS = (
+    "tags must be a sequence of strings, not a bare string "
+    "(tags=['prod'], not tags='prod')"
+)
+
+
 def _tag_list(tags: Any) -> list[str]:
     """``tags`` as sent: ``None`` is refused rather than read as "clear" or
     "unchanged" (``[]`` clears, omitting leaves them)."""
@@ -86,6 +92,8 @@ def _task_list_req(
         id_prefix=id_prefix,
         q=q,
     )
+    if isinstance(tags, str):
+        raise TypeError(_BARE_STRING_TAGS)
     if tags:
         params["tag"] = list(tags)
     discovery = sorted(set(params) - {"limit", "cursor", "status"})
