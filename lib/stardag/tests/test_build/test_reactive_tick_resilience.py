@@ -149,6 +149,39 @@ async def test_an_outage_exit_spawns_nothing(default_in_memory_fs_target: Target
     )
 
 
+async def test_an_outage_among_mixed_failures_decides_the_exit(
+    default_in_memory_fs_target: Target,
+):
+    """Copilot on #506: a non-outage failure first and an outage second --
+    the tick still exits as on an outage (flagged, nothing spawned)."""
+    first, second = (SyncOnlyTask(name=f"{n}-{new_id()}") for n in "ab")
+    spawned: list = []
+
+    class MixedFailures(InMemoryRegistry):
+        async def member_start_aio(self, plan_id, task_id, **kwargs):
+            # Both claims are in flight before either fails, so neither
+            # stands down on the other's failure.
+            await asyncio.sleep(0.02)
+            if task_id == str(first.id):
+                raise APIError("unprocessable", status_code=422)
+            raise _outage()
+
+    registry = MixedFailures()
+    build_id, _ = await _plan(registry, [first, second])
+    config = TickConfig(
+        linger_seconds=0,
+        poll_interval_seconds=0.01,
+        spawn_tick=lambda build, app: spawned.append(build),
+    )
+    with pytest.raises(APIError) as raised:
+        await tick(registry, build_id, FakeDetachedExecutor(registry=registry), config)
+    assert raised.value.status_code == 503
+    assert spawned == []
+    assert {"build_id": build_id, "can_spawn": False} in registry.calls_to(
+        "build_notify"
+    )
+
+
 async def test_queued_members_take_no_claim_after_a_sibling_failed(
     default_in_memory_fs_target: Target,
 ):

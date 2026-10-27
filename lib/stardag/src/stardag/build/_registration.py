@@ -204,7 +204,10 @@ async def run_bounded(
 
 
 async def run_bounded_settled(
-    factories: Sequence[_Factory], semaphore: asyncio.Semaphore
+    factories: Sequence[_Factory],
+    semaphore: asyncio.Semaphore,
+    *,
+    prefer: Callable[[BaseException], bool] | None = None,
 ) -> None:
     """:func:`run_bounded`, but one coroutine's failure cancels none of the
     others: every one runs to its end, and then the first failure (in
@@ -221,10 +224,18 @@ async def run_bounded_settled(
 
     results = await asyncio.gather(*(one(f) for f in factories), return_exceptions=True)
     failures = [r for r in results if isinstance(r, BaseException)]
-    for later in failures[1:]:
-        logger.warning(f"A concurrent action also failed: {later!r}")
-    if failures:
-        raise failures[0]
+    if not failures:
+        return
+    # The one raised is the first ``prefer`` picks out (the caller decides
+    # what matters most to whoever handles it), else the first; the rest
+    # are logged.
+    raised = next(
+        (f for f in failures if prefer is not None and prefer(f)), failures[0]
+    )
+    for other in failures:
+        if other is not raised:
+            logger.warning(f"A concurrent action also failed: {other!r}")
+    raise raised
 
 
 async def walk_aio(

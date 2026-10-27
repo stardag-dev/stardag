@@ -736,6 +736,9 @@ async def act_on_frontier(
                 for task, member in batch
             ],
             semaphore,
+            # An outage among the failures decides how the tick exits (it
+            # flags rather than hands off), so it is the one raised.
+            prefer=is_registry_outage,
         )
         budget -= granted.count
         if result.lease_lost or result.superseded or result.out_of_time:
