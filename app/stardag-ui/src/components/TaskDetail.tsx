@@ -91,6 +91,8 @@ export function TaskDetail({
     task?.instances.map((instance) => instance.deployment_id) ?? [],
   );
   const epochRef = useRef(0);
+  // A task read has started and not landed yet (for its epoch).
+  const taskReadInFlightRef = useRef(false);
   const buildId = context?.buildId;
 
   // Reset on identity change only — never on a same-task refresh
@@ -113,14 +115,17 @@ export function TaskDetail({
   useEffect(() => {
     const epoch = ++epochRef.current;
     const fresh = () => epochRef.current === epoch;
+    taskReadInFlightRef.current = true;
     fetchTask(taskId, environmentId)
       .then((t) => {
         if (!fresh()) return;
+        taskReadInFlightRef.current = false;
         setTask(t);
         setError(null);
       })
       .catch((err: unknown) => {
         if (!fresh()) return;
+        taskReadInFlightRef.current = false;
         setTask(null);
         setError(err instanceof Error ? err.message : "Failed to load task");
       });
@@ -158,6 +163,14 @@ export function TaskDetail({
   const handleAnnotated = useCallback(
     (saved: TaskSummary) => {
       if (identityRef.current !== identity) return;
+      // A read started before the save would land after it with the old
+      // annotations, and the next whole-set tag edit would build on those:
+      // drop that read and read again.
+      if (taskReadInFlightRef.current) {
+        epochRef.current += 1;
+        taskReadInFlightRef.current = false;
+        setNonce((n) => n + 1);
+      }
       setTask((t) =>
         t && t.task_id === saved.task_id
           ? { ...t, tags: saved.tags ?? [], description: saved.description ?? null }

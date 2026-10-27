@@ -201,7 +201,10 @@ export function TaskSearch({ environmentId, onOpenTask }: TaskSearchProps) {
         if (controller?.signal.aborted) return;
         setError(err instanceof Error ? err.message : "Failed to load more tasks");
       })
-      .finally(() => setLoadingMore(false));
+      .finally(() => {
+        // A superseded search's page must not clear the new one's flag.
+        if (!controller?.signal.aborted) setLoadingMore(false);
+      });
   }, [environmentId, filters, nextCursor, loadingMore, shownQuery, query]);
 
   // ---- Edits ----

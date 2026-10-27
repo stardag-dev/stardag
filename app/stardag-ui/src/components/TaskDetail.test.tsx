@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PlanMember, Task } from "../types/task";
 import { tooltipOf } from "../test/tooltip";
@@ -6,6 +6,7 @@ import { MEMBERSHIP_HELP } from "../utils/membership";
 
 vi.mock("../api/registry", () => ({
   fetchTask: vi.fn(),
+  annotateTask: vi.fn(),
   fetchTaskArtifacts: vi.fn(async () => ({ artifacts: [] })),
   fetchTaskEvents: vi.fn(async () => []),
   EVENT_LIST_LIMIT: 500,
@@ -18,7 +19,12 @@ vi.mock("../api/registry", () => ({
 }));
 vi.mock("./TaskClaimPanel", () => ({ TaskClaimPanel: () => null }));
 
-import { fetchTask, fetchTaskEvents, fetchTaskExecutions } from "../api/registry";
+import {
+  annotateTask,
+  fetchTask,
+  fetchTaskEvents,
+  fetchTaskExecutions,
+} from "../api/registry";
 import type { Execution } from "../types/task";
 import { TaskDetail } from "./TaskDetail";
 
@@ -272,5 +278,32 @@ describe("TaskDetail", () => {
     expect(screen.getByText("baseline")).toBeInTheDocument();
     const code = screen.getByLabelText("Code referencing this task");
     expect(code.textContent).toBe(`Train.ref("${TASK_ID}", instance_id="i-1")`);
+  });
+
+  it("drops a read that started before a save and reads again", async () => {
+    vi.mocked(fetchTask).mockResolvedValue(makeTask({ tags: ["old"] }));
+    const { rerender } = render(
+      <TaskDetail taskId={TASK_ID} environmentId="env-1" refreshToken={0} />,
+    );
+    await screen.findByText("old");
+    // A refresh is in flight, carrying the pre-save tags...
+    let resolveStale: (task: Task) => void = () => {};
+    vi.mocked(fetchTask).mockReturnValueOnce(new Promise((r) => (resolveStale = r)));
+    vi.mocked(fetchTask).mockResolvedValue(makeTask({ tags: ["new", "old"] }));
+    rerender(<TaskDetail taskId={TASK_ID} environmentId="env-1" refreshToken={1} />);
+    // ...when a save lands.
+    vi.mocked(annotateTask).mockResolvedValue({
+      ...makeTask(),
+      tags: ["new", "old"],
+    });
+    fireEvent.click(screen.getByRole("button", { name: "+ Add tag" }));
+    const input = screen.getByRole("textbox", { name: "New tag" });
+    fireEvent.change(input, { target: { value: "new" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(vi.mocked(fetchTask)).toHaveBeenCalledTimes(3));
+    resolveStale(makeTask({ tags: ["old"] }));
+    await waitFor(() => expect(screen.getByText("new")).toBeInTheDocument());
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.getByText("new")).toBeInTheDocument();
   });
 });
