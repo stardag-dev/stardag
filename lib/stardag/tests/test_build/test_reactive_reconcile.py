@@ -341,10 +341,21 @@ def test_a_routed_executor_needs_every_route_to_keep_the_rule():
         def reconciles_unspawned(self, executor: str) -> bool:
             return False
 
+    class NoProbe(FakeDetachedExecutor):
+        """Spawns on the same backend but does not opt into probing."""
+
+        def reconciles(self, executor: str) -> bool:
+            return False
+
+        def reconciles_unspawned(self, executor: str) -> bool:
+            return False
+
     both = RoutedTaskExecutor({"a": Keeps(), "b": Keeps()}, router=lambda t: "a")
     mixed = RoutedTaskExecutor({"a": Keeps(), "b": DoesNot()}, router=lambda t: "a")
+    sibling = RoutedTaskExecutor({"a": Keeps(), "b": NoProbe()}, router=lambda t: "a")
     assert both.reconciles_unspawned(FAKE_EXECUTOR)
     assert not mixed.reconciles_unspawned(FAKE_EXECUTOR)
+    assert not sibling.reconciles_unspawned(FAKE_EXECUTOR)
 
 
 async def test_a_completion_is_reported_even_at_the_execution_budget(

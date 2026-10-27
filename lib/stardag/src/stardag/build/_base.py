@@ -624,9 +624,12 @@ class RoutedTaskExecutor(TaskExecutorABC, Generic[ExecutorKeyT]):
         return any(e.reconciles(executor) for e in self.executors.values())
 
     def reconciles_unspawned(self, executor: str) -> bool:
-        # Every child that answers for this executor name must keep the
-        # worker rule: the execution does not say which route ran it.
-        children = [e for e in self.executors.values() if e.reconciles(executor)]
+        # Every child must keep the worker rule, not only those that probe
+        # this executor name: the execution does not say which route spawned
+        # it, and a child that does not opt into probing may still spawn on
+        # the same backend. A mix of backends therefore leaves unspawned
+        # claims to their TTL -- the safe direction.
+        children = list(self.executors.values())
         return bool(children) and all(
             e.reconciles_unspawned(executor) for e in children
         )
