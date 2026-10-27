@@ -137,7 +137,8 @@ across ticks. Three other failure shapes bypass it entirely, distinct from
 each other and from it:
 
 - **A worker that dies with no restart coming** (OOM, a crash, a timeout
-  nothing caught) simply lets its claim lapse, and the next claiming
+  nothing caught once Modal's `retries=` are spent) simply lets its claim
+  lapse, and the next claiming
   start takes the execution over as a fresh attempt — up to
   `max_executions` (default 20) executions of the task in the build, after
   which the tick fails it with the count instead, and the build's
@@ -148,8 +149,10 @@ each other and from it:
 - **An exception _inside_ your task.** The worker reports it `FAILED`
   itself, and the tick never retries a `FAILED` task automatically — the
   build's `fail_mode` decides, and only `stardag tasks retry` or a
-  re-trigger (not Modal's own `retries=`, which never touches registry
-  state) moves it back to `PENDING`.
+  re-trigger moves it back to `PENDING`. Modal's own `retries=` does not
+  help here: its retry finds the execution ended and stops before running
+  anything. A transient error is retried inside the task, around the call
+  that fails — see [Task retries](../how-to/integrate-modal.md#task-retries).
 
 A task past its `timeout` that caught the interruption, checkpointed and
 raised `ResumableInterruption` is recorded `INTERRUPTED` and resumed, up to

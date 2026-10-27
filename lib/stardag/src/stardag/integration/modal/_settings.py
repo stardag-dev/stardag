@@ -76,17 +76,27 @@ class FunctionSettings(typing.TypedDict, total=False):
             unset maximises packing, which is usually what you want for an
             I/O-bound function.
         ephemeral_disk: Ephemeral disk size in MB.
-        retries: Number of retries on failure. Covers exceptions raised
-            *inside* the container and function timeouts; it is not what
-            recovers a preempted or crashed container (Modal restarts
-            those on the same input regardless). See
-            :class:`~stardag.exceptions.ResumableInterruption` and
-            ``TickConfig.max_attempts`` for the other two layers, and note
-            they multiply: ``retries=3`` under a task allowed 20
-            resumptions is up to 80 container attempts. A
-            ``modal.Retries`` sets the backoff as well. A worker that
-            stands down before ``run()`` (its execution no longer wanted)
-            raises too, so each retry of it costs a container start.
+        retries: Modal's retry policy: how many times it runs a failed call
+            again. On a worker whose run function reports the task
+            lifecycle (the default ``Runner``) a retry re-runs the task
+            **only when the attempt before it recorded nothing**: an
+            exception raised before its failure was recorded (in
+            ``setup()``, or a failure report that never reached the
+            registry), or a function timeout the task did not catch.
+            **A task that raises in** ``run()`` **is not recovered**: it
+            is recorded ``FAILED``, which ends the execution, and the
+            retry stops before ``run()`` -- a container start that runs
+            nothing. The same holds after a caught timeout (recorded
+            ``INTERRUPTED`` and resumed by the scheduler) and for a worker
+            that stands down because its execution is no longer wanted.
+            ``stardag modal deploy`` warns about such a worker. Retry a
+            transient error inside the task, around the call that fails,
+            and a real failure with ``stardag tasks retry`` or a
+            re-trigger. Not what recovers a preempted or crashed container
+            either (Modal restarts those on the same input regardless).
+            On ``builder_settings`` it restarts a failed build function,
+            which then resumes. A ``modal.Retries`` sets the backoff as
+            well.
         nonpreemptible: Run on an instance that will not be reclaimed. The
             direct answer to "this task must not be preempted", for work
             that genuinely cannot checkpoint. Modal client >= 1.2.3;
