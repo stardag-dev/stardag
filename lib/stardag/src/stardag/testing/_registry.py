@@ -267,7 +267,11 @@ class InMemoryRegistry(
 
     def build_registered(self, build_id: UUID) -> BuildInfo:
         self._record("build_registered", build_id=build_id)
-        with self.transaction():
+        # A ``build_terminal`` refusal is recorded (its unapplied event
+        # kept), as the server commits it with the refusal.
+        with self.transaction(
+            keep=lambda e: getattr(e, "code", None) == "build_terminal"
+        ):
             build = self.build(build_id)
             if build.status == "registered":
                 return self._info(build)

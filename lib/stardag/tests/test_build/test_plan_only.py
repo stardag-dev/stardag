@@ -19,7 +19,7 @@ registry, which follows the server's seams:
 from __future__ import annotations
 
 import typing
-from typing import Annotated
+from typing import Annotated, Generic, TypeVar
 from uuid import UUID
 
 import pytest
@@ -45,6 +45,16 @@ class Tunable(sd.Task[int]):
 
     def run(self) -> None:
         self._save(self.width)
+
+
+_T = TypeVar("_T")
+
+
+class Boxed(sd.Task[int], Generic[_T]):
+    value: _T
+
+    def run(self) -> None:
+        self._save(0)
 
 
 @sd.task(name="Doubled")
@@ -327,6 +337,29 @@ class TestRegister:
         main = handle("__main__", "Model").import_line
         assert main.startswith("# Model is defined in the script being run")
         assert "from __main__" not in main
+
+    def test_a_parametrised_generic_is_referred_to_by_its_origin(self):
+        """``Boxed[int]`` is a pydantic subclass named ``Boxed[int]``;
+        ``from m import Boxed[int]`` would not parse."""
+        from stardag.build._plan_only import _import_path
+
+        assert _import_path(Boxed[int]) == (__name__, "Boxed")
+
+    async def test_a_refused_registered_is_recorded(
+        self, default_in_memory_fs_target: Target
+    ):
+        """``registered`` against a FAILED plan-only build is refused
+        ``build_terminal`` and its unapplied event kept, as the server
+        commits it with the refusal."""
+        registry = InMemoryRegistry()
+        _, _, root = _chain()
+        build = registry.build_create(root_task_ids=[str(root.id)], plan_only=True)
+        registry.build_fail(build.id, "gave up")
+        with pytest.raises(APIError) as exc:
+            registry.build_registered(build.id)
+        assert exc.value.code == "build_terminal"
+        refused = [e for e in registry.events if e.type == "BUILD_REGISTERED"]
+        assert [e.applied for e in refused] == [False]
 
     @pytest.mark.parametrize(
         "annotation", [{"tags": ["best"]}, {"task_description": "the baseline"}]

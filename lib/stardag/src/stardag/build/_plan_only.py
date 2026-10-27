@@ -108,6 +108,10 @@ def _import_path(cls: type) -> tuple[str, str]:
     func = getattr(cls, "_func", None)
     if func is not None and hasattr(func, "__qualname__"):
         return func.__module__, func.__qualname__
+    # A parametrised generic (``GenericTask[int]``) is a pydantic subclass
+    # named with its arguments; code refers to the declared origin.
+    while origin := getattr(cls, "__pydantic_generic_metadata__", {}).get("origin"):
+        cls = origin
     return cls.__module__, cls.__qualname__
 
 
