@@ -104,6 +104,17 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   lease. The lease's client-side expiry is timed from the first attempt
   that could have reached the server, so a rate-limit wait no longer makes a
   freshly granted lease look already lapsed.
+- **Fixed: a hybrid build failed a task that had already succeeded, with
+  "The claim moved on while the execution was being started"** (STA-120).
+  A resident build with a detached executor (a local `sd.build()` with Modal
+  workers) records each spawned call's ref after the spawn returns. A
+  worker fast enough to finish, or yield, before that record arrived had
+  already ended its execution, so the registry refused the record. The
+  engine read the refusal as the claim having moved on, cancelled the call
+  and failed the build. On such a refusal the engine now reads the
+  execution ledger. If the execution ended by its own report, the engine
+  takes the call's result. Only a claim taken over, lapsed or released, or
+  an operator's stop, still counts as an orphan.
 
 ### Server
 

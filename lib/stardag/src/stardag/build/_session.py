@@ -68,6 +68,10 @@ LimitKeySelector = Callable[[BaseTask], Sequence[str]]
 #: Nothing for the engine to do; a detached ref refused this way is an orphan.
 _LATE_REPORT_CODES = EXECUTION_OVER_CODES | {"execution_already_ended"}
 
+#: Ends of an execution written by an operator (``builds stop``), not by
+#: the execution's own report.
+_OPERATOR_END_OUTCOMES = frozenset({"stopped", "lost"})
+
 #: Claim refusals that mean "someone else, wait": another execution holds
 #: the claim, an upstream is not COMPLETED in the registry yet, or a
 #: concurrency limit on the claim's keys is full.
@@ -355,7 +359,11 @@ class ResidentSession:
 
         Returns False when the registry refused because the claim has moved
         on from this execution — the spawned container is then an orphan,
-        and the caller stops it.
+        and the caller stops it. A refusal because the execution already
+        *ended by its own report* is not that: a worker fast enough to
+        finish (or yield) before its ref is recorded is refused the same
+        way (STA-120), so the ledger decides, and such an execution counts
+        as started.
         """
         if not self.enabled or execution_id is None:
             return True
@@ -372,7 +380,7 @@ class ResidentSession:
             )
         except APIError as e:
             if e.code in _LATE_REPORT_CODES:
-                return False
+                return await self._ended_by_its_own_report(task, execution_id)
             handle_registry_error(
                 e,
                 f"Failed to record the ref of task {task.id}",
@@ -384,6 +392,41 @@ class ResidentSession:
                 f"Failed to record the ref of task {task.id}",
                 self.on_registry_failure,
             )
+        return True
+
+    async def _ended_by_its_own_report(
+        self, task: BaseTask, execution_id: UUID
+    ) -> bool:
+        """Whether the ledger shows ``execution_id`` ended by its own report
+        (completed, failed, suspended, interrupted, preempted) rather than
+        having its claim taken over, lapsed or released, or being stopped
+        by an operator. False when the ledger cannot be read: the caller
+        then treats the spawn as an orphan, as it did before."""
+        if self.build_id is None:
+            return False
+        try:
+            ledger = await asyncio.to_thread(
+                self.registry.build_list_executions,
+                self.build_id,
+                include_ended=True,
+            )
+        except Exception as e:
+            logger.warning(
+                f"Could not read the ledger for task {task.id} after its ref "
+                f"was refused; treating execution {execution_id} as an orphan: {e}"
+            )
+            return False
+        execution = next((e for e in ledger if e.id == execution_id), None)
+        if (
+            execution is None
+            or execution.ended_at is None
+            or execution.outcome in _OPERATOR_END_OUTCOMES
+        ):
+            return False
+        logger.info(
+            f"Execution {execution_id} of task {task.id} ended "
+            f"({execution.outcome}) before its ref was recorded; taking its result."
+        )
         return True
 
     async def complete(self, task: BaseTask, execution_id: UUID | None) -> None:
