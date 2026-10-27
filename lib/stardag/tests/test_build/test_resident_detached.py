@@ -422,3 +422,33 @@ async def test_an_execution_an_operator_stopped_is_still_an_orphan(
     assert summary.status == BuildExitStatus.FAILURE
     assert len(executor.cancel_detached_calls) == 1
     assert not registry.called("member_complete", task_id=task.id)
+
+
+class _TakenOverThenLate(_RefusesRefStart):
+    """The claim is taken over while the spawn is in flight, and the
+    original worker's completion then lands late: the ledger records its
+    end, but the claim had already moved on."""
+
+    def member_start(self, plan_id, task_id, **kwargs):
+        if not kwargs.get("claim", True):
+            row = self.executions[kwargs["execution_id"]]
+            now = self.now()
+            row.claim_released_at, row.claim_outcome = now, "taken_over"
+            row.ended_at, row.outcome = now, "completed"
+        return super().member_start(plan_id, task_id, **kwargs)
+
+
+async def test_a_late_completion_after_a_takeover_is_still_an_orphan(
+    default_in_memory_fs_target: Target,
+):
+    """Copilot on #505: an end on the ledger is not enough -- a report after
+    the claim moved on is recorded too, and its result is not the task's."""
+    registry = _TakenOverThenLate()
+    registry.add_deployment(app_name="app")
+    task = SyncOnlyTask(name=f"late-{new_id()}")
+    executor = _executor()
+    summary = await build_aio(
+        [task], registry=registry, task_executor=executor, fail_mode=FailMode.CONTINUE
+    )
+    assert summary.status == BuildExitStatus.FAILURE
+    assert len(executor.cancel_detached_calls) == 1

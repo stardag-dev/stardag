@@ -72,6 +72,10 @@ _LATE_REPORT_CODES = EXECUTION_OVER_CODES | {"execution_already_ended"}
 #: the execution's own report.
 _OPERATOR_END_OUTCOMES = frozenset({"stopped", "lost"})
 
+#: How a claim ends when it moves on from its execution (rather than the
+#: execution's own report closing it): a report after any of these is late.
+_CLAIM_MOVED_ON_OUTCOMES = frozenset({"taken_over", "lapsed", "released", "cancelled"})
+
 #: Claim refusals that mean "someone else, wait": another execution holds
 #: the claim, an upstream is not COMPLETED in the registry yet, or a
 #: concurrency limit on the claim's keys is full.
@@ -398,9 +402,10 @@ class ResidentSession:
         self, task: BaseTask, execution_id: UUID
     ) -> bool:
         """Whether the ledger shows ``execution_id`` ended by its own report
-        (completed, failed, suspended, interrupted, preempted) rather than
-        having its claim taken over, lapsed or released, or being stopped
-        by an operator. False when the ledger cannot be read: the caller
+        (completed, failed, suspended, interrupted, preempted) *while it
+        still held the claim* -- not a late report after its claim was
+        taken over, lapsed, released or cancelled, and not an operator's
+        stop. False when the ledger cannot be read: the caller
         then treats the spawn as an orphan, as it did before."""
         if self.build_id is None:
             return False
@@ -421,6 +426,9 @@ class ResidentSession:
             execution is None
             or execution.ended_at is None
             or execution.outcome in _OPERATOR_END_OUTCOMES
+            # A report arriving after the claim moved on still writes the
+            # ledger's end, but its result is not the task's.
+            or execution.claim_outcome in _CLAIM_MOVED_ON_OUTCOMES
         ):
             return False
         logger.info(
