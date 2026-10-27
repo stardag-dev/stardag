@@ -83,7 +83,10 @@ class FunctionSettings(typing.TypedDict, total=False):
             :class:`~stardag.exceptions.ResumableInterruption` and
             ``TickConfig.max_attempts`` for the other two layers, and note
             they multiply: ``retries=3`` under a task allowed 20
-            resumptions is up to 80 container attempts.
+            resumptions is up to 80 container attempts. A
+            ``modal.Retries`` sets the backoff as well. A worker that
+            stands down before ``run()`` (its execution no longer wanted)
+            raises too, so each retry of it costs a container start.
         nonpreemptible: Run on an instance that will not be reclaimed. The
             direct answer to "this task must not be preempted", for work
             that genuinely cannot checkpoint. Modal client >= 1.2.3;
@@ -114,7 +117,7 @@ class FunctionSettings(typing.TypedDict, total=False):
     max_concurrent_inputs: int
     target_concurrent_inputs: int
     ephemeral_disk: int
-    retries: int
+    retries: int | modal.Retries
     nonpreemptible: bool
     # Legacy Modal spellings, translated at deploy — see _RENAMED_SETTINGS.
     concurrency_limit: int
