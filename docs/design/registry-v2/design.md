@@ -903,7 +903,23 @@ What could turn it into an ordinary build is refused, 409
 the reactive marker, `complete` and `exit-early`. `fail` and `cancel` are
 allowed, so a registration that went wrong can be closed. A driver that
 dies mid-registration leaves the build PENDING with an unsealed plan,
-which nothing acts on; the UI labels it "registration incomplete".
+which nothing acts on; the UI labels it "registration incomplete", `GET
+/builds?status=pending` (`stardag builds list --status pending`) finds it,
+and `stardag builds cancel` (or `fail`) closes it. Nothing needs closing
+for correctness — it holds no claim and gates nothing — only for a tidy
+list. `skip-blocked` is a no-op on a plan-only build in any status: it has
+no failure to propagate, and SKIPPED is a global task status.
+
+**Rolling deploys and rollback.** The migration is additive, but a server
+from before it cannot _read_ a `registered` build or a `build_registered`
+event (its native-enum mapping raises on the unknown label). During a
+rolling deploy, an old instance still serving fails reads of a plan-only
+build a new instance already ended, for as long as the rollout lasts.
+Rolling the image back once any `registered` build exists **requires the
+migration's downgrade first**, which rewrites those rows to `cancelled` /
+`build_cancelled`. A flag that refuses `plan_only` creates until the
+rollout is complete would close the window; it is not built, since the
+window is the rollout's length and only that build's reads fail.
 
 Registration is still an observation: a target found complete is recorded
 COMPLETED and a recorded completion whose target is gone is invalidated,

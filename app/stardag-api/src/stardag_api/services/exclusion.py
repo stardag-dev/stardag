@@ -130,10 +130,17 @@ async def skip_blocked(
     propagation, and a build that did not fail has none to propagate (its
     release left the claimed tasks CANCELLED, which the walk would
     otherwise read as blockers). A FAILED build is still walked — a tick
-    fails the build first and skips after."""
+    fails the build first and skips after.
+
+    A no-op on a plan-only build, whatever its status: it runs nothing, so
+    it has no failure to propagate, and SKIPPED is a *global* task status
+    that a registration must never write over work other builds own."""
     async with transaction(session):
         build = await lock_build(session, environment_id, build_id)
-        if build.status in (BuildStatus.CANCELLED, BuildStatus.COMPLETED):
+        if build.plan_only or build.status in (
+            BuildStatus.CANCELLED,
+            BuildStatus.COMPLETED,
+        ):
             return SkipBlockedResult(plan_id=None)
         plan = await active_plan(session, build.id)
         if plan is None:

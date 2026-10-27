@@ -21,8 +21,9 @@ from httpx import AsyncClient
 from sqlalchemy import RowMapping, text
 
 from stardag_api.schemas_v2 import RegistrationItem
-from stardag_api.services import builds, reactive, wakeups
+from stardag_api.services import builds, exclusion, reactive, wakeups
 from stardag_api.services.errors import Conflict
+from stardag_api.services.transitions import Transition
 from tests.v2_support import ENV, Harness, item, observed, unexpanded
 
 
@@ -237,6 +238,28 @@ async def test_a_registration_gone_wrong_can_be_failed_or_cancelled(
     with pytest.raises(Conflict) as exc:
         await _svc(h, builds.register_build, build)
     assert exc.value.code == "build_terminal"
+
+
+@pytest.mark.parametrize("closed", ["pending", "failed", "registered"])
+async def test_skip_blocked_is_a_no_op_on_a_plan_only_build(h: Harness, closed: str):
+    """A plan-only build has no failure to propagate, and SKIPPED is a
+    global task status: a member blocked by an upstream another build
+    failed is left as it is, whatever state the plan-only build is in."""
+    deployment = await h.new_deployment()
+    leaf = item("Leaf")
+    root = item("Root", upstreams=[leaf])
+    plan_only, _ = await _plan_only(h, [root], [leaf, root], deployment_id=deployment)
+    _, other = await h.planned([leaf], [leaf], deployment_id=deployment, seal=True)
+    execution = await h.start(other.id, leaf)
+    await h.transition(other.id, leaf, Transition.fail(execution, "boom"))
+    if closed == "failed":
+        await _svc(h, builds.fail_build, plan_only, error_message="gave up")
+    elif closed == "registered":
+        await _svc(h, builds.register_build, plan_only)
+
+    result = await _svc(h, exclusion.skip_blocked, plan_only)
+    assert (result.plan_id, result.skipped) == (None, [])
+    assert (await h.task(root))["status"] == "pending"
 
 
 # --------------------------------------------------------------------------

@@ -14,15 +14,31 @@ event.
   ``event_type::text``: Postgres refuses to *use* an enum label in the
   transaction that added it ("unsafe use of new value"), and a CHECK
   comparing the enum itself would cast the new label. As text, the whole
-  migration stays in one transaction (the test suite migrates inside an
-  outer one), and so will the next label added this way.
+  migration's DDL stays in one transaction (the test suite migrates inside
+  an outer one), and so will the next label added this way.
+- The CHECK is added ``NOT VALID`` and validated in a second step:
+  validating scans every ``event`` row, and under the ``ADD CONSTRAINT``'s
+  ACCESS EXCLUSIVE lock that scan would block every event append for its
+  duration. ``VALIDATE CONSTRAINT`` takes only SHARE UPDATE EXCLUSIVE, which
+  writes pass, so it runs in an autocommit block after the rest has
+  committed. New rows are checked from the ``ADD`` on either way. Inside a
+  caller's transaction (the test suite's guard tests) there is no commit to
+  make, and the validation runs inline.
 
-Additive for a rolling deploy: an old server never writes the new labels
-and ignores the column. Downgrade drops the column and restores the old
-CHECK, after rewriting what an old server could not read: a REGISTERED
-build becomes CANCELLED (terminal, ran nothing) and a ``build_registered``
-event becomes ``build_cancelled``. Postgres cannot drop an enum label, so
-the two labels stay in the types, unused.
+**Rolling deploys and rollback.** Additive for the deploy itself: an old
+server never writes the new labels and ignores the column. But an old
+server *cannot read* a ``registered`` build or a ``build_registered``
+event (its native-enum mapping raises on the unknown label), so:
+
+- during a rolling deploy, an old instance still serving next to a new one
+  fails reads of any plan-only build a new instance has already ended —
+  a window as long as the rollout, and only for that build's reads;
+- **rolling the image back once a ``registered`` build exists requires
+  running this downgrade first.** The downgrade rewrites what an old server
+  could not read: a REGISTERED build becomes CANCELLED (terminal, ran
+  nothing) and a ``build_registered`` event becomes ``build_cancelled``,
+  then drops the column and restores the old CHECK. Postgres cannot drop an
+  enum label, so the two labels stay in the types, unused.
 
 Revision ID: 5f1b7c3e9a20
 Revises: 3c8e1a7d5b42
@@ -64,11 +80,25 @@ def upgrade() -> None:
         sa.Column("plan_only", sa.Boolean(), server_default=sa.false(), nullable=False),
     )
     op.drop_constraint(_CHECK, "event", type_="check")
-    op.create_check_constraint(
-        _CHECK,
-        "event",
-        f"plan_id IS NULL OR event_type::text NOT IN ({_NEW_BUILD_EVENTS})",
+    op.execute(
+        f"ALTER TABLE event ADD CONSTRAINT {_CHECK} CHECK (plan_id IS NULL OR"
+        f" event_type::text NOT IN ({_NEW_BUILD_EVENTS})) NOT VALID"
     )
+    _validate(_CHECK)
+
+
+def _validate(constraint: str) -> None:
+    """``VALIDATE CONSTRAINT`` outside the DDL's transaction, so its scan of
+    ``event`` holds SHARE UPDATE EXCLUSIVE (writes pass) rather than the
+    ``ADD CONSTRAINT``'s ACCESS EXCLUSIVE. Inline when the caller owns the
+    transaction: there is nothing this migration may commit."""
+    statement = f"ALTER TABLE event VALIDATE CONSTRAINT {constraint}"
+    context = op.get_context()
+    if getattr(context, "_in_external_transaction", False):
+        op.execute(statement)
+        return
+    with context.autocommit_block():
+        op.execute(statement)
 
 
 def downgrade() -> None:
@@ -79,7 +109,9 @@ def downgrade() -> None:
         " WHERE event_type = 'build_registered'"
     )
     op.drop_constraint(_CHECK, "event", type_="check")
-    op.create_check_constraint(
-        _CHECK, "event", f"plan_id IS NULL OR event_type NOT IN ({_OLD_BUILD_EVENTS})"
+    op.execute(
+        f"ALTER TABLE event ADD CONSTRAINT {_CHECK} CHECK (plan_id IS NULL OR"
+        f" event_type NOT IN ({_OLD_BUILD_EVENTS})) NOT VALID"
     )
     op.drop_column("build", "plan_only")
+    _validate(_CHECK)
