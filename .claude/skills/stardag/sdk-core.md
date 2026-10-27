@@ -80,17 +80,23 @@ class CustomTarget(sd.TargetTask[LoadableSaveableFileSystemTarget[dict]]):
 
 Use when: custom output paths, non-standard serializers, or S3/remote targets.
 
-### AliasTask[T] (Reference Remote Outputs)
+### Task.ref (Reference Registered Tasks)
 
-Reference a task output that was produced elsewhere:
+Reference a task the registry already holds, by id, instead of
+re-composing it (`stardag tasks ref <task-id>` prints the line):
 
 ```python
-remote_task = sd.AliasTask[pd.DataFrame].from_registry(
-    id="abc123...",  # a task id, str or UUID
-    registry=registry,  # optional; default is the configured registry
-)
-data = remote_task.load()
+model = TrainedModel.ref("6f1c...", instance_id="0193...")  # no registry call
+evaluation = Evaluate(model=model)  # same id as with the real task
+sd.build(evaluation)                # hydrates `model` from the registry first
+model.hydrate()                     # -> TrainedModel; model.load() delegates
 ```
+
+`TrainedModel.ref(...)` is a `TaskRef[TrainedModel, LoadedT]`, a
+`Task[LoadedT]`: pyright accepts it as `sd.TaskLoads[LoadedT]`. Builds
+replace every reference with its hydrated task before registering;
+`sd.resolve_refs(tasks)` does it outside a build. `sd.AliasTask` is
+deprecated in favour of it.
 
 ## Decorator API (@sd.task)
 

@@ -107,14 +107,17 @@ sd.Task[T]              # Main task base class
 sd.LoadableTask[T]      # Task with load() but no filesystem target
 sd.TargetTask[T]        # Task with explicit target control
 sd.BaseTask             # Abstract base (rarely used directly)
-sd.AliasTask[T]         # Reference an existing task output by task id
+MyTask.ref(task_id, instance_id=...)  # Typed reference to a registered task
+sd.resolve_refs(tasks)  # Hydrate every TaskRef in a DAG (builds do this)
+sd.AliasTask[T]         # Deprecated: use MyTask.ref
 sd.LoadValidator[T]     # Automatic validation on _save() and load()
 
 # Decorators & Types
 sd.task                 # @sd.task decorator
 sd.Depends[T]           # Dependency injection (decorator API)
 sd.TaskLoads[T]         # Polymorphic dependency (class API)
-sd.TaskRef              # Immutable task reference (name, version, id)
+sd.TaskRef              # Typed task reference (from MyTask.ref)
+sd.TaskSlug             # Name, version, id and slug of a task
 
 # Parameters
 sd.StardagField(...)               # significant=False, or compat_default=... (significant fields)

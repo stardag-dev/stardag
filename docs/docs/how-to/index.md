@@ -9,6 +9,7 @@ Practical guides for common tasks and integrations.
 ## Operating DAGs
 
 - **[Evolve a DAG Safely](evolve-dags.md)** - Change dependencies, tune a run per build, deploy new code beside running builds
+- **[Reference Existing Tasks](reference-existing-tasks.md)** - Point code at a task the registry already holds, instead of re-composing it
 
 ## Integrations
 

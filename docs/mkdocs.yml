@@ -164,6 +164,7 @@ nav:
       - Integrate with Prefect: how-to/integrate-prefect.md
       - Integrate with Modal: how-to/integrate-modal.md
       - Evolve a DAG Safely: how-to/evolve-dags.md
+      - Reference Existing Tasks: how-to/reference-existing-tasks.md
       - Self-host on Modal: how-to/self-host-modal.md
   - Configuration:
       - configuration/index.md

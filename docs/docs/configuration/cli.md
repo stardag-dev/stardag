@@ -607,6 +607,7 @@ matches.
     stardag tasks list [--status S] [--limit N] [--cursor C] [--json]
     stardag tasks show <task-id> [--include-ended] [--events N] [--json]
     stardag tasks check <task-id> --module MODULE [--json]
+    stardag tasks ref <task-id> [--instance <id>] [--module MODULE] [--json]
     stardag tasks retry <task-id> [--build <build-id>] [--yes] [--json]
     stardag tasks cancel <task-id> [--build <build-id>] [--yes] [--json]
     stardag tasks exclude <plan-id> <task-id> --reason TEXT [--yes] [--json]
@@ -625,6 +626,7 @@ matches.
     uv run stardag tasks list [--status S] [--limit N] [--cursor C] [--json]
     uv run stardag tasks show <task-id> [--include-ended] [--events N] [--json]
     uv run stardag tasks check <task-id> --module MODULE [--json]
+    uv run stardag tasks ref <task-id> [--instance <id>] [--module MODULE] [--json]
     uv run stardag tasks retry <task-id> [--build <build-id>] [--yes] [--json]
     uv run stardag tasks cancel <task-id> [--build <build-id>] [--yes] [--json]
     uv run stardag tasks exclude <plan-id> <task-id> --reason TEXT [--yes] [--json]
@@ -678,6 +680,13 @@ deployments`.
   The command accepts `--report`, but only to refuse it: it exits 1 with
   a message saying to trigger a build instead, because there is no route
   for a bare observation outside a build's discovery.
+- `tasks ref <task-id>` — print the code that references the task: the
+  import of its class and a `Task.ref(...)` call, pinned to an instance
+  (`--instance`, default the task's newest). The class's module is found
+  by importing the task's namespace; pass `--module` (repeatable) when the
+  namespace is not the module, or a note on stderr says the printed import
+  is a guess. Writes nothing. See
+  [Reference Existing Tasks](../how-to/reference-existing-tasks.md).
 - `tasks retry` — reset a failed (or otherwise ended) task to `PENDING`
   under the build's active plan, so its next tick or driver runs it
   again. Refused on `COMPLETED` or under a live claim.

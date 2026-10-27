@@ -33,6 +33,48 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   unreadable or mismatching entry is discarded and re-read. Writes are
   atomic. `stardag cache clear [--all]` empties it;
   `STARDAG_REGISTRY_CACHE=0` turns it off.
+- **New: `Task.ref(task_id, instance_id=None)`, a typed reference to a
+  registered task** (STA-148). Code can point at a task the registry
+  already holds (a trained model, a dataset) by id, instead of re-composing
+  it from factories and defaults that keep moving and silently re-key it.
+  `TrainedModel.ref(...)` is a `TaskRef[TrainedModel, Model]`, a
+  `Task[Model]`, so a type checker accepts it wherever an
+  `sd.TaskLoads[Model]` is and rejects it for any other loaded type;
+  `.hydrate()` returns a `TrainedModel`. Constructing one makes no registry
+  call; its id is the referenced task id, and a task given it as a
+  dependency has the same id as with the real task. `.hydrate()` reads the
+  instance through `from_registry` (a pinned reference from the local body
+  cache, offline after one read) and checks the class and the task id;
+  `complete()`, `target()` and `load()` delegate to it. See the new how-to,
+  "Reference Existing Tasks".
+- **New: builds hydrate references at start** (STA-148). `sd.build`,
+  `build_aio`, the sequential builds and the Modal triggers replace every
+  `TaskRef` in the DAG (roots, nested fields, lists and dicts of tasks)
+  with its hydrated task before discovery, so the registry stores real
+  bodies only and workers and `run()` see real tasks. `sd.resolve_refs`
+  does the same outside a build. A reference that reaches an instance body
+  or a Modal payload unhydrated raises `sd.TaskRefNotHydratedError`;
+  hydration failures raise `sd.TaskRefHydrationError`.
+- **New: `stardag tasks ref <task-id> [--instance <id>]`** (STA-148)
+  prints the import of a registered task's class and a `ref(...)` call,
+  pinned to an instance (the newest by default).
+- **Changed: `from_registry` validates a body into the class it names**
+  (STA-148). A body of an unrelated class is refused by name rather than as
+  a task id mismatch, `Base.from_registry(...)` returns the concrete
+  subclass the task was registered as, and a nested task class whose
+  module is not imported is named.
+- **Deprecated: `AliasTask`** (STA-148), in favour of `Task.ref`. It now
+  emits a `DeprecationWarning` when constructed; it still works.
+- **Renamed: the former `stardag.TaskRef` dataclass is `stardag.TaskSlug`**
+  (STA-148). `stardag.TaskRef` is now the typed reference above. The
+  dataclass (name, version, id and a `slug`) keeps its fields under the new
+  name, and `sd.TaskRef.from_task(task)` still returns one, with a
+  `DeprecationWarning`. Code constructing `sd.TaskRef(name=..., ...)`
+  directly, or checking `isinstance(x, sd.TaskRef)` for the old class,
+  must switch to `sd.TaskSlug`.
+- **Note: a task field named `ref`** now shadows `Task.ref`: pydantic
+  warns at class definition, the field still works, and that class loses
+  `.ref(...)`.
 - **Fixed: a detached claim could record no executor** (STA-90). The
   claiming start of a detached execution (a reactive tick's spawn, or a
   resident build's Modal-routed task) carried only the best-effort executor
