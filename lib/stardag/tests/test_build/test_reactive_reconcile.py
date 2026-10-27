@@ -312,13 +312,17 @@ async def test_an_unspawned_claim_under_a_superseded_plan_is_left_alone(
     registry = InMemoryRegistry()
     task = SyncOnlyTask(name=f"old-plan-{new_id()}")
     build_id, _ = await _plan(registry, [task])
-    dead = await _dead_claim(registry, build_id, task, ref=None, age_seconds=3600)
-    registry.executions[dead].plan_id = new_id()  # an earlier plan's claim
+    await _dead_claim(registry, build_id, task, ref=None, age_seconds=3600)
     executor = FakeDetachedExecutor(registry=registry)
     from stardag.build._reactive._config import TickSummary
 
+    # The build has since moved to another plan: the claim's plan is no
+    # longer the active one (its ledger row still reads normally).
+    frontier = registry.build_get_frontier(build_id).model_copy(
+        update={"plan_id": new_id()}
+    )
     acted = await _reconcile.Reconciler().run(
-        registry.build_get_frontier(build_id),
+        frontier,
         registry=registry,
         task_executor=executor,
         summary=TickSummary(outcome="x"),

@@ -500,6 +500,25 @@ class TestTheWorkerRule:
         assert _run(planned) is None
         assert planned.task.complete()
 
+    def test_a_released_claim_on_the_ledger_does_not_run(
+        self, default_in_memory_fs_target
+    ):
+        """Its ref is there, but its claim was released meanwhile (Copilot
+        on #508): that is a "no", latched before ``run()``."""
+        from datetime import datetime, timezone
+
+        from stardag.exceptions import ExecutionCancelled
+
+        planned = plan_and_claim(make_range(limit=2))
+        row = planned.registry.executions[planned.execution_id]
+        row.executor_ref = WORKER_CALL_ID
+        row.claim_released_at = datetime.now(timezone.utc)
+        row.claim_outcome = "cancelled"
+        self._start_unanswered(planned)
+        with pytest.raises(ExecutionCancelled):
+            _run(planned)
+        assert not planned.task.complete()
+
     def test_an_unreadable_ledger_does_not_run(self, default_in_memory_fs_target):
         from stardag.exceptions import ExecutionCancelled
 

@@ -200,7 +200,7 @@ class FakeDetachedExecutor(TaskExecutorABC):
         except Exception:
             return False
         own = next((x for x in ledger if x.id == execution_id), None)
-        return own is not None and own.executor_ref == ref
+        return own is not None and own.executor_ref == ref and own.still_wanted
 
     def _wake(self, plan_id: UUID) -> None:
         registry = self.registry

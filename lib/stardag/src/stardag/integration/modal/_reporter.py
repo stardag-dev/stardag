@@ -310,7 +310,11 @@ class _WorkerLifecycleReporter:
             )
             return
         execution = next((x for x in ledger if x.id == self.execution_id), None)
-        if execution is not None and execution.executor_ref == ref:
+        if (
+            execution is not None
+            and execution.executor_ref == ref
+            and execution.still_wanted
+        ):
             return
         self.cancellation.note_cancelled(
             "its start was not recorded, and the ledger does not name this "
