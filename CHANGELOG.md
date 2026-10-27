@@ -8,6 +8,18 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **Added: task annotations and task search** (STA-149).
+  `registry.task_annotate(task_id, tags=..., description=...)` sets a
+  task's tags and description (omitted arguments are left unchanged), and
+  `registry.task_list(...)` takes `namespace`, `name`, `tags` (all of
+  them), `id_prefix` and `q` (case-insensitive substring of name, namespace
+  or description). `TaskInfo` gains `tags` and `description`, empty against
+  an older registry. CLI: `stardag tasks annotate <id> --tag/--add-tag/
+--remove-tag/--clear-tags/--description`, and `stardag tasks list --tag
+--name --namespace --id-prefix --q`; `tasks show` and `tasks list` show
+  the tags. Needs the matching server: against an older registry,
+  annotating fails with a clear error, and a filtered list is refused
+  rather than answered unfiltered (an unfiltered list works as before).
 - **Fixed: a detached claim could record no executor** (STA-90). The
   claiming start of a detached execution (a reactive tick's spawn, or a
   resident build's Modal-routed task) carried only the best-effort executor
@@ -187,6 +199,22 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### Server
 
+- **Added: task annotations, task search filters and an instance read**
+  (STA-149). A task (the completion) gains `tags` and `description`:
+  mutable annotations outside every hash and every registration payload,
+  set by `PATCH /tasks/{task_id}` with `{tags?, description?}` (an omitted
+  field is unchanged; tags are trimmed, deduplicated and sorted, at most 32
+  of at most 64 characters; a description of at most 4096). The write
+  counts against the workspace's write rate limit, like any write that
+  does not finish running work. `GET /tasks` filters by `namespace` and
+  `name` (exact), `tag` (repeatable, all of them), `id_prefix` and `q`
+  (case-insensitive substring of name, namespace or description), and task
+  summaries and details carry the annotations. `GET /instances/{id}`
+  returns one instance of the caller's environment: `id`, `task_id`,
+  `deployment_id`, `settings_hash`, `instance_hash`, `body`, `created_at`,
+  `expanded_at`. Migration: two columns (`tags` defaults to empty, so
+  existing tasks read as untagged) and a GIN index; additive in both
+  directions of a rolling deploy.
 - **Changed: the writes that finish running work get their own rate-limit
   window, and a workspace can have its own limit** (STA-135). The
   per-workspace write limit (`LIMITS_MAX_REQUESTS_PER_MINUTE`) refused

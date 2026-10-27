@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import timedelta
+from types import EllipsisType
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -52,7 +53,9 @@ from stardag.testing._registry_state import (
     ArtifactRow,
     BuildRow,
     DeploymentRow,
+    MAX_DESCRIPTION_LENGTH,
     Event,
+    normalise_tags,
     refuse,
     settings_hash,
 )
@@ -344,6 +347,29 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
         ]
         instances.reverse()
         return self._task_summary(task, instances=instances)
+
+    def task_annotate(
+        self,
+        task_id: str,
+        *,
+        tags: Sequence[str] | None = None,
+        description: str | None | EllipsisType = ...,
+    ) -> TaskInfo:
+        """Mirrors ``PATCH /tasks/{task_id}``: omitted fields unchanged,
+        tags normalised, a blank description cleared; neither the status
+        nor ``status_at`` moves."""
+        self._record(
+            "task_annotate", task_id=task_id, tags=tags, description=description
+        )
+        task = self.task(task_id)
+        new_tags = normalise_tags(tags) if tags is not None else task.tags
+        if description is not ...:
+            text = (description or "").strip()
+            if len(text) > MAX_DESCRIPTION_LENGTH:
+                raise refuse("invalid_description", status=422)
+            task.description = text or None
+        task.tags = new_tags
+        return self._task_summary(task)
 
     def task_list_artifacts(self, task_id: str) -> list[TaskArtifactInfo]:
         self.task(task_id)

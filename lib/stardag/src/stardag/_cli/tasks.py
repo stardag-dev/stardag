@@ -5,8 +5,12 @@ A **task** is the completion (``task_id``) with its global status and
 claim; it holds no parameters. An **instance** is one construction of it
 under a scope ``(deployment, settings)``, with the body (design.md, D1/D2).
 
-    stardag tasks list [--status S] [--cursor C]  # most recent change first
+    stardag tasks list [--status S] [--tag T] [--name N] [--namespace NS]
+                       [--id-prefix P] [--q TEXT] [--cursor C]
+                                                 # most recent change first
     stardag tasks show <task-id>                 # task, claim, executions, events
+    stardag tasks annotate <task-id> [--tag T] [--add-tag T] [--remove-tag T]
+                       [--clear-tags] [--description TEXT]
     stardag tasks check <task-id> -m <module>    # run complete() locally
     stardag tasks retry <task-id> [--build <id>] [--yes]   # reset to PENDING
     stardag tasks cancel <task-id> [--build <id>] [--yes]  # release the claim
@@ -18,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import typer
+from rich.markup import escape
 from rich.table import Table
 
 from stardag._cli._output import (
@@ -40,6 +45,7 @@ from stardag._cli.tasks_actions import (
     tasks_exclude,
     tasks_retry,
 )
+from stardag._cli.tasks_annotate import tasks_annotate
 from stardag.exceptions import StardagError
 from stardag._cli.executions import render_executions
 from stardag.registry import EventInfo, TaskArtifactInfo, TaskInfo
@@ -49,6 +55,7 @@ app.command("check")(tasks_check)
 app.command("retry")(tasks_retry)
 app.command("cancel")(tasks_cancel)
 app.command("exclude")(tasks_exclude)
+app.command("annotate")(tasks_annotate)
 
 _TASK_ID = typer.Argument(..., help="Task ID (the completion hash)")
 
@@ -174,6 +181,9 @@ def _render_task(task: TaskInfo, artifacts: list[TaskArtifactInfo]) -> None:
     table.add_column("Field", style="bold")
     table.add_column("Value")
     table.add_row("Task", name or "-")
+    table.add_row("Tags", escape(", ".join(task.tags)) if task.tags else "-")
+    if task.description:
+        table.add_row("Description", escape(task.description))
     table.add_row("Version", task.version or "-")
     table.add_row("Output", task.output_uri or "-")
     table.add_row("Status", f"{task.status or '-'} (since {stamp(task.status_at)})")
@@ -220,27 +230,60 @@ def tasks_list(
         help="Only tasks in this global status (pending, running, completed, "
         "failed, cancelled, skipped, suspended, interrupted).",
     ),
+    tag: Optional[list[str]] = typer.Option(
+        None,
+        "--tag",
+        help="Only tasks carrying this tag (repeatable: all of them).",
+    ),
+    name: Optional[str] = typer.Option(
+        None, "--name", help="Only tasks of this task name (exact)."
+    ),
+    namespace: Optional[str] = typer.Option(
+        None,
+        "--namespace",
+        help="Only tasks in this namespace (exact; '' is the root namespace).",
+    ),
+    id_prefix: Optional[str] = typer.Option(
+        None, "--id-prefix", help="Only tasks whose ID starts with this."
+    ),
+    q: Optional[str] = typer.Option(
+        None,
+        "--q",
+        help="Only tasks whose name, namespace or description contains this "
+        "(case-insensitive).",
+    ),
     limit: int = typer.Option(50, "--limit", "-n", min=1, max=500),
     cursor: Optional[str] = typer.Option(
         None,
         "--cursor",
-        help="Start after the previous page (the cursor it printed as next).",
+        help="Start after the previous page (the cursor it printed as next); "
+        "pass the same filters again.",
     ),
     stardag_profile: Optional[str] = _PROFILE_OPTION,
     stardag_env: Optional[str] = _ENV_OPTION,
     json_output: bool = JSON_OPTION,
 ) -> None:
     """List tasks in the environment, most recent status change first, a
-    page at a time. ``--status running`` is the claim-holder question: the
-    Claim column names the build holding each claim.
+    page at a time. Every filter given must hold. ``--status running`` is
+    the claim-holder question: the Claim column names the build holding
+    each claim.
 
-    Reads ``GET /tasks``. Writes nothing. v1's ``--older-than``, ``--name``
-    and ``--namespace`` filters are not available: the server's task list
-    filters by status only.
+    Reads ``GET /tasks``. Writes nothing. A registry that predates the
+    discovery filters (all but ``--status``) is refused rather than
+    answered unfiltered. v1's ``--older-than`` is not available.
     """
     registry = _resolve_registry(stardag_profile, stardag_env)
     try:
-        page = registry.task_list(status=status, limit=limit, cursor=cursor)
+        page = registry.task_list(
+            status=status,
+            namespace=namespace,
+            name=name,
+            tags=tag or None,
+            id_prefix=id_prefix,
+            q=q,
+            limit=limit,
+            cursor=cursor,
+        )
     except StardagError as e:
         _fail(e)
     finally:
@@ -255,7 +298,7 @@ def tasks_list(
         console.print("No tasks match.")
         return
     table = Table(title="Tasks (most recent status change first)")
-    for col in ("Task ID", "Task", "Status", "Since", "Claim (build)"):
+    for col in ("Task ID", "Task", "Status", "Since", "Claim (build)", "Tags"):
         table.add_column(col)
     for t in page.tasks:
         table.add_row(
@@ -264,6 +307,7 @@ def tasks_list(
             t.status or "-",
             stamp(t.status_at),
             str(t.claim_build_id) if t.claim_build_id else "-",
+            escape(", ".join(t.tags)) if t.tags else "",
         )
     console.print(table)
     if page.next_cursor:

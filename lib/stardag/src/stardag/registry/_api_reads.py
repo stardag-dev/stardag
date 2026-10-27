@@ -1,14 +1,18 @@
 """The inspecting reads of :class:`~stardag.registry.APIRegistry` over HTTP
 (the seams of :class:`~stardag.registry._base_reads.RegistryReadsABC`, plus
-``task_get`` and ``task_list_artifacts``). Split from ``_api_registry.py``
+``task_get`` and ``task_list_artifacts``), and the one write that sits with
+them, ``task_annotate``. Split from ``_api_registry.py``
 by the module-size rule; each route is one :class:`Request`, as there.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from types import EllipsisType
 from typing import Any
 from uuid import UUID
 
+from stardag.exceptions import APIError
 from stardag.registry._api_http import HTTPTransport, Request
 from stardag.registry._api_routes import _task_artifacts_req
 from stardag.registry._base_reads import RegistryReadsABC
@@ -49,6 +53,46 @@ def _build_list_page_req(
         ),
         operation="List builds",
     )
+
+
+def _task_list_req(
+    *,
+    status: str | None,
+    namespace: str | None,
+    name: str | None,
+    tags: Sequence[str] | None,
+    id_prefix: str | None,
+    q: str | None,
+    limit: int,
+    cursor: str | None,
+) -> Request[TaskListPage]:
+    params: dict[str, Any] = _page_params(
+        limit,
+        cursor,
+        status=status,
+        namespace=namespace,
+        name=name,
+        id_prefix=id_prefix,
+        q=q,
+    )
+    if tags:
+        params["tag"] = list(tags)
+    discovery = sorted(set(params) - {"limit", "cursor", "status"})
+
+    def parse(payload: Any) -> TaskListPage:
+        # A registry that predates the discovery filters ignores them as
+        # unknown query parameters and answers unfiltered; it also serves
+        # no ``tags`` on its items, which is how that is told apart.
+        items = (payload or {}).get("tasks") or []
+        if discovery and items and "tags" not in items[0]:
+            raise APIError(
+                "List tasks: this registry does not support the filters "
+                f"{', '.join(discovery)} and would have answered unfiltered; "
+                "upgrade the registry server"
+            )
+        return TaskListPage.model_validate(payload)
+
+    return Request("GET", "/tasks", parse, params=params, operation="List tasks")
 
 
 def _list_of(key: str, model: Any) -> Any:
@@ -153,6 +197,37 @@ class APIRegistryReads(HTTPTransport, RegistryReadsABC):
             )
         )
 
+    def task_annotate(
+        self,
+        task_id: str,
+        *,
+        tags: Sequence[str] | None = None,
+        description: str | None | EllipsisType = ...,
+    ) -> TaskInfo:
+        body: dict[str, Any] = {}
+        if tags is not None:
+            body["tags"] = list(tags)
+        if description is not ...:
+            body["description"] = description
+        try:
+            return self.call(
+                Request(
+                    "PATCH",
+                    f"/tasks/{task_id}",
+                    TaskInfo.model_validate,
+                    json=body,
+                    operation=f"Annotate task {task_id}",
+                )
+            )
+        except APIError as e:
+            if e.status_code == 405:
+                raise APIError(
+                    f"Annotate task {task_id}: this registry does not support "
+                    "task annotations; upgrade the registry server",
+                    status_code=405,
+                ) from e
+            raise
+
     def task_list_artifacts(self, task_id: str) -> list[TaskArtifactInfo]:
         return self.call(_task_artifacts_req(task_id))
 
@@ -160,16 +235,24 @@ class APIRegistryReads(HTTPTransport, RegistryReadsABC):
         self,
         *,
         status: str | None = None,
+        namespace: str | None = None,
+        name: str | None = None,
+        tags: Sequence[str] | None = None,
+        id_prefix: str | None = None,
+        q: str | None = None,
         limit: int = 100,
         cursor: str | None = None,
     ) -> TaskListPage:
         return self.call(
-            Request(
-                "GET",
-                "/tasks",
-                TaskListPage.model_validate,
-                params=_page_params(limit, cursor, status=status),
-                operation="List tasks",
+            _task_list_req(
+                status=status,
+                namespace=namespace,
+                name=name,
+                tags=tags,
+                id_prefix=id_prefix,
+                q=q,
+                limit=limit,
+                cursor=cursor,
             )
         )
 

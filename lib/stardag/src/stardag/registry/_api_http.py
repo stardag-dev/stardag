@@ -28,7 +28,7 @@ import platform
 import random
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 
@@ -157,7 +157,8 @@ class Request(Generic[T]):
     path: str
     parse: Callable[[Any], T]
     json: Any = None
-    params: dict[str, str] = field(default_factory=dict)
+    # A list value is sent as the parameter repeated (``?tag=a&tag=b``).
+    params: Mapping[str, str | list[str]] = field(default_factory=dict)
     operation: str = "API call"
     # Whether a lost exchange is sent again (see ``_MAX_TRANSIENT_RETRIES``).
     # Off only for a route where a second delivery does worse than a lost

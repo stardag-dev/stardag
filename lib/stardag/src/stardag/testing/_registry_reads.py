@@ -1,6 +1,7 @@
 """The inspecting reads of :class:`~stardag.testing.InMemoryRegistry` —
 build lists with paging, a plan with its counts, a build's plans, task
-lists, a task's executions and events, a deployment — with the server's
+lists (with the discovery filters), a task's executions and events, a
+deployment — with the server's
 orderings and shapes (``services/reads.py``, ``services/plan_reads.py``,
 ``services/executions.py``). Cursors are opaque offsets here; only their
 round trip is part of the contract.
@@ -30,6 +31,7 @@ from stardag.testing._registry_state import (
     PlanRow,
     RegistryState,
     TaskRow,
+    normalise_tags,
     refuse,
 )
 
@@ -233,6 +235,8 @@ class ReadsMixin(RegistryState):
             claim_plan_id=claim_plan_id,
             claim_build_id=claim_build_id,
             execution_id=task.execution_id,
+            tags=list(task.tags),
+            description=task.description,
             **extra,
         )
 
@@ -240,16 +244,42 @@ class ReadsMixin(RegistryState):
         self,
         *,
         status: str | None = None,
+        namespace: str | None = None,
+        name: str | None = None,
+        tags: Sequence[str] | None = None,
+        id_prefix: str | None = None,
+        q: str | None = None,
         limit: int = 100,
         cursor: str | None = None,
     ) -> TaskListPage:
-        self._record("task_list", status=status, limit=limit, cursor=cursor)
+        self._record(
+            "task_list",
+            status=status,
+            namespace=namespace,
+            name=name,
+            tags=tags,
+            id_prefix=id_prefix,
+            q=q,
+            limit=limit,
+            cursor=cursor,
+        )
+        wanted = set(normalise_tags(tags)) if tags else set()
+        needle = q.lower() if q else None
+
+        def matches(t: TaskRow) -> bool:
+            text = (t.task_name, t.task_namespace, t.description or "")
+            return (
+                t.status_at is not None
+                and (status is None or t.status == status)
+                and (namespace is None or t.task_namespace == namespace)
+                and (name is None or t.task_name == name)
+                and wanted <= set(t.tags)
+                and (not id_prefix or t.task_id.startswith(id_prefix))
+                and (needle is None or any(needle in f.lower() for f in text))
+            )
+
         rows = sorted(
-            (
-                t
-                for t in self.tasks.values()
-                if t.status_at is not None and (status is None or t.status == status)
-            ),
+            (t for t in self.tasks.values() if matches(t)),
             key=lambda t: (t.status_at, t.task_id),
             reverse=True,
         )
