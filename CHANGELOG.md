@@ -164,7 +164,9 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
     budget;
   - **no executor ref after 10 minutes:** the execution is ended `lost`,
     on the condition, checked by the registry, that no ref was recorded
-    meanwhile.
+    meanwhile. This applies only when the app's run function keeps the
+    worker rule below: `Runner` does, and a custom run function that
+    delegates to one may declare `keeps_worker_rule = True`.
 
   Anything else is left alone: a call still running or restarting, a
   backend time limit or cancellation (the worker may still be reporting

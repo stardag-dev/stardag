@@ -95,3 +95,29 @@ async def test_another_executor_is_unknown(monkeypatch):
     assert await executor.probe_detached("elsewhere", "fc-1") == "unknown"
     assert executor.reconciles(MODAL_EXECUTOR_NAME)
     assert not executor.reconciles("elsewhere")
+    # Unspawned claims only for workers that keep the worker rule.
+    assert not executor.reconciles_unspawned(MODAL_EXECUTOR_NAME)
+    keeping = ModalTaskExecutor(
+        modal_app_name="app",
+        worker_selector=lambda t: "w",
+        worker_keeps_worker_rule=True,
+    )
+    assert keeping.reconciles_unspawned(MODAL_EXECUTOR_NAME)
+
+
+def test_only_a_runner_keeps_the_worker_rule():
+    """Copilot on #508: a custom run function that reports by itself does
+    not get unspawned-claim reconciliation unless it says it keeps the
+    rule (by delegating to a Runner)."""
+    from stardag.integration.modal import Runner
+    from stardag.integration.modal._protocols import _run_function_keeps_worker_rule
+
+    def custom(task):  # reports itself, somehow
+        return None
+
+    custom.reports_lifecycle = True  # type: ignore[attr-defined]
+    assert _run_function_keeps_worker_rule(Runner())
+    assert not _run_function_keeps_worker_rule(Runner(report_lifecycle=False))
+    assert not _run_function_keeps_worker_rule(custom)
+    custom.keeps_worker_rule = True  # type: ignore[attr-defined]
+    assert _run_function_keeps_worker_rule(custom)

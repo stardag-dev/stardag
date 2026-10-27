@@ -214,6 +214,10 @@ class FakeDetachedExecutor(TaskExecutorABC):
     def reconciles(self, executor: str) -> bool:
         return executor == FAKE_EXECUTOR
 
+    def reconciles_unspawned(self, executor: str) -> bool:
+        # Its self-reporting worker keeps the start rules (``_worker``).
+        return executor == FAKE_EXECUTOR
+
     async def probe_detached(self, executor: str, ref: str):  # type: ignore[override]
         return self.probes.get(ref, "unknown")
 

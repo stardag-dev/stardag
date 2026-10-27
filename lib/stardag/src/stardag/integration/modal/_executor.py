@@ -111,6 +111,7 @@ class ModalTaskExecutor(TaskExecutorABC):
         reactive: bool = False,
         modal_workspace: str | None = None,
         worker_timeouts: dict[str, int] | None = None,
+        worker_keeps_worker_rule: bool = False,
     ):
         """Initialize Modal executor.
 
@@ -130,6 +131,11 @@ class ModalTaskExecutor(TaskExecutorABC):
                 :class:`RunFunction`), so it only needs passing when you
                 construct the executor yourself against an app whose run
                 function does not report.
+            worker_keeps_worker_rule: Whether the deployed workers' run
+                function keeps the worker rule (``RunFunction``, "The worker
+                rule"; true for :class:`Runner`). A reconciling tick ends a
+                claim whose spawn never recorded a ref only when it does.
+                The deployed ``tick`` sets it from the app's run function.
             modal_workspace: Explicit Modal workspace name for the executor
                 metadata recorded with task starts (UI deep links). Default:
                 resolved once from the configured Modal token, best-effort.
@@ -160,6 +166,7 @@ class ModalTaskExecutor(TaskExecutorABC):
                 "ModalTaskExecutor(worker_timeouts={worker_name: seconds})."
             )
         self.worker_reports_lifecycle = worker_reports_lifecycle
+        self.worker_keeps_worker_rule = worker_keeps_worker_rule
         # Reactive scheduling: forward the app name + reactive flag so
         # workers wake the scheduler tick. That is the whole reactive
         # protocol — a worker that does not report cannot record its end or
@@ -532,9 +539,13 @@ class ModalTaskExecutor(TaskExecutorABC):
         spawn_tick(build_id, app_name)
 
     def reconciles(self, executor: str) -> bool:
-        """Modal calls: probed with ``get(timeout=0)``, and the runner keeps
-        the worker rule (``_WorkerLifecycleReporter._require_ref_recorded``)."""
+        """Modal calls: probed with ``get(timeout=0)``."""
         return executor == MODAL_EXECUTOR_NAME
+
+    def reconciles_unspawned(self, executor: str) -> bool:
+        """Only when the workers keep the worker rule
+        (``worker_keeps_worker_rule``)."""
+        return self.reconciles(executor) and self.worker_keeps_worker_rule
 
     async def probe_detached(self, executor: str, ref: str) -> DetachedState:
         """A non-blocking poll of the call's output (``get(timeout=0)``),

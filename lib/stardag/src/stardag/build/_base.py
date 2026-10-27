@@ -456,10 +456,16 @@ class TaskExecutorABC(ABC):
 
     def reconciles(self, executor: str) -> bool:
         """Whether a reconciling tick may end executions recorded under
-        ``executor`` (the name its handles carry): their calls can be
-        probed (:meth:`probe_detached`), and their workers keep the rule
-        that a call never runs the task before its ref is recorded. Opt-in;
-        default False -- such executions are left to their claim's TTL."""
+        ``executor`` (the name its handles carry) whose calls it can probe
+        (:meth:`probe_detached`) and finds finished. Opt-in; default False --
+        such executions are left to their claim's TTL."""
+        return False
+
+    def reconciles_unspawned(self, executor: str) -> bool:
+        """Whether a reconciling tick may end a claim recorded under
+        ``executor`` whose spawn never recorded a ref. Stricter than
+        :meth:`reconciles`: safe only if a worker whose start went
+        unrecorded never runs the task (the worker rule). Default False."""
         return False
 
     async def probe_detached(self, executor: str, ref: str) -> "DetachedState":
@@ -616,6 +622,9 @@ class RoutedTaskExecutor(TaskExecutorABC, Generic[ExecutorKeyT]):
 
     def reconciles(self, executor: str) -> bool:
         return any(e.reconciles(executor) for e in self.executors.values())
+
+    def reconciles_unspawned(self, executor: str) -> bool:
+        return any(e.reconciles_unspawned(executor) for e in self.executors.values())
 
     async def probe_detached(self, executor: str, ref: str) -> "DetachedState":
         # By the recorded executor name, not a task: the first routed

@@ -206,6 +206,8 @@ class Reconciler:
         assert execution.executor is not None and execution.task_id is not None
         try:
             if execution.executor_ref is None:
+                if not task_executor.reconciles_unspawned(execution.executor):
+                    return False
                 return await self._unspawned(execution, registry, summary, lease_lost)
             if out_of_time():
                 return False

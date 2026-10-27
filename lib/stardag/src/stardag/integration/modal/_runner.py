@@ -90,6 +90,11 @@ class Runner(RunFunction):
         )
     """
 
+    #: This run function keeps the worker rule of reconciliation (see
+    #: ``RunFunction``, "The worker rule"; enforced in ``__call__`` and
+    #: ``_reporter._require_ref_recorded``).
+    keeps_worker_rule = True
+
     def __init__(self, *, report_lifecycle: bool = True):
         """Initialize the runner.
 
