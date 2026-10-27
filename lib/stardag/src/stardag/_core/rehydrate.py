@@ -254,7 +254,55 @@ def task_from_registry_data(
 def _validate_for(
     cls: type[BaseTask], body: typing.Mapping[str, typing.Any]
 ) -> BaseTask:
-    return cls.model_validate(body, context={CONTEXT_MODE_KEY: "compat"})
+    """Validate ``body`` into the class it names, which must be ``cls`` or a
+    subclass of it (a body without discriminator keys validates into
+    ``cls``).
+
+    The class is resolved from the body rather than taken from ``cls``:
+    ``Base.from_registry`` then returns the concrete subclass the task was
+    registered as, a body of an unrelated class is refused by name rather
+    than as a task id mismatch, and a task class (nested ones included)
+    whose module is not imported is named.
+    """
+    target: type[BaseTask] = cls
+    namespace, name = body.get(NAMESPACE_KEY), body.get(NAME_KEY)
+    own_type_id = getattr(cls, "__type_id__", None)
+    if (
+        isinstance(namespace, str)
+        and isinstance(name, str)
+        and own_type_id != TypeId(namespace=namespace, name=name)
+    ):
+        try:
+            named = BaseTask._registry().get_class(
+                TypeId(namespace=namespace, name=name)
+            )
+        except KeyError as e:
+            raise TaskRehydrationError(
+                f"No task class registered for namespace={namespace!r}, "
+                f"name={name!r}. The module defining the task class must be "
+                "imported before rehydration (task classes register at "
+                "definition time)."
+            ) from e
+        if not (isinstance(named, type) and issubclass(named, cls)):
+            raise TaskRehydrationError(
+                f"The stored body is a {named.__module__}.{named.__qualname__} "
+                f"(namespace={namespace!r}, name={name!r}), not a "
+                f"{cls.__module__}.{cls.__qualname__}."
+            )
+        target = named
+    try:
+        return target.model_validate(body, context={CONTEXT_MODE_KEY: "compat"})
+    except Exception as e:
+        missing = _unregistered_task_types(body)
+        if not missing:
+            raise
+        listed = ", ".join(f"namespace={ns!r}, name={n!r}" for ns, n in sorted(missing))
+        raise TaskRehydrationError(
+            f"Failed to validate the stored body of {target.__qualname__}: no "
+            f"task class registered for the nested {listed}. The module "
+            "defining each task class in the body must be imported before "
+            "rehydration (task classes register at definition time)."
+        ) from e
 
 
 def _id_mismatch(task: BaseTask, task_id: UUID) -> TaskRehydrationError:

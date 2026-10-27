@@ -8,11 +8,13 @@ under a scope ``(deployment, settings)``, with the body (design.md, D1/D2).
     stardag tasks list [--status S] [--cursor C]  # most recent change first
     stardag tasks show <task-id>                 # task, claim, executions, events
     stardag tasks check <task-id> -m <module>    # run complete() locally
+    stardag tasks ref <task-id> [--instance <id>]  # print a Task.ref(...) line
     stardag tasks retry <task-id> [--build <id>] [--yes]   # reset to PENDING
     stardag tasks cancel <task-id> [--build <id>] [--yes]  # release the claim
     stardag tasks exclude <plan-id> <task-id>    # give up on it in one plan
 """
 
+import importlib
 import json
 from datetime import datetime, timezone
 from typing import Optional
@@ -33,8 +35,10 @@ from stardag._cli._registry_ctx import (
     _fail,
     _resolve_registry,
     console,
+    error_console,
 )
 from stardag._cli.tasks_actions import (
+    _import_modules,
     tasks_cancel,
     tasks_check,
     tasks_exclude,
@@ -268,3 +272,121 @@ def tasks_list(
     console.print(table)
     if page.next_cursor:
         console.print(f"[dim]Next page: --cursor {page.next_cursor}[/dim]")
+
+
+# -----------------------------------------------------------------------------
+# ref
+# -----------------------------------------------------------------------------
+
+
+def _class_import(namespace: str, name: str) -> tuple[str, str, bool]:
+    """``(module, class_name, located)`` for a registered task's class.
+
+    Found among the task classes this process has registered (``-m``
+    imports them), else by importing the namespace as a module (the
+    ``sd.auto_namespace(__name__)`` convention). ``located`` is False when
+    neither finds it: the namespace is then only a guess at the module.
+    """
+    from stardag._core.base_task import BaseTask
+    from stardag.polymorphic import TypeId
+
+    type_id = TypeId(namespace=namespace, name=name)
+    registry = BaseTask._registry()
+    try:
+        cls = registry.get_class(type_id)
+    except KeyError:
+        cls = None
+        if namespace:
+            try:
+                importlib.import_module(namespace)
+                cls = registry.get_class(type_id)
+            except Exception:
+                cls = None
+    if cls is None:
+        return namespace, name, False
+    return cls.__module__, cls.__qualname__, True
+
+
+@app.command("ref")
+def tasks_ref(
+    task_id: str = _TASK_ID,
+    instance: Optional[str] = typer.Option(
+        None,
+        "--instance",
+        "-i",
+        help="Pin this instance (default: the task's newest).",
+    ),
+    module: list[str] = typer.Option(
+        [],
+        "--module",
+        "-m",
+        help="Import path of a module defining the task's class, to print its "
+        "exact import (repeatable; patterns like 'pkg.tasks.*' are expanded). "
+        "Default: the task's namespace, imported as a module.",
+    ),
+    stardag_profile: Optional[str] = _PROFILE_OPTION,
+    stardag_env: Optional[str] = _ENV_OPTION,
+    json_output: bool = JSON_OPTION,
+) -> None:
+    """Print the code referencing a registered task: the import of its
+    class and a ``Task.ref(...)`` call, always pinned to an instance (the
+    newest unless ``--instance`` names one).
+
+    Paste it where code should keep pointing at this exact task instead of
+    re-composing it. Reads ``GET /tasks/{id}``. Writes nothing.
+    """
+    if module:
+        _import_modules(module)
+    registry = _resolve_registry(stardag_profile, stardag_env)
+    try:
+        task = registry.task_get(task_id)
+    except StardagError as e:
+        _fail(e)
+    finally:
+        registry.close()
+    if not task.instances:
+        _fail(StardagError(f"Task {task_id} has no instance to reference."))
+    if instance is None:
+        instance_id = str(task.instances[0].id)
+    else:
+        known = {str(i.id) for i in task.instances}
+        if instance not in known:
+            _fail(
+                StardagError(
+                    f"Task {task_id} has no instance {instance} (it has "
+                    f"{len(known)}: see 'stardag tasks show {task_id}')."
+                )
+            )
+        instance_id = instance
+    module_path, class_name, located = _class_import(
+        task.task_namespace, task.task_name
+    )
+    imported_as = class_name.partition(".")[0]
+    import_line = f"from {module_path} import {imported_as}" if module_path else ""
+    ref_line = f'{class_name}.ref("{task.task_id}", instance_id="{instance_id}")'
+    if json_output:
+        emit_json(
+            {
+                "task_id": task.task_id,
+                "instance_id": instance_id,
+                "module": module_path or None,
+                "class_name": class_name,
+                "module_located": located,
+                "import": import_line or None,
+                "ref": ref_line,
+            }
+        )
+        return
+    if import_line:
+        typer.echo(import_line)
+    typer.echo(ref_line)
+    if not located:
+        error_hint = (
+            f"Note: {task.task_namespace}.{task.task_name} was not found by "
+            "importing its namespace; the import above is a guess. Pass "
+            "-m <module> to print the exact one."
+            if task.task_namespace
+            else f"Note: {task.task_name} has no namespace, so its module is "
+            "unknown; pass -m <module> to print the import."
+        )
+        error_console.print(f"[dim]{error_hint}[/dim]", highlight=False)

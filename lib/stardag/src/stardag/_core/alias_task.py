@@ -1,4 +1,5 @@
 import base64
+import warnings
 from functools import cached_property
 from pickle import dumps as pickle_dumps
 from typing import TYPE_CHECKING, Any, Generic, Type, Union, get_args
@@ -34,6 +35,14 @@ class AliasedMetadata(BaseModel):
 
 class AliasTask(Task[LoadedT], Generic[LoadedT]):
     """A task that acts as an alias to another task's output.
+
+    .. deprecated::
+        Use :meth:`Task.ref <stardag.Task.ref>` instead:
+        ``MyTask.ref(task_id, instance_id=...)`` is typed, needs no pickled
+        loaded type, and is hydrated from the registry at build start, so
+        the registry stores the real task body. ``AliasTask`` emits a
+        ``DeprecationWarning`` when constructed and will be removed in a
+        future release.
 
     The purpose of `AliasTask` is to reference the output of another task that has been
     completed but can no longer be directly instantiated, for example due to breaking
@@ -133,6 +142,17 @@ class AliasTask(Task[LoadedT], Generic[LoadedT]):
                 body=body,
             )
         )
+
+    @model_validator(mode="after")
+    def _warn_deprecated(self) -> "AliasTask[LoadedT]":
+        warnings.warn(
+            "AliasTask is deprecated: use MyTask.ref(task_id, instance_id=...) "
+            "(see 'stardag tasks ref <task-id>'), which is typed and hydrated "
+            "from the registry at build start.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self
 
     @model_validator(mode="after")
     def _validate_specifies_generic_loads_type(self) -> "AliasTask[LoadedT]":

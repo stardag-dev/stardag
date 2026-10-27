@@ -33,6 +33,7 @@ from uuid import UUID
 from stardag import BaseTask, TaskStruct, flatten_task_struct
 from stardag._core.base_task import _has_custom_run, _has_custom_run_aio
 from stardag._core.instance import extend_path
+from stardag._core.task_ref import resolve_refs, resolve_refs_aio
 from stardag.build._base import (
     BuildContext,
     BuildExitStatus,
@@ -480,6 +481,7 @@ def build_sequential(
     """
     roots = _roots(tasks)
     registry = registry if registry is not None else registry_provider.get()
+    roots = resolve_refs(roots, registry)
     try:
         checked = resolve_settings(registry, resume_build_id, settings)
     except SettingsError:
@@ -569,6 +571,7 @@ async def build_sequential_aio(
     """
     roots = _roots(tasks)
     registry = registry if registry is not None else registry_provider.get()
+    roots = await resolve_refs_aio(roots, registry)
     try:
         checked = await resolve_settings_aio(registry, resume_build_id, settings)
     except SettingsError:

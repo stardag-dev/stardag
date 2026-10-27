@@ -38,7 +38,7 @@ from stardag._core.base_task import (
     BaseTask,
     LoadableTask,
     TargetTask,
-    TaskRef,
+    TaskSlug,
     TaskStruct,
     auto_namespace,
     flatten_task_struct,
@@ -52,6 +52,12 @@ from stardag._core.rehydrate import (
     task_from_registry_data,
 )
 from stardag._core.task import Task, get_default_relpath
+from stardag._core.task_ref import (
+    TaskRef,
+    TaskRefHydrationError,
+    TaskRefNotHydratedError,
+    resolve_refs,
+)
 from stardag._core.validate import LoadValidator
 from stardag._core.task_loads import TaskLoads
 from stardag._version import __version__
@@ -135,6 +141,10 @@ __all__ = [
     "task_from_body",
     "task_from_registry_data",
     "TaskRef",
+    "TaskRefHydrationError",
+    "TaskRefNotHydratedError",
+    "TaskSlug",
+    "resolve_refs",
     "TaskLoads",
     "TaskStruct",
     "target_factory_provider",

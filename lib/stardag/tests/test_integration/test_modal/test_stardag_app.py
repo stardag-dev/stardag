@@ -809,6 +809,63 @@ class TestStardagAppBuildSpawnRemote:
         assert captured["kwargs"]["build_kwargs"] == {"register_all": True}
 
 
+class TestTriggersHydrateTaskRefs:
+    """Every trigger hydrates the ``TaskRef`` s in its roots before it mints
+    a build or serializes a payload: the deployed side, like the registry,
+    only ever sees real tasks."""
+
+    def _make_app(self):
+        return StardagApp(
+            "test-ref-app",
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={"default": FunctionSettings(image=_make_image())},
+        )
+
+    @pytest.fixture
+    def stored(self):
+        from stardag._core.task_ref import clear_hydration_memo
+        from stardag.testing import InMemoryRegistry
+        from stardag.testing._registry_state import InstanceRow, TaskRow
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        clear_hydration_memo()
+        registry = InMemoryRegistry()
+        leaf = SyncOnlyTask(name="ref-leaf")
+        registry.tasks[str(leaf.id)] = TaskRow(
+            task_id=str(leaf.id),
+            task_namespace=leaf.get_namespace(),
+            task_name=leaf.get_name(),
+            version=leaf.version,
+            output_uri=None,
+        )
+        instance_id = uuid4()
+        registry.instances[instance_id] = InstanceRow(
+            id=instance_id,
+            deployment_id=uuid4(),
+            settings_hash="s",
+            instance_hash=str(leaf.instance_hash),
+            task_id=str(leaf.id),
+            body=leaf.instance_body(),
+        )
+        yield registry, leaf, SyncOnlyTask(name="ref-root", deps=(leaf,))
+        clear_hydration_memo()
+
+    @pytest.mark.parametrize("method", ["build_spawn", "build_remote", "build_trigger"])
+    def test_refs_are_hydrated_before_the_payload(
+        self, method, modal_function_stub, stored
+    ):
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        registry, leaf, expected = stored
+        root = SyncOnlyTask(name="ref-root", deps=(SyncOnlyTask.ref(leaf.id),))
+        assert root.id == expected.id
+        with registry_provider.override(registry):
+            getattr(self._make_app(), method)(root)
+        sent = modal_function_stub["kwargs"]["tasks"]
+        assert is_task_payload(sent)
+        assert sent["body"] == expected.instance_body()
+
+
 # ---------------------------------------------------------------------------
 # StardagApp.build_trigger
 # ---------------------------------------------------------------------------

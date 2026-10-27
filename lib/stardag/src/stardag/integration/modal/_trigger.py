@@ -22,6 +22,7 @@ from uuid import UUID
 import modal
 
 from stardag import BaseTask
+from stardag._core.task_ref import resolve_refs
 from stardag.build._registration import new_id
 from stardag.build._settings import resolve_settings, validate_settings
 from stardag.build._task_modules import TaskModulesError
@@ -95,6 +96,7 @@ class _Triggering:
         Returns:
             The Modal ``FunctionCall`` of the spawned build.
         """
+        tasks = resolve_refs(tasks)
         build_function = modal.Function.from_name(app_name=self.name, name="build")
         return build_function.spawn(
             tasks=to_task_payloads(tasks),
@@ -112,6 +114,7 @@ class _Triggering:
     ):
         """Run a resident build on the deployed app and wait for its
         ``BuildSummary``."""
+        tasks = resolve_refs(tasks)
         build_function = modal.Function.from_name(app_name=self.name, name="build")
         return build_function.remote(
             tasks=to_task_payloads(tasks),
@@ -218,6 +221,9 @@ class _Triggering:
                 "or configure an API key). Use build_spawn to trigger a "
                 "build without local registry credentials."
             )
+        # References are hydrated here, before the build is minted: the
+        # registry and every process downstream see real tasks only.
+        tasks = resolve_refs(tasks, registry)
         task_list = [tasks] if isinstance(tasks, BaseTask) else list(tasks)
         # A bare re-trigger runs under the settings its build already has
         # (the active plan's), not under none; ``settings={}`` says "none"

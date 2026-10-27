@@ -1,6 +1,9 @@
 import abc
 import typing
 from typing import ClassVar
+from uuid import UUID
+
+from typing_extensions import Self
 
 from stardag._core.base_task import BaseTask, LoadableTask, TargetTask
 from stardag._core.validate import LoadValidator, get_validators, run_validators
@@ -16,6 +19,9 @@ from stardag.target.serialize import (
     get_serializer,
     is_directory_serializer,
 )
+
+if typing.TYPE_CHECKING:
+    from stardag._core.task_ref import TaskRef
 
 LoadedT = typing.TypeVar("LoadedT")
 
@@ -143,6 +149,42 @@ class Task(
             # Task[T] -> LoadableTask[T] (identity mapping)
             return args
         return None
+
+    @classmethod
+    def ref(
+        cls,
+        task_id: UUID | str,
+        instance_id: UUID | str | None = None,
+    ) -> "TaskRef[Self, LoadedT]":
+        """A reference to a task of this class that the registry holds.
+
+        Use it instead of re-composing a task from code whose defaults may
+        have moved on since it ran: the reference keeps pointing at that
+        exact task. Constructing it makes no registry call; its :attr:`id`
+        is ``task_id``, and a task given it as a dependency has the same id
+        as with the real task. A build hydrates it from the registry before
+        anything else; :meth:`TaskRef.hydrate` does so explicitly.
+
+        ``stardag tasks ref <task-id>`` prints this call for a registered
+        task.
+
+        Args:
+            task_id: The referenced task id.
+            instance_id: Pin one instance (recommended: its non-significant
+                fields are then fixed, and it is served from the local body
+                cache, offline). Default: the newest at hydration time.
+
+        Returns:
+            A ``TaskRef[Self, LoadedT]``, accepted wherever an
+            ``sd.TaskLoads[LoadedT]`` is.
+        """
+        from stardag._core.task_ref import parametrized_ref_class
+
+        return parametrized_ref_class(cls)(
+            task_class=cls,
+            task_id=UUID(str(task_id)),
+            instance_id=None if instance_id is None else UUID(str(instance_id)),
+        )
 
     _load_validators: tuple[LoadValidator, ...] = ()
 

@@ -27,7 +27,7 @@ from prefect.futures import PrefectConcurrentFuture
 
 from stardag import (
     BaseTask,
-    TaskRef,
+    TaskSlug,
     TaskStruct,
 )
 from stardag._core.base_task import (
@@ -460,7 +460,7 @@ async def _build_dag_recursive(
     if already_built_dynamic_future is not None:
         return None
 
-    task_ref = TaskRef.from_task(task)
+    task_ref = TaskSlug.from_task(task)
 
     # Recurse dependencies
     dynamic_deps, prev_dynamic_future = task_id_to_dynamic_deps.get(task.id, ([], None))
@@ -563,7 +563,7 @@ async def create_markdown(task: BaseTask):
     else:
         output_uri = getattr(output(), "uri", "N/A")
 
-    markdown = f"""# {TaskRef.from_task(task).slug}
+    markdown = f"""# {TaskSlug.from_task(task).slug}
 **Task id**: `{task.id}`
 **Task class**: `{task.__module__}.{task.__class__.__name__}`
 **Output URI**: [{output_uri}]({output_uri})
@@ -574,7 +574,7 @@ async def create_markdown(task: BaseTask):
 """
 
     await create_markdown_artifact(  # type: ignore
-        key=format_key(f"{TaskRef.from_task(task).slug}-spec"),
+        key=format_key(f"{TaskSlug.from_task(task).slug}-spec"),
         description=f"Task spec for {task.id}",
         markdown=markdown,
     )

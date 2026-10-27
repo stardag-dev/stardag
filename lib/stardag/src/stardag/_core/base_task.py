@@ -449,6 +449,15 @@ class BaseTask(
         )
 
     @cached_property
+    def _contains_task_refs(self) -> bool:
+        """Whether a ``TaskRef`` is anywhere in this task's fields (see
+        ``stardag._core.task_ref.contains_refs``). Cached: a task is
+        frozen, and a ``model_copy`` drops it."""
+        from stardag._core.task_ref import fields_contain_refs
+
+        return fields_contain_refs(self)
+
+    @cached_property
     def _instance_body_json(self) -> str:
         from stardag._core.instance import canonical_instance_body_json
 
@@ -734,13 +743,18 @@ def flatten_task_struct(task_struct: TaskStruct | None) -> list[BaseTask]:
 
 
 @dataclass(frozen=True)
-class TaskRef:
+class TaskSlug:
+    """A task's name, version and id, with a short human-readable
+    :attr:`slug` (``<name>-v<version>-<id[:8]>``). Named ``TaskRef``
+    before ``stardag.TaskRef`` became the typed task reference
+    (``Task.ref``)."""
+
     name: str
     version: str | None
     id: UUID
 
     @classmethod
-    def from_task(cls, task: BaseTask) -> "TaskRef":
+    def from_task(cls, task: BaseTask) -> "TaskSlug":
         return cls(
             name=task.get_name(),
             version=task.version,
