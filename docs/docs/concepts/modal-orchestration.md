@@ -137,8 +137,7 @@ across ticks. Three other failure shapes bypass it entirely, distinct from
 each other and from it:
 
 - **A worker that dies with no restart coming** (OOM, a crash, a timeout
-  nothing caught once Modal's `retries=` are spent) simply lets its claim
-  lapse, and the next claiming
+  nothing caught) simply lets its claim lapse, and the next claiming
   start takes the execution over as a fresh attempt — up to
   `max_executions` (default 20) executions of the task in the build, after
   which the tick fails it with the count instead, and the build's
@@ -152,7 +151,9 @@ each other and from it:
   re-trigger moves it back to `PENDING`. Modal's own `retries=` does not
   help here: its retry finds the execution ended and stops before running
   anything. A transient error is retried inside the task, around the call
-  that fails — see [Task retries](../how-to/integrate-modal.md#task-retries).
+  that fails — see [Task retries](../how-to/integrate-modal.md#task-retries),
+  which also covers the attempts Modal's retry _does_ re-run (an uncaught
+  timeout, a lost failure report) and why they can overlap a takeover.
 
 A task past its `timeout` that caught the interruption, checkpointed and
 raised `ResumableInterruption` is recorded `INTERRUPTED` and resumed, up to

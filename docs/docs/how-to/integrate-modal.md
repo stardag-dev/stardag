@@ -762,9 +762,10 @@ whether its execution is still wanted. So a Modal retry re-runs the task
 - an exception that left the container before its failure was recorded —
   raised in `Runner.setup()`, say, or a failure report that never reached
   the registry;
-- a function **timeout the task did not catch**. That records nothing (see
-  [What happens if you don't catch it](#what-happens-if-you-dont-catch-it)),
-  and Modal retries a timed-out call with a fresh `timeout` window.
+- a function **timeout the task did not catch**. That records nothing, and
+  Modal retries a timed-out call with a fresh `timeout` window, under the
+  original claim, which nothing extends — see [What happens if you don't
+  catch it](#what-happens-if-you-dont-catch-it).
 
 **A task that raises inside `run()` is not one of them.** The worker
 records it `FAILED`, which ends the execution, and Modal's retry then
@@ -792,8 +793,8 @@ Where each failure is recovered instead:
   it is tracked across ticks, so there is no "still under budget" state for
   a retry to restore.
 - **A worker that died with no restart coming** (OOM, a crash, a network
-  partition, or a timeout nothing caught once Modal's retries are spent).
-  Its claim simply lapses on its TTL, and the next claiming start takes the
+  partition, or a timeout nothing caught). Its claim simply lapses on its
+  TTL, and the next claiming start takes the
   execution over as a fresh attempt. That loop is bounded by
   `TickConfig.max_executions` (default 20): once the member has that many
   executions under the build's plans, the tick fails it instead of taking
@@ -1157,10 +1158,14 @@ takeover like this one is bounded instead by `TickConfig.max_executions`
 (default 20): once the task has had that many executions in the build, the
 next lapse fails it with the count rather than starting another.
 
-A worker with `retries=` set is the one exception: Modal retries a
-timed-out call, and since nothing was recorded the retry runs the task
-again, from the start, with a fresh `timeout`. The claim takeover follows
-only once those retries are spent.
+A worker with `retries=` set adds a second path, and the two can overlap.
+Modal retries a timed-out call, and since nothing was recorded the retry
+runs the task again, from the start, with a fresh `timeout` — under the
+same execution and the same claim. Nothing extends that claim: it was
+taken for one attempt's `timeout` plus the grace, so a retry that runs
+longer than the grace outlives it. A tick may then take the task over and
+run it alongside the retry, whose result the registry refuses as no longer
+current.
 
 There is no separate probe or report-grace knob to raise here. The claim's
 built-in grace is generous specifically so an `except` block that is still
@@ -1209,14 +1214,16 @@ failures and fail the build for the one reason it was built to survive.
 | `TickConfig.max_interruptions`      | how many times a task may ask to be resumed                     |
 | `TickConfig.max_executions`         | executions in the build before a lapsed claim is not taken over |
 
-`retries=` sits apart from the scheduler's budgets: a Modal retry runs the
-same execution again, and only while nothing has recorded its end. So it
-does not multiply the runs the other knobs allow, but it can multiply
-container starts. A task that asked to be resumed is recorded
-`INTERRUPTED`, and each Modal retry after that starts a container that
-stops before `run()`. With `retries=3`, a task allowed 20 interruptions can
-start up to 80 containers, 20 of which run it. Each Modal retry also gets a
-fresh `timeout` window.
+They **multiply**, and how depends on whether the attempt recorded its
+end. After a recorded end (a failure, or a request to be resumed) a Modal
+retry stops before `run()`: it costs a container start and runs nothing, so
+a task allowed 20 interruptions under `retries=3` can start up to 80
+containers, 20 of which run it. After an attempt that recorded nothing (a
+timeout the task did not catch, a lost failure report) the retry runs the
+task again under the same execution, without spending one of
+`max_executions`: a task that keeps hanging past its `timeout` under
+`retries=3` and the default `max_executions=20` can run up to 80 times.
+Each Modal retry also gets a fresh `timeout` window.
 
 Two things `retries=` does _not_ do, both verified rather than assumed: it
 is not what recovers a **preempted or crashed** container (Modal restarts

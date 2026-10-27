@@ -82,7 +82,10 @@ class FunctionSettings(typing.TypedDict, total=False):
             **only when the attempt before it recorded nothing**: an
             exception raised before its failure was recorded (in
             ``setup()``, or a failure report that never reached the
-            registry), or a function timeout the task did not catch.
+            registry), or a function timeout the task did not catch. Such
+            a retry runs under the original claim, which nothing extends,
+            so one that runs longer than the claim's grace can be taken
+            over and run twice.
             **A task that raises in** ``run()`` **is not recovered**: it
             is recorded ``FAILED``, which ends the execution, and the
             retry stops before ``run()`` -- a container start that runs
