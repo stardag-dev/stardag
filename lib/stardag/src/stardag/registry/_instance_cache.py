@@ -165,6 +165,11 @@ def write(partition: str, info: TaskInstanceInfo) -> None:
         logger.debug("Could not write registry cache entry %s: %s", path, e)
 
 
+def has_entry(partition: str, instance_id: UUID | str) -> bool:
+    """Whether an entry exists (not whether it is readable)."""
+    return _entry_path(partition, instance_id).is_file()
+
+
 def discard(partition: str, instance_id: UUID | str) -> bool:
     """Delete one entry; whether there was one."""
     return _unlink(_entry_path(partition, instance_id))

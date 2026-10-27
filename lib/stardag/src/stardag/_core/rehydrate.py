@@ -49,6 +49,7 @@ if typing.TYPE_CHECKING:
 from pydantic import TypeAdapter
 
 from stardag._core.base_task import BaseTask
+from stardag._core.task_id import same_task_id
 from stardag.base_model import CONTEXT_MODE_KEY
 from stardag.exceptions import StardagError
 from stardag.polymorphic import NAME_KEY, NAMESPACE_KEY, SubClass, TypeId
@@ -97,6 +98,31 @@ def _unregistered_task_types(value: typing.Any) -> set[tuple[str, str]]:
         for v in value:
             found |= _unregistered_task_types(v)
     return found
+
+
+def _label(namespace: str, name: str) -> str:
+    """``namespace.Name``, or just ``Name`` for the root namespace."""
+    return f"{namespace}.{name}" if namespace else name
+
+
+_EVOLVE_DOCS = "https://stardag-dev.github.io/stardag/how-to/evolve-dags/"
+_COMPAT_DEFAULT_DOCS = "https://stardag-dev.github.io/stardag/concepts/parameters/"
+
+
+def _id_mismatch_message(
+    task: BaseTask, rehydrated_id: typing.Any, expected_id: typing.Any
+) -> str:
+    return (
+        f"The stored body of {type(task).__name__} recomputes to task id "
+        f"{rehydrated_id}, which does not match the expected {expected_id}: "
+        "the class's "
+        "significant fields no longer match the ones the body was stored "
+        "with. Common causes: a significant field was added without a "
+        "StardagField(compat_default=...) (see "
+        f"{_COMPAT_DEFAULT_DOCS}), or one was removed or renamed; less "
+        "often, a field whose serialization does not round-trip. See "
+        f"'Evolve a DAG Safely': {_EVOLVE_DOCS}"
+    )
 
 
 # Validates any dict carrying the polymorphic discriminator keys into the
@@ -215,16 +241,17 @@ def task_from_registry_data(
         missing = _unregistered_task_types(task_data)
         if missing:
             listed = ", ".join(
-                f"namespace={ns!r}, name={n!r}" for ns, n in sorted(missing)
+                f"{n} (namespace {ns or '<root>'})" for ns, n in sorted(missing)
             )
             raise TaskRehydrationError(
-                f"Failed to validate task_data for {namespace!r}.{name!r}: no "
-                f"task class registered for the nested {listed}. The module "
-                "defining each task class in the body must be imported before "
-                "rehydration (task classes register at definition time)."
+                f"Cannot rehydrate {_label(namespace, name)}: no task class is "
+                f"registered for {listed}, used in its parameters. Import the "
+                "module that defines each of these classes before loading "
+                "the task (task classes register when they are defined)."
             ) from e
         raise TaskRehydrationError(
-            f"Failed to validate task_data for {namespace!r}.{name!r}: {e}"
+            f"Cannot rehydrate {_label(namespace, name)}: the stored body does "
+            f"not validate against the class: {e}"
         ) from e
 
     if expected_task_id is not None:
@@ -242,11 +269,9 @@ def task_from_registry_data(
                 "annotations (sd.TaskLoads / sd.SubClass) to be "
                 "reconstructable from registry data."
             ) from e
-        if str(rehydrated_id) != str(expected_task_id):
+        if not same_task_id(rehydrated_id, expected_task_id):
             raise TaskRehydrationError(
-                f"Rehydrated task id {rehydrated_id} does not match the "
-                f"expected id {expected_task_id} — a field's serialization "
-                "is likely not losslessly round-trippable."
+                _id_mismatch_message(task, rehydrated_id, expected_task_id)
             )
     return task
 
@@ -258,13 +283,7 @@ def _validate_for(
 
 
 def _id_mismatch(task: BaseTask, task_id: UUID) -> TaskRehydrationError:
-    return TaskRehydrationError(
-        f"Rehydrated task id {task.id} does not match the requested "
-        f"id {task_id} — a field's serialization is likely not "
-        "losslessly round-trippable, or a significant field the "
-        "class no longer declares was silently dropped by compat "
-        "mode's lenient rules for non-significant fields."
-    )
+    return TaskRehydrationError(_id_mismatch_message(task, task.id, task_id))
 
 
 def load_from_registry(
@@ -288,11 +307,17 @@ def load_from_registry(
 
     from stardag.registry import _instance_cache
 
+    iid = UUID(str(instance_id))
+    partition = _instance_cache.registry_partition(registry)
     for attempt in (1, 2):
-        instance = registry.task_instance_get(instance_id, task_id=str(task_id))
-        if instance.task_id is not None and instance.task_id != str(task_id):
+        # Whether this read is served from the cache: only a cached copy
+        # is worth reading again when it fails, since a body fresh from the
+        # registry would come back the same.
+        cached = partition is not None and _instance_cache.has_entry(partition, iid)
+        instance = registry.task_instance_get(iid, task_id=str(task_id))
+        if instance.task_id is not None and not same_task_id(instance.task_id, task_id):
             raise TaskRehydrationError(
-                f"Instance {instance_id} belongs to task {instance.task_id}, "
+                f"Instance {iid} belongs to task {instance.task_id}, "
                 f"not to the requested task {task_id}."
             )
         error: TaskRehydrationError
@@ -301,7 +326,7 @@ def load_from_registry(
             rehydrated_id = task.id
         except Exception as e:
             error = TaskRehydrationError(
-                f"Failed to rehydrate instance {instance_id} of task {task_id}: {e}"
+                f"Failed to rehydrate instance {iid} of task {task_id}: {e}"
             )
             error.__cause__ = e
         else:
@@ -309,13 +334,10 @@ def load_from_registry(
                 return task
             error = _id_mismatch(task, task_id)
         # A body that does not validate, or no longer recomputes to its
-        # task id. If it was a cached copy, it may be the copy that is
-        # wrong: drop it, and read the registry's once more. Either way, it
-        # is not kept.
-        partition = _instance_cache.registry_partition(registry)
-        discarded = partition is not None and _instance_cache.discard(
-            partition, instance_id
-        )
-        if not discarded or attempt == 2:
+        # task id, is not kept. If it was a cached copy, the copy may be
+        # what is wrong: read the registry's once more.
+        if partition is not None:
+            _instance_cache.discard(partition, iid)
+        if not cached or attempt == 2:
             raise error
     raise AssertionError("unreachable")  # pragma: no cover
