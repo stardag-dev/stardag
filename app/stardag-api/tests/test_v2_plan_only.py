@@ -21,7 +21,13 @@ from httpx import AsyncClient
 from sqlalchemy import RowMapping, text
 
 from stardag_api.schemas_v2 import RegistrationItem
-from stardag_api.services import builds, exclusion, reactive, wakeups
+from stardag_api.services import (
+    builds,
+    exclusion,
+    plan_only_builds,
+    reactive,
+    wakeups,
+)
 from stardag_api.services.errors import Conflict
 from stardag_api.services.transitions import Transition
 from tests.v2_support import ENV, Harness, item, observed, unexpanded
@@ -144,10 +150,10 @@ async def test_registered_none_started(h: Harness):
         await h.start(plan, mid)
     assert exc.value.code == "build_not_running"
 
-    done = await _svc(h, builds.register_build, build)
+    done = await _svc(h, plan_only_builds.register_build, build)
     assert (done.status, done.plan_only) == ("registered", True)
     assert done.completed_at is not None
-    again = await _svc(h, builds.register_build, build)
+    again = await _svc(h, plan_only_builds.register_build, build)
     assert again.completed_at == done.completed_at
     types = [e["type"] for e in await _build_events(h, build)]
     assert types == ["build_started", "build_registered"]
@@ -164,17 +170,19 @@ async def test_registered_needs_a_sealed_plan_and_a_plan_only_build(h: Harness):
     root = item("Root")
     build, plan = await _plan_only(h, [root], [root], seal=False)
     with pytest.raises(Conflict) as exc:
-        await _svc(h, builds.register_build, build)
+        await _svc(h, plan_only_builds.register_build, build)
     assert (exc.value.code, exc.value.detail["reason"]) == (
         "plan_incomplete",
         "not_sealed",
     )
     await h.seal(plan)
-    assert (await _svc(h, builds.register_build, build)).status == "registered"
+    assert (
+        await _svc(h, plan_only_builds.register_build, build)
+    ).status == "registered"
 
     ordinary, _ = await h.planned([root], [root], seal=True)
     with pytest.raises(Conflict) as exc:
-        await _svc(h, builds.register_build, ordinary)
+        await _svc(h, plan_only_builds.register_build, ordinary)
     assert exc.value.code == "build_not_plan_only"
 
 
@@ -184,7 +192,7 @@ async def test_registered_with_no_plan_is_not_sealed(h: Harness):
         h, builds.create_build, root_task_ids=[root.task_id], plan_only=True
     )
     with pytest.raises(Conflict) as exc:
-        await _svc(h, builds.register_build, build.id)
+        await _svc(h, plan_only_builds.register_build, build.id)
     assert exc.value.detail == {"reason": "not_sealed", "plan_id": None}
 
 
@@ -214,7 +222,7 @@ async def test_a_plan_only_build_cannot_be_made_to_run(h: Harness, action: str):
     row = await h.build(build)
     assert (row["status"], row["reactive_app_name"]) == ("pending", None)
 
-    await _svc(h, builds.register_build, build)
+    await _svc(h, plan_only_builds.register_build, build)
     with pytest.raises(Conflict) as exc:
         await calls[action]()
     expected = (
@@ -236,7 +244,7 @@ async def test_a_registration_gone_wrong_can_be_failed_or_cancelled(
     closed = await _svc(h, fn, build)
     assert closed.status == ("failed" if terminal == "fail" else "cancelled")
     with pytest.raises(Conflict) as exc:
-        await _svc(h, builds.register_build, build)
+        await _svc(h, plan_only_builds.register_build, build)
     assert exc.value.code == "build_terminal"
 
 
@@ -255,7 +263,7 @@ async def test_skip_blocked_is_a_no_op_on_a_plan_only_build(h: Harness, closed: 
     if closed == "failed":
         await _svc(h, builds.fail_build, plan_only, error_message="gave up")
     elif closed == "registered":
-        await _svc(h, builds.register_build, plan_only)
+        await _svc(h, plan_only_builds.register_build, plan_only)
 
     result = await _svc(h, exclusion.skip_blocked, plan_only)
     assert (result.plan_id, result.skipped) == (None, [])
@@ -280,7 +288,7 @@ async def test_a_plan_only_build_is_never_woken_or_reported_stalled(
     t = item("T")
     plan_only, _ = await _plan_only(h, [t], [t], deployment_id=deployment)
     if registered:
-        await _svc(h, builds.register_build, plan_only)
+        await _svc(h, plan_only_builds.register_build, plan_only)
     other, other_plan = await h.planned([t], [t], deployment_id=deployment, seal=True)
     await _svc(h, reactive.set_reactive_meta, other, app_name="app", tick_kwargs=None)
     await _sql(

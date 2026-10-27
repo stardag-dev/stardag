@@ -44,6 +44,18 @@ def refuse(
     )
 
 
+def refuse_plan_only(build: "BuildRow", action: str) -> None:
+    """409 ``build_plan_only``: a plan-only build registers and runs
+    nothing, so it cannot ``action``."""
+    if build.plan_only:
+        raise refuse(
+            "build_plan_only",
+            f"build {build.id} is plan-only: it cannot {action}",
+            build_id=str(build.id),
+            build_status=build.status,
+        )
+
+
 def settings_hash(body: Mapping[str, str]) -> str:
     """The wire form (a UUID string) of the SDK's
     :func:`~stardag.build._settings.settings_hash`, which the registry

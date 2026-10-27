@@ -42,6 +42,7 @@ from stardag_api.services import (
     exclusion,
     executions,
     frontier,
+    plan_only_builds,
     plan_reads,
     reads,
     registration,
@@ -139,7 +140,7 @@ async def exit_early(build_id: UUID, db: Db, auth: Auth):
 @router.post("/builds/{build_id}/registered", response_model=BuildResponse)
 async def register_build(build_id: UUID, db: Db, auth: Auth):
     """End a plan-only build REGISTERED: its plan is sealed, nothing ran."""
-    return await builds.register_build(
+    return await plan_only_builds.register_build(
         db, auth.environment_id, build_id, triggered_by=_triggered_by(auth)
     )
 
