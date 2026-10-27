@@ -277,7 +277,7 @@ class ClaimConfig:
 
 
 #: What :meth:`TaskExecutorABC.probe_detached` can say of a detached call.
-DetachedState = Literal["running", "returned", "raised", "timed_out", "unknown"]
+DetachedState = Literal["running", "returned", "raised", "unknown"]
 
 
 @dataclass
@@ -468,15 +468,14 @@ class TaskExecutorABC(ABC):
         * ``"running"`` -- still running, or waiting to (re)start;
         * ``"returned"`` -- the call finished and returned;
         * ``"raised"`` -- the call finished by raising, or the backend ended
-          it with a failure (a crash, an internal failure);
-        * ``"timed_out"`` -- the backend ended it at its time limit;
+          it with a failure (its time limit, a crash, an internal failure);
         * ``"unknown"`` -- anything this executor cannot positively say,
           including a probe that failed.
 
-        A reconciling tick acts on ``"returned"``, ``"raised"`` and
-        ``"timed_out"`` (STA-94/STA-135), so an implementation must never
-        answer any of them for a call that may still run the task; when in
-        doubt, ``"unknown"``. It must not raise either.
+        A reconciling tick acts on ``"returned"`` and ``"raised"``
+        (STA-94/STA-135), so an implementation must never answer either for
+        a call that may still run the task; when in doubt, ``"unknown"``.
+        It must not raise either.
         Default: ``"unknown"`` -- an executor that cannot probe is never
         reconciled, its claims are left to their TTL.
         """

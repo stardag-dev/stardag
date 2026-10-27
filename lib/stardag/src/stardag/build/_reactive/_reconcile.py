@@ -21,8 +21,7 @@ running its task:
 
 * **R1** -- its executor positively reports the call finished
   (:meth:`~stardag.build.TaskExecutorABC.probe_detached` answers
-  ``"returned"``, ``"raised"`` or ``"timed_out"``). A finished call
-  reports nothing more.
+  ``"returned"`` or ``"raised"``). A finished call reports nothing more.
 * **R2** -- it never recorded an executor ref, it is older than
   ``TickConfig.unspawned_grace_seconds``, and the end is *conditional* on there
   still being no ref when the registry applies it
@@ -59,8 +58,6 @@ What an end does to the task:
   CANCELLED, and the next claiming start re-runs it;
 * raised -- the failure is reported for the execution, so it counts
   against the build's retry budget like any other;
-* timed out -- the interruption is reported, as the worker would have
-  (STA-44): charged to the interruption budget, and restarted;
 * never spawned -- ended ``lost``, and re-driven.
 """
 
@@ -71,7 +68,7 @@ import logging
 import typing
 from datetime import datetime, timezone
 
-from stardag.build._base import TaskExecutorABC
+from stardag.build._base import DetachedState, TaskExecutorABC
 from stardag.build._reactive._frontier_actions import is_registry_outage, rehydrate
 from stardag.exceptions import APIError
 from stardag.registry import BuildFrontier, ExecutionInfo, RegistryABC
@@ -85,6 +82,25 @@ logger = logging.getLogger(__name__)
 #: may take before it counts as ``"unknown"``.
 _MAX_CONCURRENT_PROBES = 8
 _PROBE_TIMEOUT_SECONDS = 15.0
+#: Holders examined per round: with the probe bound, a round fits well
+#: inside a tick's claim deadline; the rest wait for the next round, or a
+#: successor's (each probe is also skipped once the tick is out of time).
+_MAX_HOLDERS_PER_ROUND = 32
+
+
+async def _contained(probe: typing.Awaitable[DetachedState]) -> DetachedState:
+    """``probe``, never raising past it: anything but this tick's own
+    cancellation is ``"unknown"``. Inside the coroutine, not around it --
+    on Python 3.11 ``asyncio.wait_for`` runs it as a task, and a
+    ``SystemExit`` escaping a task is re-raised by the event loop rather
+    than handed to the awaiter."""
+    try:
+        return await probe
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        raise
+    except BaseException as e:
+        logger.debug(f"A probe raised {e!r}; treating the call as unknown.")
+        return "unknown"
 
 
 class Reconciler:
@@ -92,10 +108,19 @@ class Reconciler:
     registry supports the conditional end."""
 
     def __init__(
-        self, *, interval_seconds: float = 60.0, unspawned_grace_seconds: float = 600.0
+        self,
+        *,
+        interval_seconds: float = 60.0,
+        unspawned_grace_seconds: float = 600.0,
+        max_executions: int | None = None,
     ) -> None:
         self.interval_seconds = interval_seconds
         self.unspawned_grace_seconds = unspawned_grace_seconds
+        # A member that has spent its execution budget is not re-driven
+        # here: ending its execution ``lost`` makes it CANCELLED, which the
+        # tick's budget check (a takeover's) does not gate. Its claim is
+        # left to lapse, and the takeover then fails it under the budget.
+        self.max_executions = max_executions
         self._last: float | None = None
         self.supported = True
 
@@ -112,6 +137,7 @@ class Reconciler:
         task_executor: TaskExecutorABC,
         summary: "TickSummary",
         lease_lost: typing.Callable[[], bool],
+        out_of_time: typing.Callable[[], bool] = lambda: False,
     ) -> bool:
         """One round over ``frontier``'s running members. Returns whether it
         ended anything (the frontier is then stale). Never raises: a round
@@ -134,7 +160,11 @@ class Reconciler:
             and e.ended_at is None
             and e.executor is not None
             and task_executor.reconciles(e.executor)
-        ]
+            and (
+                self.max_executions is None
+                or running[e.task_id].attempts < self.max_executions
+            )
+        ][:_MAX_HOLDERS_PER_ROUND]
         if not holders:
             return False
         probes = asyncio.Semaphore(_MAX_CONCURRENT_PROBES)
@@ -147,6 +177,7 @@ class Reconciler:
                     task_executor=task_executor,
                     summary=summary,
                     lease_lost=lease_lost,
+                    out_of_time=out_of_time,
                     probes=probes,
                 )
                 for execution in holders
@@ -163,28 +194,31 @@ class Reconciler:
         task_executor: TaskExecutorABC,
         summary: "TickSummary",
         lease_lost: typing.Callable[[], bool],
+        out_of_time: typing.Callable[[], bool],
         probes: asyncio.Semaphore,
     ) -> bool:
         assert execution.executor is not None and execution.task_id is not None
         try:
             if execution.executor_ref is None:
                 return await self._unspawned(execution, registry, summary, lease_lost)
+            if out_of_time():
+                return False
             async with probes:
                 try:
                     state = await asyncio.wait_for(
-                        task_executor.probe_detached(
-                            execution.executor, execution.executor_ref
+                        _contained(
+                            task_executor.probe_detached(
+                                execution.executor, execution.executor_ref
+                            )
                         ),
                         timeout=_PROBE_TIMEOUT_SECONDS,
                     )
                 except TimeoutError:
                     state = "unknown"
-            if state not in ("returned", "raised", "timed_out") or lease_lost():
+            if state not in ("returned", "raised") or lease_lost():
                 return False
             if state == "raised":
                 return await self._raised(execution, registry, summary)
-            if state == "timed_out":
-                return await self._timed_out(execution, registry, summary)
             return await self._returned(
                 execution, running[execution.task_id], registry, summary
             )
@@ -257,30 +291,6 @@ class Reconciler:
         logger.warning(
             f"Execution {execution.id} of task {execution.task_id}: its call "
             "raised and its failure was never reported; reported now."
-        )
-        summary.reconciled += 1
-        return True
-
-    async def _timed_out(
-        self, execution: ExecutionInfo, registry: RegistryABC, summary: "TickSummary"
-    ) -> bool:
-        """What the worker reports when its own time runs out: an
-        interruption, charged to the build's interruption budget and
-        restarted -- not a failure (STA-44)."""
-        assert execution.plan_id is not None and execution.task_id is not None
-        await registry.member_interrupt_aio(
-            execution.plan_id,
-            execution.task_id,
-            execution_id=execution.id,
-            error_message=(
-                f"Execution {execution.id} ended without reporting: its "
-                f"{execution.executor} call {execution.executor_ref!r} hit its "
-                "time limit."
-            ),
-        )
-        logger.warning(
-            f"Execution {execution.id} of task {execution.task_id}: its call "
-            "timed out and the interruption was never reported; reported now."
         )
         summary.reconciled += 1
         return True

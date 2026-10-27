@@ -114,22 +114,22 @@ class TestFinishedWithoutReporting:
         assert fail["execution_id"] == dead
         assert "ended without reporting" in fail["error_message"]
 
-    async def test_a_timed_out_call_is_interrupted_not_failed(
+    async def test_a_member_past_its_execution_budget_is_left_to_its_ttl(
         self, default_in_memory_fs_target: Target
     ):
-        """What its worker would have reported (STA-44): an interruption,
-        charged to the interruption budget -- not a failure (local review
-        on #508)."""
+        """Re-driving makes the member CANCELLED, which the takeover's budget
+        check does not gate; past the budget the claim is left to lapse, and
+        the takeover fails it (Copilot on #508)."""
         registry = InMemoryRegistry()
-        task = SyncOnlyTask(name=f"slow-{new_id()}")
+        task = SyncOnlyTask(name=f"spent-{new_id()}")
         build_id, _ = await _plan(registry, [task])
-        dead = await _dead_claim(registry, build_id, task, ref="fc-slow")
+        await _dead_claim(registry, build_id, task, ref=None, age_seconds=3600)
         executor = FakeDetachedExecutor(registry=registry, workers=True)
-        executor.probes["fc-slow"] = "timed_out"
-        await _tick(registry, build_id, executor, ONE_PASS)
-        (interrupt,) = registry.calls_to("member_interrupt", task_id=str(task.id))
-        assert interrupt["execution_id"] == dead
-        assert not registry.called("member_fail", task_id=str(task.id))
+        config = TickConfig(
+            linger_seconds=0, poll_interval_seconds=0.01, max_executions=1
+        )
+        summary = await _tick(registry, build_id, executor, config)
+        assert summary.reconciled == 0 and _stops(registry) == []
 
     async def test_a_probe_that_raises_anything_does_not_take_the_tick_down(
         self, default_in_memory_fs_target: Target

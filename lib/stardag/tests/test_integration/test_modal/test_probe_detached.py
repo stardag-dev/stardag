@@ -31,6 +31,15 @@ class _Remote(ValueError):
         self.__line_cache__ = {}
 
 
+class _RemoteTimeout(TimeoutError):
+    """The task's own TimeoutError, re-raised from the container: it
+    finished, unlike the poll's unmarked TimeoutError (Copilot on #508)."""
+
+    def __init__(self) -> None:
+        super().__init__("task timed out")
+        self.__line_cache__ = {}
+
+
 class _RemoteExit(SystemExit):
     """A task's ``sys.exit()``, re-raised by Modal: must not take the tick
     down with it (local review on #508)."""
@@ -62,7 +71,8 @@ def _answering(monkeypatch, outcome):
         pytest.param(
             ExecutionCancelled("stopped"), "returned", id="stopped-before-run"
         ),
-        pytest.param(FunctionTimeoutError("t"), "timed_out", id="backend-timeout"),
+        pytest.param(FunctionTimeoutError("t"), "raised", id="backend-timeout"),
+        pytest.param(_RemoteTimeout(), "raised", id="task-timeout-error"),
         pytest.param(InternalFailure("i"), "raised", id="internal-failure"),
         pytest.param(RemoteError("r"), "raised", id="remote-error"),
         pytest.param(_Remote(), "raised", id="task-exception"),

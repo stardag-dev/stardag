@@ -344,6 +344,7 @@ class _Driver:
         self.reconciler = Reconciler(
             interval_seconds=config.reconcile_interval_seconds,
             unspawned_grace_seconds=config.unspawned_grace_seconds,
+            max_executions=config.max_executions,
         )
 
     def _out_of_time(self) -> bool:
@@ -441,6 +442,7 @@ class _Driver:
                         task_executor=self.executor,
                         summary=self.summary,
                         lease_lost=lambda: lease.lost,
+                        out_of_time=self._out_of_time,
                     ):
                         # Re-read before acting: the ends freed claims.
                         return False, True

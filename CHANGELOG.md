@@ -160,16 +160,17 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
   - **returned:** the completion is reported if the target is complete;
     otherwise the execution is ended `lost` and the task re-run;
-  - **raised:** the failure is reported, counting against the retry
-    budget;
-  - **timed out:** the interruption is reported, as the worker would have
-    (charged to the interruption budget, and restarted);
+  - **raised** (including the backend's time limit, which the worker
+    also reports as a failure unless the task asked to resume): the failure
+    is reported, counting against the retry budget;
   - **no executor ref after 10 minutes:** the execution is ended `lost`,
     on the condition, checked by the registry, that no ref was recorded
     meanwhile.
 
   Anything else is left alone: a call still running or restarting, a
-  probe that cannot tell, an executor without a probe. **Behaviour
+  probe that cannot tell, an executor without a probe, and a member that
+  has spent its execution budget (its claim lapses and the takeover fails
+  it). **Behaviour
   change:** a Modal worker whose start report gets no answer now reads the
   ledger and does not run the task unless its own ref is recorded there.
   It reports nothing and the tick re-drives the task, so a container that
