@@ -353,3 +353,114 @@ async def test_a_lost_execution_is_ended_its_claim_released_and_its_report_late(
         f"/api/v2/executions/{execution}/stopped", json={"outcome": "completed"}
     )
     assert bad.status_code == 422
+
+
+async def test_writes_that_finish_work_are_not_rate_limited(
+    client: AsyncClient, h: Harness, rate_limit: int
+):
+    """STA-135: refusing an end report, a renewal or a lease release sheds
+    no load -- the work is done or running either way -- it only orphans
+    claims. With the limit spent, those still go through; new work does
+    not."""
+    t = item("T")
+    build, plan = await h.planned([t], [t])
+    execution = await h.start(plan.id, t)
+    for _ in range(rate_limit):
+        created = await client.post(
+            "/api/v2/builds", json={"root_task_ids": ["t"], "id": str(uuid4())}
+        )
+        assert created.status_code == 200, created.text
+    limited = await client.post(
+        "/api/v2/builds", json={"root_task_ids": ["t"], "id": str(uuid4())}
+    )
+    assert limited.status_code == 429
+    renewed = await client.post(
+        f"/api/v2/tasks/{t.task_id}/claim/renew",
+        json={"execution_id": str(execution)},
+    )
+    assert renewed.status_code != 429, renewed.text
+    completed = await client.post(
+        f"/api/v2/plans/{plan.id}/members/{t.task_id}/complete",
+        json={"execution_id": str(execution)},
+    )
+    assert completed.status_code == 200, completed.text
+    notified = await client.post(f"/api/v2/builds/{build}/notify")
+    assert notified.status_code != 429, notified.text
+
+
+async def test_a_workspace_override_replaces_the_default(
+    client: AsyncClient, h: Harness, rate_limit: int
+):
+    """The hosting operator's per-workspace limit, set in the database."""
+    from sqlalchemy import update
+
+    from stardag_api.models import Workspace
+
+    async with h.sf() as s:
+        await s.execute(update(Workspace).values(max_write_requests_per_minute=5))
+        await s.commit()
+    for _ in range(5):
+        created = await client.post(
+            "/api/v2/builds", json={"root_task_ids": ["t"], "id": str(uuid4())}
+        )
+        assert created.status_code == 200, created.text
+    limited = await client.post(
+        "/api/v2/builds", json={"root_task_ids": ["t"], "id": str(uuid4())}
+    )
+    assert limited.status_code == 429
+    assert limited.json()["detail"]["limit"] == 5
+
+
+def test_only_the_finishing_writes_are_exempt():
+    from stardag_api.routes.registry_v2.guard import is_exempt
+
+    assert is_exempt("POST", "/api/v2/plans/{plan_id}/members/{task_id}/complete")
+    assert is_exempt("PUT", "/api/v2/builds/{build_id}/scheduler-lease")
+    assert not is_exempt("POST", "/api/v2/builds/{build_id}/scheduler-lease")
+    assert not is_exempt("POST", "/api/v2/plans/{plan_id}/members/{task_id}/start")
+    assert not is_exempt("POST", "/api/v2/plans/{plan_id}/members")
+    assert not is_exempt("POST", "/api/v2/builds")
+    # A yield registers new tasks: new work, not finishing work.
+    assert not is_exempt("POST", "/api/v2/plans/{plan_id}/members/{task_id}/yield")
+
+
+def test_finishing_writes_have_their_own_capped_window(monkeypatch):
+    """Not unlimited: a client looping on a finishing write is still capped,
+    at a multiple of the workspace's limit (local review on #509)."""
+    from stardag_api import limits
+
+    monkeypatch.setattr(limits, "FINISHING_WRITES_FLOOR", 0)
+    settings = limits.LimitsSettings(max_requests_per_minute=2)
+    workspace = uuid4()
+    for _ in range(2 * limits.FINISHING_WRITES_MULTIPLIER):
+        assert limits.check_rate_limit(workspace, settings, finishing=True) is None
+    capped = limits.check_rate_limit(workspace, settings, finishing=True)
+    assert capped is not None and capped.limit == 20
+    # Its own window: the workspace's ordinary writes are untouched.
+    assert limits.check_rate_limit(workspace, settings) is None
+
+
+def test_a_zero_limit_refuses_new_work_and_keeps_the_finishing_floor():
+    """0 blocks a workspace's new work -- a 429, not a 500 (local review on
+    #509) -- while its running work can still finish."""
+    from stardag_api import limits
+
+    settings = limits.LimitsSettings()
+    workspace = uuid4()
+    blocked = limits.check_rate_limit(workspace, settings, override=0)
+    assert blocked is not None and blocked.retry_after == 60
+    assert (
+        limits.check_rate_limit(workspace, settings, override=0, finishing=True) is None
+    )
+
+
+async def test_a_negative_override_is_refused_by_the_database(h: Harness):
+    from sqlalchemy import update
+    from sqlalchemy.exc import IntegrityError
+
+    from stardag_api.models import Workspace
+
+    async with h.sf() as s:
+        with pytest.raises(IntegrityError):
+            await s.execute(update(Workspace).values(max_write_requests_per_minute=-1))
+            await s.commit()

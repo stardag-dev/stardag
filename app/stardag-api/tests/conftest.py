@@ -301,15 +301,17 @@ async def unauthenticated_client(async_engine) -> AsyncGenerator[AsyncClient, No
 @pytest.fixture(autouse=True)
 def clear_limits_caches():
     """Clear in-memory caches between tests to prevent cross-test pollution."""
-    from stardag_api.limits import _entity_cache, _rate_limiter
+    from stardag_api.limits import _entity_cache, _override_cache, _rate_limiter
     from stardag_api.services.api_keys import _validation_cache
 
     _rate_limiter.clear()
     _entity_cache.clear()
+    _override_cache.clear()
     _validation_cache.clear()
     yield
     _rate_limiter.clear()
     _entity_cache.clear()
+    _override_cache.clear()
     _validation_cache.clear()
 
 

@@ -152,6 +152,23 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### Server
 
+- **Changed: the writes that finish running work get their own rate-limit
+  window, and a workspace can have its own limit** (STA-135). The
+  per-workspace write limit (`LIMITS_MAX_REQUESTS_PER_MINUTE`) refused
+  execution end reports, claim renewals, the scheduler lease's renewal and
+  release, an operator's end of an execution and a finished worker's
+  wake-up flag. Refusing them sheds no load, since the work is done or
+  running either way; it only orphans claims and strands builds. They are
+  now counted in a window of their own, at 10 times the limit and never
+  below 600 a minute: far above what a real workload issues, since they
+  come a fixed number per claim or lease, but still capped against a client
+  looping on one. Whatever takes on new work stays under the ordinary
+  limit: claims, registrations including yields, build creation, and the
+  lease acquire. A workspace's own limit can be set directly in the
+  database, as `workspaces.max_write_requests_per_minute`, by whoever hosts
+  the registry. `0` refuses the workspace's new work; a CHECK keeps the
+  value at 0 or above; no API route reads or writes it. One additive
+  migration. The AWS CDK template's default goes from 300 to 1200.
 - **Fixed: a wake-up could be lost to a tick's clear of the flag**
   (STA-122). A tick clears its build's flag (`DELETE /builds/{id}/notify`)
   right before it reads the frontier. A task transition that flagged the

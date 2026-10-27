@@ -6,6 +6,7 @@ Configure via LIMITS_* environment variables in production.
 
 import json
 import time
+from collections.abc import Hashable
 from enum import StrEnum
 from typing import Annotated
 from uuid import UUID
@@ -98,26 +99,33 @@ class InMemoryRateLimiter:
     """
 
     def __init__(self) -> None:
-        # workspace_id -> list of request timestamps
-        self._windows: dict[UUID, list[float]] = {}
+        # workspace_id (or (workspace_id, class)) -> request timestamps
+        self._windows: dict[Hashable, list[float]] = {}
 
-    def check(self, workspace_id: UUID, max_rpm: int) -> int | None:
-        """Check rate limit. Returns seconds to retry after, or None if allowed."""
+    def check(self, key: Hashable, max_rpm: int) -> int | None:
+        """Check rate limit. Returns seconds to retry after, or None if allowed.
+
+        ``key`` is a workspace id, or a workspace id paired with a class of
+        writes that is counted in its own window."""
+        if max_rpm < 1:
+            # Nothing allowed: no window to wait out, so the client is told
+            # a full one.
+            return 60
         now = time.monotonic()
         cutoff = now - 60.0
 
-        timestamps = self._windows.get(workspace_id, [])
+        timestamps = self._windows.get(key, [])
         # Prune old entries
         timestamps = [t for t in timestamps if t > cutoff]
 
         if len(timestamps) >= max_rpm:
             # Oldest timestamp in window determines when a slot opens
             retry_after = int(timestamps[0] - cutoff) + 1
-            self._windows[workspace_id] = timestamps
+            self._windows[key] = timestamps
             return max(retry_after, 1)
 
         timestamps.append(now)
-        self._windows[workspace_id] = timestamps
+        self._windows[key] = timestamps
         return None
 
     def clear(self) -> None:
@@ -125,6 +133,44 @@ class InMemoryRateLimiter:
 
 
 _rate_limiter = InMemoryRateLimiter()
+
+
+# ---------------------------------------------------------------------------
+# The hosting operator's per-workspace override (STA-135)
+# ---------------------------------------------------------------------------
+
+#: How long a workspace's override is reused before it is read again: a
+#: change made in the database takes effect within this, per instance.
+OVERRIDE_CACHE_SECONDS = 60.0
+
+_override_cache: dict[UUID, tuple[float, int | None]] = {}
+
+
+async def workspace_rate_limit_override(
+    db: AsyncSession, workspace_id: UUID
+) -> int | None:
+    """The workspace's ``max_write_requests_per_minute``, or None for the
+    deployment default; cached per instance for
+    :data:`OVERRIDE_CACHE_SECONDS`. Set only directly in the database (a
+    cost control of whoever hosts the registry; no API exposes it)."""
+    now = time.monotonic()
+    cached = _override_cache.get(workspace_id)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+    from sqlalchemy import select
+
+    from stardag_api.models import Workspace
+
+    value = await db.scalar(
+        select(Workspace.max_write_requests_per_minute).where(
+            Workspace.id == workspace_id
+        )
+    )
+    # End the read's implicit transaction, so the route's own transaction
+    # starts from a clean session (the guard runs before the route).
+    await db.commit()
+    _override_cache[workspace_id] = (now + OVERRIDE_CACHE_SECONDS, value)
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -266,13 +312,46 @@ async def _count_entities_24h(
 # ---------------------------------------------------------------------------
 
 
+#: Writes that finish running work (``routes/registry_v2/guard.py``) are
+#: counted in a window of their own, this many times the workspace's limit
+#: and never below the floor: high enough that real workloads never meet it
+#: (they are bounded per claim and per lease), low enough that a client
+#: looping on one of them -- a retry bug, say -- is still capped. A
+#: workspace limited to 0 keeps the floor, so its running work can finish.
+FINISHING_WRITES_MULTIPLIER = 10
+FINISHING_WRITES_FLOOR = 600
+
+
 def check_rate_limit(
-    workspace_id: UUID, settings: LimitsSettings
+    workspace_id: UUID,
+    settings: LimitsSettings,
+    *,
+    override: int | None = None,
+    finishing: bool = False,
 ) -> LimitExceededError | None:
-    """Check per-workspace rate limit. Returns error or None."""
-    max_rpm = settings.max_requests_per_minute
+    """Check per-workspace rate limit. Returns error or None.
+
+    ``override``: the workspace's own limit, set by the hosting operator
+    (:func:`workspace_rate_limit_override`); it replaces the deployment's
+    ``LIMITS_MAX_REQUESTS_PER_MINUTE`` for that workspace. 0 refuses every
+    write that takes on new work.
+
+    ``finishing``: a write that finishes or keeps alive running work,
+    counted in its own, much larger window (``FINISHING_WRITES_*``)."""
+    max_rpm = override if override is not None else settings.max_requests_per_minute
     if max_rpm is None:
         return None
+    if finishing:
+        max_rpm = max(max_rpm * FINISHING_WRITES_MULTIPLIER, FINISHING_WRITES_FLOOR)
+        retry_after = _rate_limiter.check((workspace_id, "finishing"), max_rpm)
+        if retry_after is None:
+            return None
+        return LimitExceededError(
+            error_code=ErrorCode.RATE_LIMIT,
+            message=f"Rate limit exceeded ({max_rpm} requests/minute).{CONTACT_SUFFIX}",
+            limit=max_rpm,
+            retry_after=retry_after,
+        )
 
     retry_after = _rate_limiter.check(workspace_id, max_rpm)
     if retry_after is not None:

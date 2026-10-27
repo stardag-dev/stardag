@@ -308,6 +308,8 @@ async def test_get_workspace(
         assert data["name"] == "Test Workspace"
         assert data["member_count"] == 1
         assert data["environment_count"] == 1
+        # The hosting operator's rate-limit override is never served.
+        assert "max_write_requests_per_minute" not in data
     finally:
         app.dependency_overrides.clear()
 
@@ -1996,5 +1998,45 @@ async def test_new_user_with_personal_workspace_and_pending_invite(async_engine)
                     assert ws["is_personal"] is True
                 elif ws["name"] == "Team Workspace":
                     assert ws["is_personal"] is False
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_a_workspace_admin_cannot_set_the_rate_limit_override(
+    async_engine, test_user: User, test_workspace_with_owner: Workspace
+):
+    """The per-workspace write rate limit is the hosting operator's cost
+    control (STA-135): an owner's PATCH naming it changes nothing."""
+    async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+    mock_token = _create_mock_internal_token(
+        user_id=test_user.id,
+        workspace_id=test_workspace_with_owner.id,
+    )
+
+    async def override_get_db():
+        async with async_session_maker() as session:
+            yield session
+
+    async def override_get_token():
+        return mock_token
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_token] = override_get_token
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.patch(
+                f"/api/v1/ui/workspaces/{test_workspace_with_owner.id}",
+                json={"name": "Renamed", "max_write_requests_per_minute": 100000},
+            )
+        assert response.status_code in (200, 422)
+        assert "max_write_requests_per_minute" not in response.json()
+        async with async_session_maker() as session:
+            stored = await session.get(Workspace, test_workspace_with_owner.id)
+            assert stored is not None
+            assert stored.max_write_requests_per_minute is None
     finally:
         app.dependency_overrides.clear()
