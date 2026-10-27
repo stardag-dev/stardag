@@ -1,7 +1,8 @@
 """The guardrail on every ``/api/v2`` write route: the per-workspace rate
 limit (``LIMITS_MAX_REQUESTS_PER_MINUTE``, or the workspace's own
 ``max_write_requests_per_minute`` set by the hosting operator), carried
-over from v1. The writes that finish running work are exempt (``_EXEMPT``).
+over from v1. The writes that finish running work are counted in a window
+of their own, far above it (``_EXEMPT``).
 
 A router-level dependency of the v2 router, so no write route can be added
 without it; reads (``GET``/``HEAD``) are not limited. Disabled unless the
@@ -25,21 +26,21 @@ from stardag_api.services.errors import TooManyRequests
 
 _READS = frozenset({"GET", "HEAD", "OPTIONS"})
 
-#: Writes that finish or keep alive work already running, exempt from the
-#: rate limit (STA-135): an execution's end reports, an operator's (or a
-#: reconciling tick's) end of one, a claim's renewal, the scheduler lease's
-#: renewal and release, and the wake-up flag a finished worker sets.
-#: Refusing these does not shed load -- the work is done or running either
-#: way -- it only orphans claims and strands builds. They stay bounded,
-#: and so does cost: each is a fixed number per claim or per lease, and
-#: what takes on new work (claims, registrations, build creation, the
-#: lease acquire) stays limited.
+#: Writes that finish or keep alive work already running, counted apart
+#: from the workspace's rate limit (STA-135): an execution's end reports, an
+#: operator's (or a reconciling tick's) end of one, a claim's renewal, the
+#: scheduler lease's renewal and release, and the wake-up flag a finished
+#: worker sets. Refusing these does not shed load -- the work is done or
+#: running either way -- it only orphans claims and strands builds. A real
+#: workload issues a fixed number of them per claim or per lease, so they
+#: get their own window, far above the limit (``limits.FINISHING_WRITES_*``)
+#: but still capped against a client looping on one. A ``yield`` is not
+#: here: it registers new tasks, which is new work.
 _EXEMPT = frozenset(
     {
         ("POST", "/plans/{plan_id}/members/{task_id}/complete"),
         ("POST", "/plans/{plan_id}/members/{task_id}/fail"),
         ("POST", "/plans/{plan_id}/members/{task_id}/suspend"),
-        ("POST", "/plans/{plan_id}/members/{task_id}/yield"),
         ("POST", "/plans/{plan_id}/members/{task_id}/interrupt"),
         ("POST", "/plans/{plan_id}/members/{task_id}/preempt"),
         ("POST", "/executions/{execution_id}/stopped"),
@@ -65,10 +66,11 @@ async def v2_write_guard(
     if request.method in _READS:
         return
     route = request.scope.get("route")
-    if isinstance(route, APIRoute) and is_exempt(request.method, route.path):
-        return
+    finishing = isinstance(route, APIRoute) and is_exempt(request.method, route.path)
     override = await workspace_rate_limit_override(db, auth.workspace_id)
-    error = check_rate_limit(auth.workspace_id, limits_settings, override=override)
+    error = check_rate_limit(
+        auth.workspace_id, limits_settings, override=override, finishing=finishing
+    )
     if error is not None:
         raise TooManyRequests(
             "rate_limited",

@@ -420,3 +420,47 @@ def test_only_the_finishing_writes_are_exempt():
     assert not is_exempt("POST", "/api/v2/plans/{plan_id}/members/{task_id}/start")
     assert not is_exempt("POST", "/api/v2/plans/{plan_id}/members")
     assert not is_exempt("POST", "/api/v2/builds")
+    # A yield registers new tasks: new work, not finishing work.
+    assert not is_exempt("POST", "/api/v2/plans/{plan_id}/members/{task_id}/yield")
+
+
+def test_finishing_writes_have_their_own_capped_window(monkeypatch):
+    """Not unlimited: a client looping on a finishing write is still capped,
+    at a multiple of the workspace's limit (local review on #509)."""
+    from stardag_api import limits
+
+    monkeypatch.setattr(limits, "FINISHING_WRITES_FLOOR", 0)
+    settings = limits.LimitsSettings(max_requests_per_minute=2)
+    workspace = uuid4()
+    for _ in range(2 * limits.FINISHING_WRITES_MULTIPLIER):
+        assert limits.check_rate_limit(workspace, settings, finishing=True) is None
+    capped = limits.check_rate_limit(workspace, settings, finishing=True)
+    assert capped is not None and capped.limit == 20
+    # Its own window: the workspace's ordinary writes are untouched.
+    assert limits.check_rate_limit(workspace, settings) is None
+
+
+def test_a_zero_limit_refuses_new_work_and_keeps_the_finishing_floor():
+    """0 blocks a workspace's new work -- a 429, not a 500 (local review on
+    #509) -- while its running work can still finish."""
+    from stardag_api import limits
+
+    settings = limits.LimitsSettings()
+    workspace = uuid4()
+    blocked = limits.check_rate_limit(workspace, settings, override=0)
+    assert blocked is not None and blocked.retry_after == 60
+    assert (
+        limits.check_rate_limit(workspace, settings, override=0, finishing=True) is None
+    )
+
+
+async def test_a_negative_override_is_refused_by_the_database(h: Harness):
+    from sqlalchemy import update
+    from sqlalchemy.exc import IntegrityError
+
+    from stardag_api.models import Workspace
+
+    async with h.sf() as s:
+        with pytest.raises(IntegrityError):
+            await s.execute(update(Workspace).values(max_write_requests_per_minute=-1))
+            await s.commit()
