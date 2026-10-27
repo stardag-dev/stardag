@@ -8,9 +8,9 @@ import { formatAbsoluteTime, formatRelativeTime } from "../utils/time";
 import {
   classifyQuery,
   EMPTY_SEARCH,
-  formatSearch,
   isEmptySearch,
   isFullTaskId,
+  MIN_TEXT_QUERY_LENGTH,
   normaliseIdPrefix,
   TASK_STATUSES,
   toTaskFilters,
@@ -129,8 +129,10 @@ export function TaskSearch({ environmentId, onOpenTask }: TaskSearchProps) {
     [search, effectiveText],
   );
 
-  const query = formatSearch(search);
   const filters = useMemo(() => toTaskFilters(search), [search]);
+  // The request's identity: what is sent, not what is typed. Text under
+  // three characters sends nothing, so typing it issues no request.
+  const query = JSON.stringify(filters);
 
   useEffect(() => {
     abortRef.current?.abort();
@@ -159,7 +161,7 @@ export function TaskSearch({ environmentId, onOpenTask }: TaskSearchProps) {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-    // `query` is the search's identity; `filters` derives from it.
+    // `query` is the request's identity; `filters` is what it serialises.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [environmentId, query, retryNonce]);
 
@@ -294,10 +296,13 @@ export function TaskSearch({ environmentId, onOpenTask }: TaskSearchProps) {
       } else if (isFullTaskId(text)) {
         openTask(normaliseIdPrefix(text.replace(/^id:\s*/i, "")) ?? text.trim());
       } else {
-        // Run now rather than after the debounce, and remember it.
+        // Run now rather than after the debounce, and remember it (text
+        // too short to search is not worth remembering).
         const next = current;
         setSearch(next, { replace: true });
-        rememberSearch(environmentId, next);
+        if (classifyQuery(next.text).kind !== "short") {
+          rememberSearch(environmentId, next);
+        }
         setStore(loadStore(environmentId));
         setOpen(false);
       }
@@ -441,6 +446,13 @@ export function TaskSearch({ environmentId, onOpenTask }: TaskSearchProps) {
                   }`}
           </span>
         </div>
+
+        {queryKind.kind === "short" && (
+          <p role="status" className="text-xs text-gray-500 dark:text-gray-400">
+            Type at least {MIN_TEXT_QUERY_LENGTH} characters to search names, namespaces
+            and descriptions.
+          </p>
+        )}
 
         {(filtersActive || queryKind.kind === "id") && (
           <div className="flex flex-wrap items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">

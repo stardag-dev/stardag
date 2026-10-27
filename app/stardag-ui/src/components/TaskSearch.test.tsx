@@ -87,6 +87,35 @@ describe("TaskSearch", () => {
     expect(window.history.length).toBe(before);
   });
 
+  it("issues no request for text under three characters, and says so", async () => {
+    render(<TaskSearch environmentId="env-1" onOpenTask={() => {}} />);
+    await screen.findByText("TrainModel");
+    const box = screen.getByRole("combobox", { name: "Search tasks" });
+    fireEvent.focus(box);
+    fireEvent.change(box, { target: { value: "tr" } });
+    expect(
+      screen.getByText(/Type at least 3 characters to search names/),
+    ).toBeInTheDocument();
+    // Suggestions still come from what was seen.
+    expect(
+      within(screen.getByRole("listbox")).getByRole("option", {
+        name: /examples\.ml\.TrainModel/,
+      }),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(window.location.search).toBe("?q=tr"));
+    expect(searchCalls().every((filters) => filters.q === undefined)).toBe(true);
+    expect(searchCalls()).toHaveLength(1);
+    fireEvent.change(box, { target: { value: "tra" } });
+    await waitFor(() => expect(lastSearch()).toMatchObject({ q: "tra" }));
+  });
+
+  it("does not send a short q read from the URL", async () => {
+    window.history.replaceState({}, "", "/tasks?q=ab&status=failed");
+    render(<TaskSearch environmentId="env-1" onOpenTask={() => {}} />);
+    await screen.findByText("TrainModel");
+    expect(lastSearch()).toEqual({ status: "failed", limit: TASK_PAGE_SIZE });
+  });
+
   it("searches an id-like input by id prefix and says so", async () => {
     render(<TaskSearch environmentId="env-1" onOpenTask={() => {}} />);
     fireEvent.change(screen.getByRole("combobox", { name: "Search tasks" }), {

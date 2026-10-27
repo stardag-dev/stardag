@@ -59,6 +59,7 @@ describe("URL state", () => {
 describe("the search box", () => {
   it("reads words as free text", () => {
     expect(classifyQuery("train model")).toEqual({ kind: "text", q: "train model" });
+    expect(classifyQuery(" abc ")).toEqual({ kind: "text", q: "abc" });
     // Hex-only words stay text unless they are id-long.
     expect(classifyQuery("face")).toEqual({ kind: "text", q: "face" });
     expect(classifyQuery("  ")).toEqual({ kind: "empty" });
@@ -70,6 +71,16 @@ describe("the search box", () => {
     expect(classifyQuery(TASK_ID)).toEqual({ kind: "id", idPrefix: TASK_ID });
     // Too short to be worth an id search.
     expect(classifyQuery("df0")).toEqual({ kind: "text", q: "df0" });
+  });
+
+  it("holds back free text under three characters", () => {
+    expect(classifyQuery("a")).toEqual({ kind: "short", text: "a" });
+    expect(classifyQuery(" ab ")).toEqual({ kind: "short", text: "ab" });
+    // Code points, as the server counts: two emoji are two characters.
+    expect(classifyQuery("🙂🙂").kind).toBe("short");
+    expect(classifyQuery("🙂🙂🙂").kind).toBe("text");
+    // Id detection is unaffected.
+    expect(classifyQuery("id:a")).toEqual({ kind: "id", idPrefix: "a" });
   });
 
   it("forces the id reading with id:", () => {
@@ -108,6 +119,12 @@ describe("filters → GET /tasks", () => {
   it("maps an id-like text to id_prefix, not q", () => {
     expect(toTaskFilters({ ...EMPTY_SEARCH, text: "df0c8b03" })).toEqual({
       idPrefix: "df0c8b03",
+    });
+  });
+
+  it("never sends q for text under three characters", () => {
+    expect(toTaskFilters({ ...EMPTY_SEARCH, text: "ab", tags: ["prod"] })).toEqual({
+      tags: ["prod"],
     });
   });
 

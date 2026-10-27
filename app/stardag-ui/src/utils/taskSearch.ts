@@ -105,9 +105,18 @@ export const MIN_ID_PREFIX_LENGTH = 4;
 /** An explicit prefix that forces either reading. */
 const ID_PREFIX_MARKER = /^id:\s*/i;
 
+/**
+ * The shortest free text sent as `q`. The server refuses a shorter one
+ * (422): its trigram index cannot narrow a pattern under three characters.
+ * Counted in code points after trimming, as the server counts it.
+ */
+export const MIN_TEXT_QUERY_LENGTH = 3;
+
 export type QueryKind =
   | { kind: "empty" }
   | { kind: "text"; q: string }
+  // Free text too short to send: suggestions only, no `q`.
+  | { kind: "short"; text: string }
   | { kind: "id"; idPrefix: string };
 
 /**
@@ -142,8 +151,9 @@ export function normaliseIdPrefix(raw: string): string | null {
  * What the search box asks for. Something that looks like the start of a
  * task id (hex, at least {@link MIN_ID_PREFIX_LENGTH} digits, with a digit
  * or a dash in it so words like "face" stay text, or any dashed uuid
- * shape) searches `id_prefix`; anything else is free text (`q`). `id:`
- * forces the id reading.
+ * shape) searches `id_prefix`; anything else is free text (`q`), once it
+ * is at least {@link MIN_TEXT_QUERY_LENGTH} characters long — shorter text
+ * is `short` and filters nothing. `id:` forces the id reading.
  */
 export function classifyQuery(text: string): QueryKind {
   const trimmed = text.trim();
@@ -161,6 +171,9 @@ export function classifyQuery(text: string): QueryKind {
     const prefix = normaliseIdPrefix(trimmed);
     if (prefix) return { kind: "id", idPrefix: prefix };
   }
+  if (Array.from(trimmed).length < MIN_TEXT_QUERY_LENGTH) {
+    return { kind: "short", text: trimmed };
+  }
   return { kind: "text", q: trimmed };
 }
 
@@ -170,7 +183,10 @@ export function isFullTaskId(text: string): boolean {
   return prefix !== null && prefix.replace(/-/g, "").length === 32;
 }
 
-/** The `GET /tasks` filters a search reads with (without paging). */
+/**
+ * The `GET /tasks` filters a search reads with (without paging). Text too
+ * short to send contributes nothing, so it never reaches the server.
+ */
 export function toTaskFilters(state: TaskSearchState): TaskFilters {
   const filters: TaskFilters = {};
   const query = classifyQuery(state.text);
