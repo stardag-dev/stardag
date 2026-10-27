@@ -345,3 +345,40 @@ def test_a_routed_executor_needs_every_route_to_keep_the_rule():
     mixed = RoutedTaskExecutor({"a": Keeps(), "b": DoesNot()}, router=lambda t: "a")
     assert both.reconciles_unspawned(FAKE_EXECUTOR)
     assert not mixed.reconciles_unspawned(FAKE_EXECUTOR)
+
+
+async def test_a_completion_is_reported_even_at_the_execution_budget(
+    default_in_memory_fs_target: Target,
+):
+    """The budget gates only re-drives: a returned call whose target is
+    complete is completed at the cap too (Copilot on #508)."""
+    registry = InMemoryRegistry()
+    task = SyncOnlyTask(name=f"at-cap-{new_id()}")
+    build_id, _ = await _plan(registry, [task])
+    dead = await _dead_claim(registry, build_id, task, ref="fc-cap")
+    task.run()
+    executor = FakeDetachedExecutor(registry=registry)
+    executor.probes["fc-cap"] = "returned"
+    config = TickConfig(linger_seconds=0, poll_interval_seconds=0.01, max_executions=1)
+    await _tick(registry, build_id, executor, config)
+    (complete,) = registry.calls_to("member_complete", task_id=str(task.id))
+    assert complete["execution_id"] == dead
+
+
+async def test_a_completion_check_starts_a_fresh_observation(
+    default_in_memory_fs_target: Target, monkeypatch
+):
+    from stardag.build._reactive import _reconcile as reconcile_module
+
+    observed: list[bool] = []
+    monkeypatch.setattr(
+        reconcile_module, "begin_observation", lambda: observed.append(True)
+    )
+    registry = InMemoryRegistry()
+    task = SyncOnlyTask(name=f"fresh-{new_id()}")
+    build_id, _ = await _plan(registry, [task])
+    await _dead_claim(registry, build_id, task, ref="fc-fresh")
+    executor = FakeDetachedExecutor(registry=registry)
+    executor.probes["fc-fresh"] = "returned"
+    await _tick(registry, build_id, executor, ONE_PASS)
+    assert observed

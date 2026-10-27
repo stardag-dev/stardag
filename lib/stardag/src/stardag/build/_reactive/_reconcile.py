@@ -49,6 +49,15 @@ duplicate if that retry had already passed checkpoint one. Modal documents
 outputs per call, not per attempt, but nothing here can verify it; a
 registry-live scenario with ``retries > 0`` is the check.
 
+**A second, narrower one.** R2 trusts the worker-rule capability of the
+tick's own deployment, but a tick resolves its workers by name, so in the
+moments after a redeploy an old tick can spawn onto a *new* deployment's
+worker. If that deployment's run function does not keep the rule, both
+ref records for the spawn are lost, and the old plan is still active ten
+minutes later (no new-deployment tick has rolled it over -- after which the
+superseded-plan guard excludes it), R2 could end a claim whose worker runs.
+Closing it fully means pinning worker resolution to a deployment.
+
 What an end does to the task:
 
 * returned, target complete -- the completion is reported for the
@@ -72,6 +81,7 @@ from uuid import UUID
 
 from stardag.build._base import DetachedState, TaskExecutorABC
 from stardag.build._reactive._frontier_actions import is_registry_outage, rehydrate
+from stardag.target._freshness import begin_observation
 from stardag.exceptions import APIError
 from stardag.registry import BuildFrontier, ExecutionInfo, RegistryABC
 
@@ -118,13 +128,20 @@ class Reconciler:
     ) -> None:
         self.interval_seconds = interval_seconds
         self.unspawned_grace_seconds = unspawned_grace_seconds
-        # A member that has spent its execution budget is not re-driven
-        # here: ending its execution ``lost`` makes it CANCELLED, which the
-        # tick's budget check (a takeover's) does not gate. Its claim is
-        # left to lapse, and the takeover then fails it under the budget.
+        # See ``_budget_spent``.
         self.max_executions = max_executions
         self._last: float | None = None
         self.supported = True
+
+    def _budget_spent(self, member) -> bool:
+        """Whether ``member`` has spent its execution budget. Gates only the
+        ends that re-drive (``lost``): a re-driven member is CANCELLED, which
+        the takeover's budget check does not gate, so past the budget the
+        claim is left to lapse and the takeover fails it. A completion or a
+        failure is reported whatever the count."""
+        return (
+            self.max_executions is not None and member.attempts >= self.max_executions
+        )
 
     def due(self, now: float) -> bool:
         return self.supported and (
@@ -162,10 +179,6 @@ class Reconciler:
             and e.ended_at is None
             and e.executor is not None
             and task_executor.reconciles(e.executor)
-            and (
-                self.max_executions is None
-                or running[e.task_id].attempts < self.max_executions
-            )
         ]
         # A random sample, not the ledger's first few: rounds (and successor
         # ticks, which start afresh) then reach every holder eventually,
@@ -216,6 +229,7 @@ class Reconciler:
                 if (
                     execution.plan_id != active_plan_id
                     or not task_executor.reconciles_unspawned(execution.executor)
+                    or self._budget_spent(running[execution.task_id])
                 ):
                     return False
                 return await self._unspawned(execution, registry, summary, lease_lost)
@@ -322,12 +336,17 @@ class Reconciler:
     ) -> bool:
         assert execution.plan_id is not None and execution.task_id is not None
         task = rehydrate(member)
+        # A fresh look, not a warm container's cached one: the call may
+        # have written nothing, and the output may since have been removed.
+        begin_observation()
         if await task.complete_aio():
             await registry.member_complete_aio(
                 execution.plan_id, execution.task_id, execution_id=execution.id
             )
             what = "its target is complete; completion reported now"
         else:
+            if self._budget_spent(member):
+                return False
             await registry.execution_report_stopped_aio(execution.id, outcome="lost")
             what = "its target is not complete; ended as lost, the task is re-driven"
         logger.warning(
