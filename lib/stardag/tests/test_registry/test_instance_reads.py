@@ -142,15 +142,21 @@ class TestCacheEntries:
 
     @pytest.mark.parametrize(
         "content",
-        ["{not json", '{"version": 99, "instance": {}}', '{"version": 1}', "[]"],
+        [
+            b"{not json",
+            b'{"version": 99, "instance": {}}',
+            b'{"version": 1}',
+            b"[]",
+            b"\xff\xfe not utf-8",
+        ],
     )
     def test_a_corrupt_entry_is_discarded_as_a_miss(
-        self, isolated_registry_cache: Path, content: str
+        self, isolated_registry_cache: Path, content: bytes
     ):
         info = self._info()
         _instance_cache.write("p", info)
         path = isolated_registry_cache / "p" / f"{info.id}.json"
-        path.write_text(content)
+        path.write_bytes(content)
         assert _instance_cache.read("p", info.id) is None
         assert not path.exists()
 
@@ -164,6 +170,19 @@ class TestCacheEntries:
         )
         assert _instance_cache.read("p", other) is None
         assert not (isolated_registry_cache / "p" / f"{other}.json").exists()
+
+    def test_expanded_at_is_not_cached(self):
+        """The one mutable column: a hit reports it as unknown rather than
+        freezing the value of the first read."""
+        from datetime import datetime, timezone
+
+        info = self._info().model_copy(
+            update={"expanded_at": datetime(2026, 10, 27, tzinfo=timezone.utc)}
+        )
+        _instance_cache.write("p", info)
+        hit = _instance_cache.read("p", info.id)
+        assert hit is not None and hit.expanded_at is None
+        assert hit.body == info.body
 
     def test_an_instance_without_task_id_is_not_cached(self):
         info = self._info().model_copy(update={"task_id": None})
@@ -334,6 +353,25 @@ class TestTaskInstanceGet:
         assert info.value.code == "unknown_instance"
         assert len(server.requests) == 1
 
+    def test_a_structured_not_found_message_does_not_fall_back(self, model):
+        """Only FastAPI's bare missing-route body falls back: a structured
+        refusal is the route answering, whatever its message says."""
+        iid = uuid4()
+        server = _Server(
+            {
+                ("GET", f"/api/v2/instances/{iid}"): httpx.Response(
+                    404,
+                    json={
+                        "detail": {"code": "unknown_instance", "message": "Not Found"}
+                    },
+                )
+            }
+        )
+        with pytest.raises(NotFoundError) as info:
+            _registry(server).task_instance_get(iid, task_id=str(model.id))
+        assert info.value.code == "unknown_instance"
+        assert len(server.requests) == 1
+
     def test_no_cache_when_turned_off(self, model, isolated_registry_cache: Path):
         iid = uuid4()
         server = _Server(
@@ -457,6 +495,40 @@ class TestFromRegistryPinned:
 
         assert loaded == model
         assert len(server.requests) == 2
+
+    def test_a_cached_body_that_does_not_validate_is_re_read(
+        self, model, isolated_registry_cache: Path
+    ):
+        iid = uuid4()
+        server = _Server(
+            {("GET", f"/api/v2/instances/{iid}"): _instance_payload(model, iid)}
+        )
+        registry = _registry(server)
+        registry.task_instance_get(iid)
+        (entry,) = isolated_registry_cache.rglob(f"{iid}.json")
+        payload = json.loads(entry.read_text())
+        payload["instance"]["body"]["learning_rate"] = "not a number"
+        entry.write_text(json.dumps(payload))
+
+        loaded = TrainedModel.from_registry(
+            model.id, registry=registry, instance_id=iid
+        )
+
+        assert loaded == model
+        assert len(server.requests) == 2
+
+    def test_a_body_that_does_not_validate_fails_and_is_not_kept(
+        self, model, isolated_registry_cache: Path
+    ):
+        iid = uuid4()
+        body = _instance_payload(model, iid)
+        body["body"]["learning_rate"] = "not a number"
+        server = _Server({("GET", f"/api/v2/instances/{iid}"): body})
+        with pytest.raises(sd.TaskRehydrationError, match="Failed to rehydrate"):
+            TrainedModel.from_registry(
+                model.id, registry=_registry(server), instance_id=iid
+            )
+        assert not any(isolated_registry_cache.rglob("*.json"))
 
     def test_a_body_that_does_not_match_fails_and_is_not_kept(
         self, model, isolated_registry_cache: Path

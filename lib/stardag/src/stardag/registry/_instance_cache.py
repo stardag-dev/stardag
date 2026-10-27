@@ -9,8 +9,9 @@ read.
 What is cached, and what is not:
 
 - **Instance bodies only, keyed by instance id.** Nothing mutable: no
-  status, no completion, and never "the newest instance of a task id",
-  which changes as new instances are registered.
+  status, no completion, no ``expanded_at`` (a cache hit reports it as
+  ``None``), and never "the newest instance of a task id", which changes
+  as new instances are registered.
 - **One partition per registry identity**: the registry URL plus what
   decides which environment answers -- the API key (by fingerprint) with
   API-key auth, the workspace and environment otherwise. A profile never
@@ -98,14 +99,14 @@ def read(partition: str, instance_id: UUID | str) -> TaskInstanceInfo | None:
     """
     path = _entry_path(partition, instance_id)
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = path.read_bytes()
     except FileNotFoundError:
         return None
     except OSError as e:
         logger.debug("Registry cache entry %s unreadable: %s", path, e)
         return None
     try:
-        payload: Any = json.loads(raw)
+        payload: Any = json.loads(raw.decode("utf-8"))
         if payload.get("version") != _ENTRY_VERSION:
             raise ValueError(f"entry version {payload.get('version')!r}")
         info = TaskInstanceInfo.model_validate(payload["instance"])
@@ -126,7 +127,12 @@ def write(partition: str, info: TaskInstanceInfo) -> None:
     if not info.task_id:
         return
     path = _entry_path(partition, info.id)
-    payload = {"version": _ENTRY_VERSION, "instance": info.model_dump(mode="json")}
+    # ``expanded_at`` is the one mutable column of an instance (set when it
+    # is expanded), so it is not part of the cached copy.
+    payload = {
+        "version": _ENTRY_VERSION,
+        "instance": info.model_dump(mode="json", exclude={"expanded_at"}),
+    }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(

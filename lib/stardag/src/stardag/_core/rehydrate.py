@@ -295,16 +295,27 @@ def load_from_registry(
                 f"Instance {instance_id} belongs to task {instance.task_id}, "
                 f"not to the requested task {task_id}."
             )
-        task = _validate_for(cls, instance.body)
-        if task.id == task_id:
-            return task
-        # A body that no longer recomputes to its task id. If it was a
-        # cached copy, it may be the copy that is wrong: drop it, and read
-        # the registry's once more. Either way, it is not kept.
+        error: TaskRehydrationError
+        try:
+            task = _validate_for(cls, instance.body)
+            rehydrated_id = task.id
+        except Exception as e:
+            error = TaskRehydrationError(
+                f"Failed to rehydrate instance {instance_id} of task {task_id}: {e}"
+            )
+            error.__cause__ = e
+        else:
+            if rehydrated_id == task_id:
+                return task
+            error = _id_mismatch(task, task_id)
+        # A body that does not validate, or no longer recomputes to its
+        # task id. If it was a cached copy, it may be the copy that is
+        # wrong: drop it, and read the registry's once more. Either way, it
+        # is not kept.
         partition = _instance_cache.registry_partition(registry)
         discarded = partition is not None and _instance_cache.discard(
             partition, instance_id
         )
         if not discarded or attempt == 2:
-            raise _id_mismatch(task, task_id)
+            raise error
     raise AssertionError("unreachable")  # pragma: no cover

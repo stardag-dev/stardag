@@ -15,7 +15,6 @@ from typing import Optional
 import typer
 
 from stardag._cli._registry_ctx import (
-    _ENV_OPTION,
     _PROFILE_OPTION,
     _resolve_registry,
     console,
@@ -34,11 +33,14 @@ def cache_clear(
         False, "--all", help="Clear every partition, not only the active profile's."
     ),
     stardag_profile: Optional[str] = _PROFILE_OPTION,
-    stardag_env: Optional[str] = _ENV_OPTION,
 ) -> None:
     """Delete cached instance bodies: the active profile's (registry,
     workspace, environment) partition, or with ``--all`` every partition.
-    Makes no registry call."""
+    Makes no registry call.
+
+    No ``-e/--stardag-env``: resolving an environment slug may ask the
+    registry, and clearing a local cache must work offline. Select another
+    environment through its profile, or use ``--all``."""
     if all_partitions:
         removed = _instance_cache.clear()
         console.print(
@@ -46,7 +48,7 @@ def cache_clear(
             f"from {_instance_cache.cache_root()}."
         )
         return
-    registry = _resolve_registry(stardag_profile, stardag_env)
+    registry = _resolve_registry(stardag_profile, None)
     partition = registry.instance_cache_partition()
     if partition is None:
         error_console.print(

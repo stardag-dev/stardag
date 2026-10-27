@@ -768,7 +768,8 @@ stardag cache clear          # the active profile's partition
 stardag cache clear --all    # every partition
 ```
 
-`clear` accepts `-p/--stardag-profile` and `-e/--stardag-env`, and makes no
+`clear` accepts `-p/--stardag-profile` (no `-e`: resolving an environment
+slug may need the registry, and clearing must work offline), and makes no
 registry call. Set `STARDAG_REGISTRY_CACHE=0` to turn the cache off.
 
 ## Environment Variables

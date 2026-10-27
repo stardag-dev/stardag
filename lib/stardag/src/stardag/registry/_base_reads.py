@@ -88,7 +88,8 @@ class RegistryReadsABC:
 
         Instances are immutable, so an HTTP registry serves a repeat read
         from the local body cache (``~/.stardag/registry-cache/``) without
-        a request.
+        a request. The one mutable field, ``expanded_at``, is not cached:
+        a cached read reports it as ``None`` (read ``task_get`` for it).
 
         ``task_id`` is the completion the caller expects the instance to
         belong to. It is not checked here (the caller compares

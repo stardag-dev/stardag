@@ -27,7 +27,7 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   decides the answering environment (the API key's fingerprint, or the
   workspace and environment), so one profile never reads another's
   entries. It holds immutable instance bodies keyed by instance id, never
-  status or "the newest instance". `task_instance_get` and a pinned
+  status, `expanded_at` or "the newest instance". `task_instance_get` and a pinned
   `from_registry` read through it, so a pinned load works offline after one
   online read; a cached body is still checked against the task id, and an
   unreadable or mismatching entry is discarded and re-read. Writes are

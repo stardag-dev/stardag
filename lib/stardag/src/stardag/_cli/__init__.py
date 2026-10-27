@@ -66,7 +66,7 @@ Usage:
     Each of these registry-backed commands takes -p/--stardag-profile and
     -e/--stardag-env (`stardag build` takes -p only).
 
-    stardag cache clear [--all] [-p profile] [-e env]
+    stardag cache clear [--all] [-p profile]
 
     stardag modal deploy <app_ref> [--name name] [-e env] [--stream-logs] [--tag tag] [-m]
     stardag modal deployments [--app name] [--current] [--json]

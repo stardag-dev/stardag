@@ -90,10 +90,12 @@ def _fallback_or_raise(err: NotFoundError, task_id: str | None) -> str:
     """The task id to read the instance from when ``GET /instances/{id}``
     answered ``err``; raises when there is no fallback.
 
-    Only a missing route falls back: a registry that has the route and
-    answers "no such instance" is authoritative.
+    Only a missing route falls back: FastAPI's bare ``{"detail": "Not
+    Found"}``, with no structured payload. A registry that has the route
+    and answers "no such instance" (structured, whatever its message) is
+    authoritative.
     """
-    if not is_missing_route_error(err):
+    if err.payload is not None or not is_missing_route_error(err):
         raise err
     if task_id is None:
         raise NotFoundError(
