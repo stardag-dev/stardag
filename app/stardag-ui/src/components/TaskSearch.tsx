@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { fetchTasks } from "../api/registry";
+import { fetchTasks, type TaskFilters } from "../api/registry";
 import { useTaskSearchUrl } from "../hooks/useTaskSearchUrl";
 import type { TaskStatus, TaskSummary } from "../types/task";
 import { checkTag } from "../utils/annotations";
@@ -29,6 +29,13 @@ import { StatusBadge } from "./StatusBadge";
 import { CopyChip } from "./ui/CopyChip";
 import { ResultBanner } from "./ui/ResultBanner";
 import { TagChip } from "./ui/TagChip";
+
+/** A request identity (`JSON.stringify` of filters) without its `q`. */
+function withoutQ(query: string): string {
+  const { q: _q, ...rest } = JSON.parse(query) as TaskFilters;
+  void _q;
+  return JSON.stringify(rest);
+}
 
 /** Rows per page; "Load more" appends the next. */
 export const TASK_PAGE_SIZE = 50;
@@ -100,6 +107,8 @@ export function TaskSearch({ environmentId, onOpenTask }: TaskSearchProps) {
   const [active, setActive] = useState(-1);
   const inputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // The first-page read has started and not settled.
+  const readInFlightRef = useRef(false);
   const listboxId = useId();
 
   // Back/Forward replaced the search under the page: follow it in the box.
@@ -115,7 +124,9 @@ export function TaskSearch({ environmentId, onOpenTask }: TaskSearchProps) {
 
   // Typing settles into the URL without a history entry per keystroke.
   useEffect(() => {
-    if (effectiveText === search.text) return;
+    // The URL holds the text trimmed: compare like with like, or trailing
+    // whitespace would keep this firing.
+    if (effectiveText.trim() === search.text) return;
     const handle = setTimeout(
       () => setSearch({ ...search, text: effectiveText }, { replace: true }),
       SEARCH_DEBOUNCE_MS,
@@ -133,11 +144,28 @@ export function TaskSearch({ environmentId, onOpenTask }: TaskSearchProps) {
   // The request's identity: what is sent, not what is typed. Text under
   // three characters sends nothing, so typing it issues no request.
   const query = JSON.stringify(filters);
+  // Text shortened under three characters keeps the rows it found: the
+  // only change would be dropping `q`, and short text is suggestions-only.
+  // Any other change (a filter, clearing the box) reads as usual.
+  const held =
+    classifyQuery(search.text).kind === "short" &&
+    shownQuery !== null &&
+    withoutQ(shownQuery) === query;
 
   useEffect(() => {
+    if (held) {
+      // A read for text since shortened is no longer wanted.
+      if (readInFlightRef.current) {
+        abortRef.current?.abort();
+        readInFlightRef.current = false;
+        setLoading(false);
+      }
+      return;
+    }
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
+    readInFlightRef.current = true;
     setLoading(true);
     setLoadingMore(false);
     setError(null);
@@ -158,12 +186,17 @@ export function TaskSearch({ environmentId, onOpenTask }: TaskSearchProps) {
         setError(err instanceof Error ? err.message : "Failed to search tasks");
       })
       .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
+        if (controller.signal.aborted) return;
+        readInFlightRef.current = false;
+        setLoading(false);
       });
-    return () => controller.abort();
+    // Not aborted on re-run: a held search keeps the shown rows' read (and
+    // its "Load more") alive. The next real read aborts it.
     // `query` is the request's identity; `filters` is what it serialises.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [environmentId, query, retryNonce]);
+  }, [environmentId, query, retryNonce, held]);
+
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   // Seed autocomplete with one wider unfiltered read per environment.
   useEffect(() => {
@@ -179,16 +212,19 @@ export function TaskSearch({ environmentId, onOpenTask }: TaskSearchProps) {
 
   const loadMore = useCallback(() => {
     if (!nextCursor || loadingMore) return;
+    if (shownQuery === null) return;
     const controller = abortRef.current;
-    const forQuery = shownQuery;
     setLoadingMore(true);
+    // The next page of the rows shown, which a held search may no longer
+    // describe; any newer read aborts this controller.
     fetchTasks(environmentId, {
-      ...filters,
+      ...(JSON.parse(shownQuery) as TaskFilters),
       limit: TASK_PAGE_SIZE,
       cursor: nextCursor,
     })
       .then((page) => {
-        if (controller?.signal.aborted || forQuery !== query) return;
+        if (controller?.signal.aborted) return;
+        setError(null);
         setTasks((rows) => {
           const seen = new Set(rows.map((r) => r.task_id));
           return [...rows, ...page.tasks.filter((t) => !seen.has(t.task_id))];
@@ -205,7 +241,7 @@ export function TaskSearch({ environmentId, onOpenTask }: TaskSearchProps) {
         // A superseded search's page must not clear the new one's flag.
         if (!controller?.signal.aborted) setLoadingMore(false);
       });
-  }, [environmentId, filters, nextCursor, loadingMore, shownQuery, query]);
+  }, [environmentId, nextCursor, loadingMore, shownQuery]);
 
   // ---- Edits ----
 

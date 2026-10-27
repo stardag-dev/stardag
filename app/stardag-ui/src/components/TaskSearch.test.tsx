@@ -109,6 +109,62 @@ describe("TaskSearch", () => {
     await waitFor(() => expect(lastSearch()).toMatchObject({ q: "tra" }));
   });
 
+  it("keeps the rows when text is shortened under three characters", async () => {
+    window.history.replaceState({}, "", "/tasks?q=tra");
+    render(<TaskSearch environmentId="env-1" onOpenTask={() => {}} />);
+    await screen.findByText("TrainModel");
+    const calls = searchCalls().length;
+    const box = screen.getByRole("combobox", { name: "Search tasks" });
+    fireEvent.change(box, { target: { value: "tr" } });
+    await waitFor(() => expect(window.location.search).toBe("?q=tr"));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(searchCalls()).toHaveLength(calls);
+    expect(screen.getByText("TrainModel")).toBeInTheDocument();
+    // A filter change still reads, without q.
+    fireEvent.change(screen.getByLabelText("Filter by task status"), {
+      target: { value: "failed" },
+    });
+    await waitFor(() =>
+      expect(lastSearch()).toEqual({ status: "failed", limit: TASK_PAGE_SIZE }),
+    );
+    // So does clearing the box.
+    fireEvent.change(box, { target: { value: "" } });
+    await waitFor(() => expect(window.location.search).toBe("?status=failed"));
+  });
+
+  it("settles typing with trailing whitespace", async () => {
+    render(<TaskSearch environmentId="env-1" onOpenTask={() => {}} />);
+    await screen.findByText("TrainModel");
+    const spy = vi.spyOn(window.history, "replaceState");
+    fireEvent.change(screen.getByRole("combobox", { name: "Search tasks" }), {
+      target: { value: "train " },
+    });
+    await waitFor(() => expect(lastSearch()).toMatchObject({ q: "train" }));
+    await new Promise((r) => setTimeout(r, 700));
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
+  });
+
+  it("clears a failed Load more once a retry succeeds", async () => {
+    let failNext = true;
+    mocked.mockImplementation(async (_env, filters = {}) => {
+      if (filters.cursor) {
+        if (failNext) {
+          failNext = false;
+          throw new Error("page failed");
+        }
+        return { tasks: [task(T2, { task_name: "Evaluate" })], next_cursor: null };
+      }
+      return { tasks: [task(T1)], next_cursor: "c1" };
+    });
+    render(<TaskSearch environmentId="env-1" onOpenTask={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Load more" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("page failed");
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    await screen.findByText("Evaluate");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("does not send a short q read from the URL", async () => {
     window.history.replaceState({}, "", "/tasks?q=ab&status=failed");
     render(<TaskSearch environmentId="env-1" onOpenTask={() => {}} />);
