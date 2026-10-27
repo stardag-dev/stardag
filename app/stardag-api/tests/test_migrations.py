@@ -490,7 +490,10 @@ async def test_task_annotation_indexes_build_concurrently_and_rerun_after_a_fail
         statements = await on_owned_connection(
             alembic(lambda c: command.upgrade(c, ANNOTATIONS))
         )
-        assert 'DROP INDEX CONCURRENTLY IF EXISTS "ix_task_search_trgm"' in statements
+        assert (
+            f'DROP INDEX CONCURRENTLY IF EXISTS "{CONCURRENT_SCHEMA}".'
+            '"ix_task_search_trgm"' in statements
+        )
         assert await _in_concurrent_schema(engine, valid) == 4
 
         await on_owned_connection(
@@ -514,3 +517,64 @@ async def _in_concurrent_schema(engine, sql: str):
     async with engine.begin() as conn:
         await conn.execute(text(f"SET LOCAL search_path TO {CONCURRENT_SCHEMA}"))
         return await conn.scalar(text(sql))
+
+
+async def test_the_invalid_index_probe_follows_the_table_not_current_schema(
+    migrated_database_url: str,
+):
+    """With ``search_path = <other>, <schema of task>``, ``current_schema()``
+    is the other schema while ``ON task`` means the table in the second:
+    the probe must still find (and drop, schema-qualified) an INVALID index
+    of that table (Copilot on #513)."""
+    import importlib.util
+    from pathlib import Path
+
+    from sqlalchemy.pool import NullPool
+
+    path = next(
+        (Path(__file__).parent.parent / "migrations" / "versions").glob(
+            "*_add_task_tags_and_description.py"
+        )
+    )
+    spec = importlib.util.spec_from_file_location("annotations_migration", path)
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    other, home = "probe_other", "probe_home"
+    engine = create_async_engine(migrated_database_url, poolclass=NullPool)
+    async with engine.begin() as conn:
+        for schema in (other, home):
+            await conn.execute(text(f"DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            await conn.execute(text(f"CREATE SCHEMA {schema}"))
+        await conn.execute(text(f"CREATE TABLE {home}.task (task_name text)"))
+        await conn.execute(text(f"INSERT INTO {home}.task VALUES ('same'), ('same')"))
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text(f"SET search_path TO {other}, {home}"))
+            await conn.commit()
+            assert await conn.scalar(text("SELECT current_schema()")) == other
+            await conn.commit()
+            auto = await conn.execution_options(isolation_level="AUTOCOMMIT")
+            with pytest.raises(Exception, match="could not create unique index"):
+                await auto.execute(
+                    text(
+                        "CREATE UNIQUE INDEX CONCURRENTLY ix_probe ON task (task_name)"
+                    )
+                )
+            with _capturing_statements() as statements:
+                await auto.run_sync(
+                    lambda c: migration._drop_if_invalid(c, "ix_probe", True)
+                )
+            assert (
+                f'DROP INDEX CONCURRENTLY IF EXISTS "{home}"."ix_probe"' in statements
+            )
+            assert (
+                await auto.scalar(text(f"SELECT to_regclass('{home}.ix_probe')"))
+                is None
+            )
+    finally:
+        async with engine.begin() as conn:
+            for schema in (other, home):
+                await conn.execute(text(f"DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        await engine.dispose()

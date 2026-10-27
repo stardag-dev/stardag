@@ -86,20 +86,26 @@ def _in_external_transaction() -> bool:
 
 
 def _drop_if_invalid(bind: sa.Connection, name: str, concurrently: bool) -> None:
-    """Drop index ``name`` of the current schema if a failed concurrent
-    build left it INVALID, so the ``IF NOT EXISTS`` build below does not
-    skip it."""
-    invalid = bind.scalar(
+    """Drop index ``name`` of ``task`` if a failed concurrent build left it
+    INVALID, so the ``IF NOT EXISTS`` build below does not skip it.
+
+    Resolved through ``'task'::regclass`` -- the table ``ON task`` names
+    under this ``search_path`` -- not through ``current_schema()``, which
+    can be a different schema (``search_path = migrator, public``); the
+    drop is qualified with the index's own schema for the same reason."""
+    row = bind.execute(
         sa.text(
-            "SELECT NOT i.indisvalid FROM pg_index i"
+            "SELECT n.nspname FROM pg_index i"
             " JOIN pg_class c ON c.oid = i.indexrelid"
-            " WHERE c.relname = :name AND c.relnamespace = current_schema()::regnamespace"
+            " JOIN pg_namespace n ON n.oid = c.relnamespace"
+            " WHERE i.indrelid = 'task'::regclass AND c.relname = :name"
+            " AND NOT i.indisvalid"
         ),
         {"name": name},
-    )
-    if invalid:
+    ).one_or_none()
+    if row is not None:
         keyword = "CONCURRENTLY " if concurrently else ""
-        bind.execute(sa.text(f'DROP INDEX {keyword}IF EXISTS "{name}"'))
+        bind.execute(sa.text(f'DROP INDEX {keyword}IF EXISTS "{row[0]}"."{name}"'))
 
 
 def _create_indexes(concurrently: bool) -> None:
