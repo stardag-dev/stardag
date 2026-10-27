@@ -54,6 +54,7 @@ from stardag.testing._registry_state import (
     BuildRow,
     DeploymentRow,
     MAX_DESCRIPTION_LENGTH,
+    MAX_TAGS,
     Event,
     normalise_tags,
     refuse,
@@ -362,6 +363,13 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
             "task_annotate", task_id=task_id, tags=tags, description=description
         )
         task = self.task(task_id)
+        # The request's own bounds, checked before normalising (duplicates
+        # and surrounding whitespace may make up the difference).
+        if (tags is not None and len(tags) > 4 * MAX_TAGS) or (
+            isinstance(description, str)
+            and len(description) > 4 * MAX_DESCRIPTION_LENGTH
+        ):
+            raise refuse("validation_error", "request too large", status=422)
         new_tags = normalise_tags(tags) if tags is not None else task.tags
         if description is not ...:
             text = (description or "").strip()

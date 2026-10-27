@@ -156,7 +156,11 @@ def test_in_memory_annotate_mirrors_the_server():
         with pytest.raises(APIError) as refused:
             registry.task_annotate("aa11", tags=bad)
         assert refused.value.status_code == 422
-    for bad_description in ("d" * 4097, "before\x00after"):
+    with pytest.raises(APIError) as refused:  # 129 raw entries, 1 distinct
+        registry.task_annotate("aa11", tags=["x"] * 129)
+    assert refused.value.status_code == 422
+    assert registry.task_annotate("aa11", tags=["x"] * 128).tags == ["x"]
+    for bad_description in ("d" * 4097, "before\x00after", " " * 16385):
         with pytest.raises(APIError) as refused:
             registry.task_annotate("aa11", description=bad_description)
         assert refused.value.status_code == 422
