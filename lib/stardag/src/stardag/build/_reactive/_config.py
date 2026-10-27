@@ -13,8 +13,11 @@ from stardag.build._registration import DEFAULT_MAX_CONCURRENT_DISCOVER
 if typing.TYPE_CHECKING:
     from stardag.build._wakeups import SpawnTick
 
-# In-flight bound for a pass's per-task registry calls and spawns.
-DEFAULT_MAX_CONCURRENCY = 50
+# In-flight bound for a pass's per-task registry calls and spawns. Each of
+# them is a registry write, so this is also the burst a pass sends against
+# the workspace's rate limit (16, from 50: STA-135); throughput under the
+# limit is shaped by the pass's ``Admission``, not by this.
+DEFAULT_MAX_CONCURRENCY = 16
 
 
 # Keyword-only: the fields are grouped by meaning, and a positional caller

@@ -37,6 +37,8 @@ from functools import partial
 from uuid import UUID
 
 from stardag import BaseTask, task_from_registry_data
+import httpx
+
 from stardag._core.rehydrate import TaskRehydrationError
 from stardag.build._base import DetachedHandle, TaskExecutorABC
 from stardag.build._claims import claim_ttl_seconds
@@ -44,11 +46,18 @@ from stardag.build._registration import (
     new_id,
     register_members_aio,
     run_bounded,
+    run_bounded_settled,
     walk_aio,
 )
 from stardag.build._task_modules import import_failure_note
-from stardag.exceptions import APIError, StardagError, execution_not_wanted
+from stardag.exceptions import (
+    APIError,
+    RateLimitError,
+    StardagError,
+    execution_not_wanted,
+)
 from stardag.registry import BuildFrontier, FrontierMember, RegistryABC
+from stardag.registry._api_http import transport_retry_counts
 
 if typing.TYPE_CHECKING:
     from stardag.build._reactive._config import TickConfig, TickSummary
@@ -92,6 +101,10 @@ class PassResult:
     # A claim was refused ``plan_superseded``: a newer request replaced this
     # tick's plan, so the tick stops.
     superseded: bool = False
+    # A member's spawn work raised: the members still queued take no new
+    # claim (each would wait out the same outage or rate limit), while the
+    # ones already holding a claim carry it through.
+    failed: bool = False
     # The scheduler lease was lost during the pass: another tick may be
     # driving the build, so nothing further was claimed or registered.
     lease_lost: bool = False
@@ -148,6 +161,63 @@ def spawn_cap(
         _derived_cap(min(timeouts), config),
         f"the tightest execution timeout ({min(timeouts):.0f}s)",
     )
+
+
+def _rate_limited_count() -> int:
+    """Rate-limit refusals this process has waited out so far."""
+    return transport_retry_counts().get("HTTP 429", 0)
+
+
+class Admission:
+    """Adaptive admission of spawns per pass, for one tick's lifetime.
+
+    Additive increase, multiplicative decrease, driven by the registry's
+    rate limit: after a pass in which this process waited out any 429, the
+    spawns a pass may admit are halved; after a pass without one they grow
+    back by an eighth of the cap, until the cap applies alone again. Each
+    spawn costs several writes over its life (the claim and ref record now,
+    the worker's start and end and its wake-up later), so admitting fewer
+    is what lets a workspace at its limit drain the work already running
+    rather than starve it (STA-135). Without a limit -- a self-hosted
+    registry by default -- no 429 is ever seen and the cap applies as is.
+
+    The count is the process's, so a 429 met by another tick in the same
+    container throttles this one too: they share a workspace, and so the
+    limit. The state lives for one tick: a successor starts from the cap
+    again, and a run of short ticks under a lasting limit is throttled
+    only within each one (each spawn still waits out its own 429s).
+    """
+
+    def __init__(self) -> None:
+        self.limit: int | None = None
+        self._cap: int | None = None
+        self._seen = _rate_limited_count()
+
+    def apply(self, cap: int) -> int:
+        """The spawns this pass may admit under ``cap``."""
+        self._cap = cap
+        return cap if self.limit is None else min(cap, self.limit)
+
+    def after_pass(self) -> None:
+        """Adjust from what the pass met."""
+        count = _rate_limited_count()
+        throttled = count > self._seen
+        self._seen = count
+        if self._cap is None:
+            return
+        if throttled:
+            # From what the pass could actually admit: the cap can shrink
+            # between passes (it follows the candidates' timeouts).
+            current = self._cap if self.limit is None else min(self.limit, self._cap)
+            self.limit = max(1, current // 2)
+            logger.warning(
+                f"The registry rate-limited this tick's process; admitting at "
+                f"most {self.limit} spawns per pass until it stops."
+            )
+        elif self.limit is not None:
+            self.limit += max(1, self._cap // 8)
+            if self.limit >= self._cap:
+                self.limit = None
 
 
 LeaseLost = typing.Callable[[], bool]
@@ -239,6 +309,28 @@ async def _discovery_job(
     summary.discovered += 1
 
 
+def is_registry_outage(error: BaseException) -> bool:
+    """Whether ``error`` is the registry not answering (unreachable, a 5xx,
+    a rate limit outlasting the client's retries) rather than refusing."""
+    if isinstance(error, (httpx.TransportError, RateLimitError)):
+        return True
+    # Not every 429: a creation quota (``QuotaExceededError``) is a refusal
+    # that lasts the day, and flagging for it would only repeat it.
+    return isinstance(error, APIError) and (error.status_code or 0) >= 500
+
+
+async def _spawn_marking_failure(
+    task: BaseTask, member: FrontierMember, *, result: PassResult, **kwargs: typing.Any
+) -> None:
+    """:func:`_spawn`, recording a failure on the pass so the members still
+    queued behind it take no new claim."""
+    try:
+        await _spawn(task, member, result=result, **kwargs)
+    except Exception:
+        result.failed = True
+        raise
+
+
 async def _spawn(
     task: BaseTask,
     member: FrontierMember,
@@ -251,6 +343,7 @@ async def _spawn(
     result: PassResult,
     lease_lost: "LeaseLost",
     out_of_time: "OutOfTime",
+    granted: "_Granted | None" = None,
 ) -> None:
     """Claim one runnable member, spawn it, record its ref.
 
@@ -281,6 +374,8 @@ async def _spawn(
     except Exception:
         executor_name = None
     if _stop_for_lost_lease(lease_lost, result):
+        return
+    if result.failed or result.superseded:
         return
     # Last, right before the claim: a claim taken is carried through its
     # spawn, so this is the latest point the pass can still stop cheaply.
@@ -313,6 +408,8 @@ async def _spawn(
             return
         raise
     result.acted = True
+    if granted is not None:
+        granted.count += 1
     handle: DetachedHandle | None = None
     error: BaseException | None = None
     for _attempt in range(max(1, config.max_attempts)):
@@ -325,13 +422,22 @@ async def _spawn(
             error = e
             logger.warning(f"Spawning task {member.task_id} failed: {e}")
     if handle is None:
-        await registry.member_fail_aio(
-            plan_id,
-            member.task_id,
-            execution_id=execution_id,
-            error_message=f"Spawn failed: {type(error).__name__}: {error}",
-        )
         summary.spawn_failed += 1
+        try:
+            await registry.member_fail_aio(
+                plan_id,
+                member.task_id,
+                execution_id=execution_id,
+                error_message=f"Spawn failed: {type(error).__name__}: {error}",
+            )
+        except Exception as e:
+            if not is_registry_outage(e):
+                raise
+            # Nothing ran; the claim lapses on its own.
+            logger.warning(
+                f"Could not record the failed spawn of task {member.task_id} "
+                f"(its claim lapses on its own): {e}"
+            )
         return
     try:
         await registry.member_start_aio(
@@ -343,9 +449,21 @@ async def _spawn(
             executor_ref=handle.ref,
             executor_metadata=handle.executor_metadata,
         )
-    except APIError as e:
-        if not execution_not_wanted(e):
-            raise
+    except Exception as e:
+        if not (isinstance(e, APIError) and execution_not_wanted(e)):
+            if not is_registry_outage(e):
+                raise
+            # The registry did not answer. The container is running and
+            # records its own ref when it starts, so this is not an orphan,
+            # and failing the pass would strand the claims of the siblings
+            # it has not reached yet.
+            logger.warning(
+                f"Could not record the ref of task {member.task_id} "
+                f"({handle.ref!r}); its worker records it when it starts: {e}"
+            )
+            summary.spawned += 1
+            result.spawned.append(member.task_id)
+            return
         # This execution is over before its ref was recorded — the claim
         # moved on (to another execution, or to another plan:
         # ``not_claim_holder``), or the ledger has no such execution: this
@@ -479,6 +597,7 @@ async def act_on_frontier(
     summary: "TickSummary",
     lease_lost: "LeaseLost | None" = None,
     out_of_time: "OutOfTime | None" = None,
+    admission: Admission | None = None,
 ) -> PassResult:
     """One pass: discovery jobs, then (if the plan still stands) claims and
     spawns of the runnable members, each phase bounded by
@@ -583,23 +702,54 @@ async def act_on_frontier(
             f"spawning {cap.limit} this pass (cap from {cap.source})."
         )
         loaded = loaded[: cap.limit]
-    await run_bounded(
-        [
-            partial(
-                _spawn,
-                task,
-                member,
-                plan_id=plan_id,
-                registry=registry,
-                task_executor=task_executor,
-                config=config,
-                summary=summary,
-                result=result,
-                lease_lost=lost,
-                out_of_time=timed_out,
-            )
-            for task, member in loaded
-        ],
-        semaphore,
-    )
+    # The admission limit counts *granted* claims, not attempts: a member
+    # denied its claim (a concurrency limit, another holder) gives its place
+    # to the next one, so a throttled pass is never left idle by a denial
+    # at its head while admissible work waits behind it.
+    budget = len(loaded) if admission is None else admission.apply(cap.limit)
+    if budget < len(loaded):
+        logger.info(
+            f"Tick for build {frontier.build_id}: admitting {budget} of "
+            f"{len(loaded)} spawns this pass (throttled by the registry's "
+            "rate limit)."
+        )
+    pending = list(loaded)
+    while pending and budget > 0:
+        batch, pending = pending[:budget], pending[budget:]
+        granted = _Granted()
+        # Settled, not fail-fast: a claim taken is carried through its spawn
+        # and ref even when a sibling fails (see ``run_bounded_settled``).
+        await run_bounded_settled(
+            [
+                partial(
+                    _spawn_marking_failure,
+                    task,
+                    member,
+                    plan_id=plan_id,
+                    registry=registry,
+                    task_executor=task_executor,
+                    config=config,
+                    summary=summary,
+                    result=result,
+                    lease_lost=lost,
+                    out_of_time=timed_out,
+                    granted=granted,
+                )
+                for task, member in batch
+            ],
+            semaphore,
+            # An outage among the failures decides how the tick exits (it
+            # flags rather than hands off), so it is the one raised.
+            prefer=is_registry_outage,
+        )
+        budget -= granted.count
+        if result.lease_lost or result.superseded or result.out_of_time:
+            break
     return result
+
+
+class _Granted:
+    """Claims granted in one batch of a pass (see ``act_on_frontier``)."""
+
+    def __init__(self) -> None:
+        self.count = 0

@@ -15,13 +15,18 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from uuid import UUID
 
+
 from stardag.build._base import (
     BuildContext,
     TaskExecutorABC,
     current_build_context_var,
 )
 from stardag.build._reactive._config import TickConfig, TickSummary
-from stardag.build._reactive._frontier_actions import act_on_frontier
+from stardag.build._reactive._frontier_actions import (
+    Admission,
+    act_on_frontier,
+    is_registry_outage,
+)
 from stardag.build._reactive._lease import SchedulerLease
 from stardag.build._reactive._rollover import RollOver, RollOverFailed
 from stardag.build._reactive._terminal import TERMINAL_BUILD_STATUSES, handle_terminal
@@ -193,6 +198,30 @@ async def _continue_in_a_successor(
         )
 
 
+async def _flag_for_a_successor(build_id: UUID, *, registry: RegistryABC) -> None:
+    """A tick that ended on a registry outage -- an exception, or its lease
+    lapsing on unanswered renewals -- leaves its build flagged, so the next
+    drain anywhere in the environment (any other tick's, or the watchdog's)
+    serves it, rather than leaving it unserved behind a lapsed lease
+    (STA-135).
+
+    Flagged without a hand-out (``can_spawn=False``), and nothing spawned
+    from here: a tick started now would meet the same outage, and one
+    started after a backoff would need a timer this container cannot keep
+    -- Modal has no delayed invocation, so time-based recovery is the
+    watchdog's job (docs, "The watchdog"). Best-effort: the registry may
+    still be out, and then the build waits for the watchdog."""
+    try:
+        await registry.build_notify_aio(build_id, can_spawn=False)
+    except Exception as e:
+        logger.warning(
+            "Tick for build %s ended on a registry outage and could not flag "
+            "the build (left to the watchdog): %s",
+            build_id,
+            e,
+        )
+
+
 async def _drain(
     build_id: UUID, *, registry: RegistryABC, config: TickConfig, summary: TickSummary
 ) -> list[UUID]:
@@ -308,6 +337,8 @@ class _Driver:
         # When the earliest outstanding preemption restart's grace ends, on
         # the loop's clock, as of the last frontier read; None: none.
         self.restart_due: float | None = None
+        # Spawns admitted per pass under the registry's rate limit.
+        self.admission = Admission()
 
     def _out_of_time(self) -> bool:
         return (
@@ -403,10 +434,15 @@ class _Driver:
                     summary=self.summary,
                     lease_lost=lambda: lease.lost,
                     out_of_time=self._out_of_time,
+                    admission=self.admission,
                 )
         finally:
             current_build_context_var.reset(token)
-        if result.lease_lost:
+        self.admission.after_pass()
+        # The pass checks the lease before each action, not after its last:
+        # one that lapsed during the final spawn stops the tick here, before
+        # a drain could spawn neighbours into the same outage.
+        if result.lease_lost or lease.lost:
             self.summary.outcome = "lease_lost"
             return True, result.acted
         if result.superseded:
@@ -667,7 +703,10 @@ async def _tick_body(
         started_at=started_at,
     )
     acquired = False
+    outage = False
     try:
+        # The whole lease, acquire included: an outage met acquiring it is
+        # the same outage as one met driving the build.
         async with lease:
             if not lease.acquired:
                 summary.outcome = "lease_held"
@@ -684,20 +723,32 @@ async def _tick_body(
                     "Reported once per process."
                 )
             await driver.drive(lease)
+    except Exception as e:
+        outage = is_registry_outage(e)
+        raise
     finally:
-        if acquired and summary.outcome == "lifetime_reached":
+        # A lease lost to unanswered renewals, not to another tick, is the
+        # same outage seen from the lease's side.
+        if acquired and summary.outcome == "lease_lost" and not lease.taken_over:
+            outage = True
+        if outage:
+            # No drain and no hand-off: either would spawn a tick straight
+            # into the same outage.
+            await _flag_for_a_successor(build_id, registry=registry)
+        elif acquired and summary.outcome == "lifetime_reached":
             # Before the drain: the successor's hand-out stamp keeps the
             # drain from spawning a second tick for this build.
             await _continue_in_a_successor(
                 build_id, registry=registry, config=config, summary=summary
             )
         drained: list[UUID] = []
-        if acquired and summary.outcome != "not_reactive":
+        if not outage and acquired and summary.outcome != "not_reactive":
             drained = await _drain(
                 build_id, registry=registry, config=config, summary=summary
             )
         if (
-            acquired
+            not outage
+            and acquired
             and driver.cleared_a_wakeup
             and build_id not in drained
             and summary.outcome not in _NO_HANDOFF_OUTCOMES

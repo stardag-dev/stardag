@@ -203,6 +203,41 @@ async def run_bounded(
     await run_concurrently([partial(one, f) for f in factories])
 
 
+async def run_bounded_settled(
+    factories: Sequence[_Factory],
+    semaphore: asyncio.Semaphore,
+    *,
+    prefer: Callable[[BaseException], bool] | None = None,
+) -> None:
+    """:func:`run_bounded`, but one coroutine's failure cancels none of the
+    others: every one runs to its end, and then the first failure (in
+    submission order) is raised.
+
+    For work whose individual units must not be abandoned half-way once
+    started -- a tick's claim, spawn and ref record, where cancelling a
+    sibling between its claim and its spawn strands that claim until its
+    TTL lapses (STA-135)."""
+
+    async def one(factory: _Factory) -> None:
+        async with semaphore:
+            await factory()
+
+    results = await asyncio.gather(*(one(f) for f in factories), return_exceptions=True)
+    failures = [r for r in results if isinstance(r, BaseException)]
+    if not failures:
+        return
+    # The one raised is the first ``prefer`` picks out (the caller decides
+    # what matters most to whoever handles it), else the first; the rest
+    # are logged.
+    raised = next(
+        (f for f in failures if prefer is not None and prefer(f)), failures[0]
+    )
+    for other in failures:
+        if other is not raised:
+            logger.warning(f"A concurrent action also failed: {other!r}")
+    raise raised
+
+
 async def walk_aio(
     roots: TaskStruct,
     *,
