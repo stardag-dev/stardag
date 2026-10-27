@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import Boolean, ForeignKey, String, Text, Uuid
+from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from stardag_api.models.base import Base, TimestampMixin, generate_uuid7
@@ -53,6 +53,16 @@ class Workspace(Base, TimestampMixin):
         nullable=False,
         default=False,
         server_default="0",
+    )
+
+    # The hosting operator's override of the v2 write rate limit for this
+    # workspace (requests per minute per API instance; NULL: the
+    # deployment's ``LIMITS_MAX_REQUESTS_PER_MINUTE``). A cost control of
+    # whoever runs the registry, set directly in the database: deliberately
+    # absent from every API schema, so no workspace or org admin can read or
+    # change it (STA-135).
+    max_write_requests_per_minute: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, default=None
     )
 
     # Relationships

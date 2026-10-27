@@ -245,7 +245,13 @@ export class ApiStack extends cdk.Stack {
         // SaaS guardrails (rate limits and entity creation limits)
         LIMITS_MAX_TASK_DATA_BYTES: "102400",
         LIMITS_MAX_ARTIFACT_BODY_BYTES: "1048576",
-        LIMITS_MAX_REQUESTS_PER_MINUTE: "300",
+        // v2 writes per workspace per minute, per API instance. A reactive
+        // task costs about five writes over its life, so 300 capped a
+        // workspace near 60 short tasks a minute (STA-135). The writes that
+        // finish running work are exempt (routes/registry_v2/guard.py), and
+        // a workspace's own limit can be set in the database
+        // (workspaces.max_write_requests_per_minute).
+        LIMITS_MAX_REQUESTS_PER_MINUTE: "1200",
         LIMITS_MAX_BUILDS_PER_WORKSPACE_24H: "200",
         LIMITS_MAX_TASKS_PER_WORKSPACE_24H: "10000",
         LIMITS_MAX_EVENTS_PER_WORKSPACE_24H: "50000",

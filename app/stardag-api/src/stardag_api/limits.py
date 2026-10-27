@@ -128,6 +128,44 @@ _rate_limiter = InMemoryRateLimiter()
 
 
 # ---------------------------------------------------------------------------
+# The hosting operator's per-workspace override (STA-135)
+# ---------------------------------------------------------------------------
+
+#: How long a workspace's override is reused before it is read again: a
+#: change made in the database takes effect within this, per instance.
+OVERRIDE_CACHE_SECONDS = 60.0
+
+_override_cache: dict[UUID, tuple[float, int | None]] = {}
+
+
+async def workspace_rate_limit_override(
+    db: AsyncSession, workspace_id: UUID
+) -> int | None:
+    """The workspace's ``max_write_requests_per_minute``, or None for the
+    deployment default; cached per instance for
+    :data:`OVERRIDE_CACHE_SECONDS`. Set only directly in the database (a
+    cost control of whoever hosts the registry; no API exposes it)."""
+    now = time.monotonic()
+    cached = _override_cache.get(workspace_id)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+    from sqlalchemy import select
+
+    from stardag_api.models import Workspace
+
+    value = await db.scalar(
+        select(Workspace.max_write_requests_per_minute).where(
+            Workspace.id == workspace_id
+        )
+    )
+    # End the read's implicit transaction, so the route's own transaction
+    # starts from a clean session (the guard runs before the route).
+    await db.commit()
+    _override_cache[workspace_id] = (now + OVERRIDE_CACHE_SECONDS, value)
+    return value
+
+
+# ---------------------------------------------------------------------------
 # Entity count cache (TTL cache for 24h DB counts)
 # ---------------------------------------------------------------------------
 
@@ -267,10 +305,17 @@ async def _count_entities_24h(
 
 
 def check_rate_limit(
-    workspace_id: UUID, settings: LimitsSettings
+    workspace_id: UUID,
+    settings: LimitsSettings,
+    *,
+    override: int | None = None,
 ) -> LimitExceededError | None:
-    """Check per-workspace rate limit. Returns error or None."""
-    max_rpm = settings.max_requests_per_minute
+    """Check per-workspace rate limit. Returns error or None.
+
+    ``override``: the workspace's own limit, set by the hosting operator
+    (:func:`workspace_rate_limit_override`); it replaces the deployment's
+    ``LIMITS_MAX_REQUESTS_PER_MINUTE`` for that workspace."""
+    max_rpm = override if override is not None else settings.max_requests_per_minute
     if max_rpm is None:
         return None
 
