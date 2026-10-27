@@ -48,7 +48,7 @@ describe("TaskParameters", () => {
       />,
     );
     expect(
-      within(box()).getByRole("treeitem", { name: "log: info" }),
+      within(box()).getByRole("treeitem", { name: "log: info, string" }),
     ).toBeInTheDocument();
     expect(screen.queryByText(/__name/)).not.toBeInTheDocument();
     expect(screen.getByText("2 instances")).toBeInTheDocument();
@@ -61,7 +61,7 @@ describe("TaskParameters", () => {
   it("shows the newest instance outside a plan", () => {
     render(<TaskParameters instances={TWO} deploymentsById={DEPLOYMENTS} />);
     expect(
-      within(box()).getByRole("treeitem", { name: "log: debug" }),
+      within(box()).getByRole("treeitem", { name: "log: debug, string" }),
     ).toBeInTheDocument();
   });
 
@@ -110,7 +110,7 @@ describe("TaskParameters", () => {
     expect(rows[1]).toHaveAttribute("aria-selected", "true");
     expect(within(rows[1]).getByText("in this plan")).toBeInTheDocument();
     expect(
-      within(dialog).getByRole("treeitem", { name: "log: info" }),
+      within(dialog).getByRole("treeitem", { name: "log: info, string" }),
     ).toBeInTheDocument();
 
     fireEvent.click(rows[0]);
@@ -122,10 +122,10 @@ describe("TaskParameters", () => {
     fireEvent.keyDown(rows[0], { key: " " });
     expect(rows[0]).toHaveAttribute("aria-selected", "true");
     expect(
-      within(dialog).getByRole("treeitem", { name: "log: debug" }),
+      within(dialog).getByRole("treeitem", { name: "log: debug, string" }),
     ).toBeInTheDocument();
     expect(
-      within(dialog).queryByRole("treeitem", { name: "log: info" }),
+      within(dialog).queryByRole("treeitem", { name: "log: info, string" }),
     ).not.toBeInTheDocument();
   });
 

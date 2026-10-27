@@ -254,6 +254,19 @@ describe("fuzzyMatch", () => {
     expect(ranges("İstanbul", "stan")).toEqual([[1, 5]]);
     expect(ranges("xİy", "i")).toEqual([[1, 2]]);
     expect(ranges("ΟΔΟΣ", "οδοσ")).toEqual([[0, 4]]);
+    // The usual spelling, with a final sigma, finds it too.
+    expect(ranges("ΟΔΟΣ", "οδος")).toEqual([[0, 4]]);
+    expect(ranges("οδος", "ΟΔΟΣ")).toEqual([[0, 4]]);
+  });
+
+  it("matches whole code points, never one surrogate half each", () => {
+    // The query's high surrogate is the first character's, its low the second's.
+    expect(fuzzyMatch("\u{1F000}\u{1F600}", "\u{1F200}")).toBeNull();
+    expect(ranges("a\u{1F600}b", "\u{1F600}")).toEqual([[1, 3]]);
+    expect(ranges("x_\u{1F600}_y", "x\u{1F600}")).toEqual([
+      [0, 1],
+      [2, 4],
+    ]);
   });
 
   it("falls back to a substring match on very long texts", () => {
@@ -375,5 +388,6 @@ describe("case folding", () => {
     expect(foldCase("ΟΔΟΣ")).toBe(foldCase("οδοσ"));
     const nodes = indexJson({ street: "ΟΔΟΣ" });
     expect(findMatches(nodes, "οδοσ")).toHaveLength(1);
+    expect(findMatches(nodes, "οδος")).toHaveLength(1);
   });
 });

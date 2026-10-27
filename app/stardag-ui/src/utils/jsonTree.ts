@@ -374,7 +374,7 @@ export const MAX_MIDWORD_GAP = 8;
  */
 export const MIN_SCORE_PER_CHAR = 12;
 /**
- * Texts longer than this (in folded code units), and queries longer than
+ * Texts longer than this (in folded code points), and queries longer than
  * `MAX_FUZZY_QUERY`, are matched as a contiguous substring only: the
  * scoring is quadratic in neither, but its tables are `text × query`.
  */
@@ -388,35 +388,52 @@ const MAX_FUZZY_QUERY = 64;
  */
 export function foldCase(text: string): string {
   let out = "";
-  for (const ch of text) out += ch.toLowerCase();
+  for (const ch of text) out += foldChar(ch);
   return out;
 }
 
+/**
+ * One character, folded: lower-cased, with the final sigma `ς` read as
+ * `σ`, since per-character lower-casing cannot tell a final `Σ` from a
+ * medial one and the user may type either.
+ */
+function foldChar(ch: string): string {
+  const lower = ch.toLowerCase();
+  return lower === "ς" ? "σ" : lower;
+}
+
 interface Folded {
-  folded: string;
-  /** For each folded code unit: the start and length of its original character. */
+  /** The folded text as code points: what is matched, one at a time. */
+  chars: string[];
+  /** For each folded code point: the start and length of its original character. */
   origin: number[];
   width: number[];
 }
 
 function foldWithMap(text: string): Folded {
-  let folded = "";
+  const chars: string[] = [];
   const origin: number[] = [];
   const width: number[] = [];
   let at = 0;
   for (const ch of text) {
-    const lower = ch.toLowerCase();
-    for (let k = 0; k < lower.length; k++) {
+    // Lower-casing may yield several code points (`İ` gives `i` and a
+    // combining dot); each is matchable, and maps back to the whole `ch`.
+    for (const cp of foldChar(ch)) {
+      chars.push(cp);
       origin.push(at);
       width.push(ch.length);
     }
-    folded += lower;
     at += ch.length;
   }
-  return { folded, origin, width };
+  return { chars, origin, width };
 }
 
-/** Whether `q` is a subsequence of `text`: the cheap filter before scoring. */
+/**
+ * Whether `q` is a subsequence of `text`, by code unit: the cheap filter
+ * before scoring. It may pass a query whose surrogate halves match
+ * different characters, never reject a real match; the scoring compares
+ * whole code points.
+ */
 export function isSubsequence(q: string, text: string): boolean {
   let i = 0;
   for (let j = 0; j < text.length && i < q.length; j++) {
@@ -436,7 +453,7 @@ function isLower(ch: string): boolean {
   return ch !== ch.toUpperCase() && ch === ch.toLowerCase();
 }
 
-/** The position bonus for each folded unit, read off the original characters. */
+/** The position bonus for each folded code point, read off the original characters. */
 function bonuses(text: string, { origin, width }: Folded): number[] {
   const out = new Array<number>(origin.length);
   const charAt = (j: number) => text.slice(origin[j], origin[j] + width[j]);
@@ -446,7 +463,7 @@ function bonuses(text: string, { origin, width }: Folded): number[] {
       continue;
     }
     if (origin[j] === origin[j - 1]) {
-      out[j] = 0; // the second unit of one character
+      out[j] = 0; // a later code point of one folded character
       continue;
     }
     const prev = charAt(j - 1);
@@ -473,8 +490,16 @@ function toRanges({ origin, width }: Folded, positions: number[]): Range[] {
   return ranges;
 }
 
-function substringMatch(f: Folded, q: string): FuzzyMatch | null {
-  const at = f.folded.indexOf(q);
+function indexOfChars(chars: string[], q: string[]): number {
+  outer: for (let at = 0; at + q.length <= chars.length; at++) {
+    for (let k = 0; k < q.length; k++) if (chars[at + k] !== q[k]) continue outer;
+    return at;
+  }
+  return -1;
+}
+
+function substringMatch(f: Folded, q: string[]): FuzzyMatch | null {
+  const at = indexOfChars(f.chars, q);
   if (at === -1) return null;
   const positions = Array.from({ length: q.length }, (_, k) => at + k);
   const score =
@@ -496,8 +521,8 @@ function substringMatch(f: Folded, q: string): FuzzyMatch | null {
  * maximum and the short gaps a bounded window, so the table costs
  * `|q| × |text| × MAX_MIDWORD_GAP` at most.
  */
-function scoreFolded(text: string, f: Folded, q: string): FuzzyMatch | null {
-  const n = f.folded.length;
+function scoreFolded(text: string, f: Folded, q: string[]): FuzzyMatch | null {
+  const n = f.chars.length;
   const m = q.length;
   if (m === 0 || m > n) return null;
   if (n > MAX_FUZZY_TEXT || m > MAX_FUZZY_QUERY) {
@@ -510,7 +535,7 @@ function scoreFolded(text: string, f: Folded, q: string): FuzzyMatch | null {
   const back = Array.from({ length: m }, () => new Int32Array(n).fill(-1));
   // The first character only at a word start (see fuzzyMatch).
   for (let j = 0; j < n; j++) {
-    if (f.folded[j] === q[0] && bonus[j] >= BONUS_CAMEL)
+    if (f.chars[j] === q[0] && bonus[j] >= BONUS_CAMEL)
       H[0][j] = SCORE_MATCH + bonus[j] * FIRST_CHAR_MULTIPLIER;
   }
   for (let i = 1; i < m; i++) {
@@ -524,7 +549,7 @@ function scoreFolded(text: string, f: Folded, q: string): FuzzyMatch | null {
         farBest = prev[j - 2] - GAP_OPEN;
         farFrom = j - 2;
       }
-      if (f.folded[j] !== q[i]) continue;
+      if (f.chars[j] !== q[i]) continue;
       let gapBest = NONE;
       let gapFrom = -1;
       if (bonus[j] >= BONUS_CAMEL) {
@@ -589,9 +614,8 @@ function scoreFolded(text: string, f: Folded, q: string): FuzzyMatch | null {
 export function fuzzyMatch(text: string, query: string): FuzzyMatch | null {
   const q = foldCase(query.trim());
   if (!q) return null;
-  const f = foldWithMap(text);
-  if (!isSubsequence(q, f.folded)) return null;
-  return scoreFolded(text, f, q);
+  if (!isSubsequence(q, foldCase(text))) return null;
+  return scoreFolded(text, foldWithMap(text), Array.from(q));
 }
 
 /**
@@ -604,10 +628,11 @@ export function fuzzyMatch(text: string, query: string): FuzzyMatch | null {
 export function findMatches(nodes: JsonNode[], query: string): JsonMatch[] {
   const q = foldCase(query.trim());
   if (!q) return [];
+  const qChars = Array.from(q);
   const matches: JsonMatch[] = [];
   const match = (text: string, folded: string | null): FuzzyMatch | null =>
     folded !== null && isSubsequence(q, folded)
-      ? scoreFolded(text, foldWithMap(text), q)
+      ? scoreFolded(text, foldWithMap(text), qChars)
       : null;
   for (let i = 1; i < nodes.length; i++) {
     const node = nodes[i];

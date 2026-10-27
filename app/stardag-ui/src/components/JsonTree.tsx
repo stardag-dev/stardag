@@ -480,9 +480,13 @@ const JsonRow = memo(function JsonRow({
   onFocusRow,
 }: JsonRowProps) {
   const container = isContainer(node);
+  // The type is spelled out for scalars too: `false` and `"false"` draw
+  // differently, and must not be announced the same.
   const summary = container
     ? `${node.kind === "array" ? "array" : "object"}, ${sizeLabel(node)}`
-    : scalarText(node.value);
+    : node.kind === "null"
+      ? "null"
+      : `${scalarText(node.value)}, ${node.kind}`;
   return (
     <div
       role="treeitem"

@@ -50,7 +50,7 @@ describe("JsonTree", () => {
     expect(layers).toHaveAttribute("aria-expanded", "false");
     expect(layers).toHaveTextContent("2 items");
     // Scalars carry no expanded state.
-    expect(item("epochs: 3")).not.toHaveAttribute("aria-expanded");
+    expect(item("epochs: 3, number")).not.toHaveAttribute("aria-expanded");
     expect(screen.queryByRole("treeitem", { name: /^units/ })).toBeNull();
   });
 
@@ -75,8 +75,8 @@ describe("JsonTree", () => {
 
     rows[0].focus();
     fireEvent.keyDown(rows[0], { key: "ArrowDown" });
-    expect(item("name: Alpha")).toHaveFocus();
-    fireEvent.keyDown(item("name: Alpha"), { key: "ArrowDown" });
+    expect(item("name: Alpha, string")).toHaveFocus();
+    fireEvent.keyDown(item("name: Alpha, string"), { key: "ArrowDown" });
     const model = item(/^model:/);
     expect(model).toHaveFocus();
 
@@ -85,17 +85,17 @@ describe("JsonTree", () => {
     fireEvent.keyDown(model, { key: "ArrowRight" });
     expect(model).toHaveAttribute("aria-expanded", "true");
     fireEvent.keyDown(model, { key: "ArrowRight" });
-    expect(item("__namespace: demo")).toHaveFocus();
-    fireEvent.keyDown(item("__namespace: demo"), { key: "ArrowLeft" });
+    expect(item("__namespace: demo, string")).toHaveFocus();
+    fireEvent.keyDown(item("__namespace: demo, string"), { key: "ArrowLeft" });
     expect(model).toHaveFocus();
     expect(model).toHaveAttribute("tabindex", "0");
 
     fireEvent.keyDown(model, { key: "Enter" });
     expect(model).toHaveAttribute("aria-expanded", "false");
     fireEvent.keyDown(model, { key: "End" });
-    expect(item("1: beta")).toHaveFocus();
-    fireEvent.keyDown(item("1: beta"), { key: "Home" });
-    expect(item("epochs: 3")).toHaveFocus();
+    expect(item("1: beta, string")).toHaveFocus();
+    fireEvent.keyDown(item("1: beta, string"), { key: "Home" });
+    expect(item("epochs: 3, number")).toHaveFocus();
   });
 
   it("highlights matches, expands their ancestors and steps through them", () => {
@@ -123,9 +123,9 @@ describe("JsonTree", () => {
     renderTree();
     search("64");
     fireEvent.click(screen.getByRole("button", { name: "Collapse all" }));
-    expect(screen.queryByRole("treeitem", { name: "units: 64" })).toBeNull();
+    expect(screen.queryByRole("treeitem", { name: "units: 64, number" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Next match" }));
-    expect(item("units: 64")).toBeInTheDocument();
+    expect(item("units: 64, number")).toBeInTheDocument();
   });
 
   it("waits for typing to pause, says when nothing matches, and clears on Escape", () => {
@@ -154,7 +154,7 @@ describe("JsonTree", () => {
     search("lr");
     // Both match; the word-start `r` ranks first despite document order.
     expect(screen.getByText("1 of 2")).toBeInTheDocument();
-    const best = item("learning_rate: 0.1");
+    const best = item("learning_rate: 0.1, number");
     expect(best.className).toContain("bg-amber-50");
     const marks = [...best.querySelectorAll("mark")].map((m) => m.textContent);
     expect(marks).toEqual(["l", "r"]);
@@ -183,6 +183,15 @@ describe("JsonTree", () => {
     expect(screen.getByText("1 of 3")).toBeInTheDocument();
   });
 
+  it("names scalars with their type, so a string and a boolean differ", () => {
+    renderTree({ text: "false", flag: false, count: "3", none: null, word: "null" });
+    expect(item("text: false, string")).toBeInTheDocument();
+    expect(item("flag: false, boolean")).toBeInTheDocument();
+    expect(item("count: 3, string")).toBeInTheDocument();
+    expect(item("none: null")).toBeInTheDocument();
+    expect(item("word: null, string")).toBeInTheDocument();
+  });
+
   it("says when the value is empty", () => {
     render(<JsonTree value={{}} label="Task parameters" emptyText="No parameters." />);
     expect(screen.getByText("No parameters.")).toBeInTheDocument();
@@ -207,12 +216,14 @@ describe("JsonTree copy", () => {
     expect(model).toHaveAttribute("aria-expanded", "true");
     expect(await screen.findByRole("status")).toHaveTextContent("Copied path $.model");
 
-    fireEvent.click(item("name: Alpha").querySelector('[aria-label="Copy value"]')!);
+    fireEvent.click(
+      item("name: Alpha, string").querySelector('[aria-label="Copy value"]')!,
+    );
     expect(writeText).toHaveBeenLastCalledWith("Alpha");
 
     fireEvent.keyDown(model, { key: "c" });
     expect(JSON.parse(writeText.mock.lastCall![0])).toEqual(VALUE.model);
-    fireEvent.keyDown(item("epochs: 3"), { key: "p" });
+    fireEvent.keyDown(item("epochs: 3, number"), { key: "p" });
     expect(writeText).toHaveBeenLastCalledWith("$.epochs");
     // Ctrl+C stays the browser's.
     writeText.mockClear();
@@ -245,7 +256,7 @@ describe("JsonTree on a large value", () => {
     // A match past the page moves the page to it.
     search("item 299");
     expect(screen.getByText("1 of 1")).toBeInTheDocument();
-    expect(item("label: item 299")).toBeInTheDocument();
+    expect(item("label: item 299, string")).toBeInTheDocument();
 
     // A query matching most of it reveals only the first matches. (The
     // one the previous search opened stays expanded, but the page has
@@ -267,7 +278,7 @@ describe("JsonTree on a large value", () => {
     // Stepping back to the last match moves the page to it: still a page.
     fireEvent.click(screen.getByRole("button", { name: "Previous match" }));
     expect(screen.getByText("10000 of 10000")).toBeInTheDocument();
-    expect(item("9999: alpha")).toBeInTheDocument();
+    expect(item("9999: alpha, string")).toBeInTheDocument();
     expect(item("Show 200 earlier (9,800 not shown)")).toBeInTheDocument();
     expect(screen.getAllByRole("treeitem")).toHaveLength(1 + 1 + PAGE_SIZE);
   });
@@ -276,12 +287,12 @@ describe("JsonTree on a large value", () => {
     renderTree({ values: Array.from({ length: 450 }, (_, i) => i) });
     fireEvent.click(item(/^values:/));
     fireEvent.click(item("Show 200 more (250 not shown)"));
-    expect(item("399: 399")).toBeInTheDocument();
+    expect(item("399: 399, number")).toBeInTheDocument();
     const next = item("Show 50 more (50 not shown)");
     next.focus();
     fireEvent.keyDown(next, { key: "Enter" });
-    expect(item("449: 449")).toBeInTheDocument();
-    expect(item("400: 400")).toHaveFocus();
+    expect(item("449: 449, number")).toBeInTheDocument();
+    expect(item("400: 400, number")).toHaveFocus();
     expect(screen.queryByRole("treeitem", { name: /^Show/ })).toBeNull();
   });
 
@@ -294,7 +305,7 @@ describe("JsonTree on a large value", () => {
     fireEvent.keyDown(values, { key: "ArrowRight" });
     expect(item("Show 200 earlier (800 not shown)")).toHaveFocus();
     fireEvent.keyDown(item("Show 200 earlier (800 not shown)"), { key: "ArrowDown" });
-    expect(item("800: alpha")).toHaveFocus();
+    expect(item("800: alpha, string")).toHaveFocus();
   });
 
   it("scrolls to the current match on every step, even a single one", () => {
