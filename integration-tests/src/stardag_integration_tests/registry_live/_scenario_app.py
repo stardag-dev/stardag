@@ -121,12 +121,14 @@ def build_scenario_app(
     app_image: modal.Image | None = None,
     scaledown_window: int | None = None,
     container_setup: typing.Callable[[], None] | None = None,
+    retrying_workers: typing.Mapping[str, int | modal.Retries] | None = None,
 ) -> sd_modal.StardagApp:
     """A scenario app under ``app_name``. Identical but for the name (and, for
     the rollover app, an image with a variant baked in and a short
     ``scaledown_window``, see ``ROLLOVER_SCALEDOWN_SECONDS``; for the
     reconcile app, a ``container_setup`` that installs its faults, see
-    ``reconcile_app``)."""
+    ``reconcile_app``, and ``retrying_workers``: further workers, by name,
+    each with those Modal ``retries``)."""
     chosen = image if app_image is None else app_image
 
     def settings(timeout: int) -> sd_modal.FunctionSettings:
@@ -135,6 +137,11 @@ def build_scenario_app(
         return sd_modal.FunctionSettings(
             image=chosen, timeout=timeout, scaledown_window=scaledown_window
         )
+
+    def retrying(retries: int | modal.Retries) -> sd_modal.FunctionSettings:
+        # Passed through to Modal, which takes a ``modal.Retries`` as well as
+        # the count ``FunctionSettings`` declares.
+        return {**settings(WORKER_TIMEOUT_SECONDS), "retries": retries}  # type: ignore[typeddict-item]
 
     return sd_modal.StardagApp(
         app_name,
@@ -149,6 +156,10 @@ def build_scenario_app(
             # function registration and nothing at run time -- no task
             # routes here unless it asks.
             ALT_WORKER: settings(WORKER_TIMEOUT_SECONDS),
+            **{
+                name: retrying(retries)
+                for name, retries in (retrying_workers or {}).items()
+            },
         },
         worker_selector=registry_live_worker,
         tick_settings=settings(TICK_TIMEOUT_SECONDS),

@@ -40,23 +40,29 @@ lease is not load-bearing for safety**: two ticks reconciling at once
 issue the same idempotent ends, and a zombie tick's late spawn is caught
 by the rule above. The lease bounds wasted work, nothing more.
 
-**A residual risk, stated rather than assumed away.** A Modal worker with
-``retries`` set is retried by Modal under the same call. Reconciliation
-relies on ``get(timeout=0)`` answering only the call's *final* outcome; if
-Modal ever exposed a failed attempt's output while the next attempt runs,
-a ``"raised"`` read would end an execution whose retry is running -- a
-duplicate if that retry had already passed checkpoint one. Modal documents
-outputs per call, not per attempt, but nothing here can verify it; a
-registry-live scenario with ``retries > 0`` is the check.
+**Modal retries, verified rather than assumed.** A Modal worker with
+``retries`` set is retried by Modal under the same call, so R1 relies on
+``get(timeout=0)`` answering only the call's *final* outcome: a failed
+attempt's output exposed while the next attempt runs would read
+``"raised"`` and end an execution whose retry is running. The client
+cannot show this (for a spawned call, retries are the server's), so the
+registry-live scenario ``test_reconcile_retried_attempt`` does: a first
+attempt that raises with its failure report lost, probed through Modal's
+retry delay and while the retry runs, reads ``"running"`` throughout, and
+the retry completes under the one execution (STA-146). It runs with the
+tier, so a change in Modal's behaviour surfaces there. It only matters
+when the failure report is lost: a reported failure ends the execution
+itself.
 
-**A second, narrower one.** R2 trusts the worker-rule capability of the
-tick's own deployment, but a tick resolves its workers by name, so in the
-moments after a redeploy an old tick can spawn onto a *new* deployment's
-worker. If that deployment's run function does not keep the rule, both
-ref records for the spawn are lost, and the old plan is still active ten
-minutes later (no new-deployment tick has rolled it over -- after which the
-superseded-plan guard excludes it), R2 could end a claim whose worker runs.
-Closing it fully means pinning worker resolution to a deployment.
+**A residual risk, stated rather than assumed away.** R2 trusts the
+worker-rule capability of the tick's own deployment, but a tick resolves
+its workers by name, so in the moments after a redeploy an old tick can
+spawn onto a *new* deployment's worker. If that deployment's run function
+does not keep the rule, both ref records for the spawn are lost, and the
+old plan is still active ten minutes later (no new-deployment tick has
+rolled it over -- after which the superseded-plan guard excludes it), R2
+could end a claim whose worker runs. Closing it fully means pinning worker
+resolution to a deployment.
 
 What an end does to the task:
 
