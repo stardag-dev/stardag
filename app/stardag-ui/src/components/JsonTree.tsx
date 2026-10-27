@@ -6,7 +6,6 @@ import {
   defaultExpanded,
   findMatches,
   hiddenCount,
-  highlightSegments,
   indexJson,
   isContainer,
   isMoreRow,
@@ -16,12 +15,14 @@ import {
   windowOf,
   revealInPages,
   scalarText,
+  segmentsOf,
   showMore,
   sizeLabel,
   union,
   visibleRows,
   type JsonMatch,
   type JsonNode,
+  type Range,
   type MoreDirection,
   type Windows,
 } from "../utils/jsonTree";
@@ -63,7 +64,8 @@ const NO_SEARCH: SearchState = { query: "", matches: [], current: 0 };
  * The value is indexed once into a flat preorder list; the visible rows
  * are recomputed from the expanded set, and only rows whose props change
  * re-render. The search is debounced and highlights only the rows it
- * matches, so typing in it does not re-render the tree per keystroke.
+ * matches, so typing in it does not re-render the tree per keystroke. It
+ * is fuzzy (see `fuzzyMatch`), and steps through matches best first.
  *
  * It is an ARIA tree in its flat form: every row is a `treeitem` carrying
  * its level, position and (for containers) expanded state, with one row
@@ -87,7 +89,8 @@ export function JsonTree({
   defaultDepth = 2,
   emptyText = "Empty.",
 }: JsonTreeProps) {
-  const nodes = useMemo(() => indexJson(value), [value]);
+  const stable = useStableJson(value);
+  const nodes = useMemo(() => indexJson(stable), [stable]);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() =>
     defaultExpanded(nodes, defaultDepth),
   );
@@ -296,8 +299,11 @@ export function JsonTree({
         focusRow(rows[rows.length - 1]);
         break;
       case "ArrowRight":
+        // Into the first drawn child: the next row, which may be a
+        // "show earlier" row when the page has moved past the first.
         if (isContainer(node) && !open) toggle(index);
-        else if (open && node.size > 0) focusRow(index + 1);
+        else if (open && node.size > 0 && row + 1 < rows.length)
+          focusRow(rows[row + 1]);
         break;
       case "ArrowLeft":
         if (open) toggle(index);
@@ -423,8 +429,8 @@ export function JsonTree({
                 index={index}
                 open={expanded.has(nodes[index].id)}
                 tabbable={index === tabStop}
-                keyQuery={match?.inKey ? search.query : ""}
-                valueQuery={match?.inValue ? search.query : ""}
+                keyRanges={match?.keyRanges ?? null}
+                valueRanges={match?.valueRanges ?? null}
                 current={currentMatch?.index === index}
                 onToggle={toggle}
                 onCopy={copy}
@@ -451,9 +457,9 @@ interface JsonRowProps {
   index: number;
   open: boolean;
   tabbable: boolean;
-  /** The search query when it matched this row's key or value, else "". */
-  keyQuery: string;
-  valueQuery: string;
+  /** The characters the search matched in the key and the value, if any. */
+  keyRanges: Range[] | null;
+  valueRanges: Range[] | null;
   /** This row is the current search match. */
   current: boolean;
   onToggle: (index: number) => void;
@@ -466,8 +472,8 @@ const JsonRow = memo(function JsonRow({
   index,
   open,
   tabbable,
-  keyQuery,
-  valueQuery,
+  keyRanges,
+  valueRanges,
   current,
   onToggle,
   onCopy,
@@ -519,7 +525,7 @@ const JsonRow = memo(function JsonRow({
               : "text-sky-800 dark:text-sky-300"
           }
         >
-          <Highlighted text={String(node.key)} query={keyQuery} current={current} />
+          <Highlighted text={String(node.key)} ranges={keyRanges} current={current} />
         </span>
         <span className="text-gray-400">:</span>
       </span>
@@ -547,7 +553,7 @@ const JsonRow = memo(function JsonRow({
             )}
           </>
         ) : (
-          <ScalarValue node={node} query={valueQuery} current={current} />
+          <ScalarValue node={node} ranges={valueRanges} current={current} />
         )}
       </span>
       <span className="flex shrink-0 gap-1 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100">
@@ -603,6 +609,24 @@ const MoreRow = memo(function MoreRow({
   );
 });
 
+/**
+ * `value`, kept by identity for as long as its JSON content is unchanged.
+ * A refresh that re-fetches the same body produces a new object; without
+ * this it would re-index the tree and re-run the search, sending the user
+ * back to the first match mid-navigation. Serialises only when identity
+ * changes.
+ */
+function useStableJson(value: unknown): unknown {
+  const [seen, setSeen] = useState(value);
+  const [stable, setStable] = useState(value);
+  if (value !== seen) {
+    setSeen(value);
+    if (JSON.stringify(value) !== JSON.stringify(stable)) setStable(value);
+  }
+  // React re-renders with the updated state before committing.
+  return stable;
+}
+
 const SCALAR_CLASS: Record<string, string> = {
   string: "text-green-700 dark:text-green-400",
   number: "text-blue-700 dark:text-blue-300",
@@ -612,11 +636,11 @@ const SCALAR_CLASS: Record<string, string> = {
 
 function ScalarValue({
   node,
-  query,
+  ranges,
   current,
 }: {
   node: JsonNode;
-  query: string;
+  ranges: Range[] | null;
   current: boolean;
 }) {
   const text = scalarText(node.value);
@@ -624,25 +648,26 @@ function ScalarValue({
   return (
     <span className={SCALAR_CLASS[node.kind]}>
       {quote}
-      <Highlighted text={text} query={query} current={current} />
+      <Highlighted text={text} ranges={ranges} current={current} />
       {quote}
     </span>
   );
 }
 
+/** `text` with the matched characters marked, each run of them one `<mark>`. */
 function Highlighted({
   text,
-  query,
+  ranges,
   current,
 }: {
   text: string;
-  query: string;
+  ranges: Range[] | null;
   current: boolean;
 }) {
-  if (!query) return <>{text}</>;
+  if (!ranges) return <>{text}</>;
   return (
     <>
-      {highlightSegments(text, query).map((segment, i) =>
+      {segmentsOf(text, ranges).map((segment, i) =>
         segment.match ? (
           <mark
             key={i}

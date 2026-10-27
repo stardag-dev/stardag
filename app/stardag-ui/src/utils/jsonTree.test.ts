@@ -7,7 +7,9 @@ import {
   findMatches,
   foldCase,
   hiddenCount,
-  highlightSegments,
+  fuzzyMatch,
+  MAX_FUZZY_TEXT,
+  segmentsOf,
   indexJson,
   moreOf,
   moreRow,
@@ -143,10 +145,12 @@ describe("findMatches / ancestorIds", () => {
 
   it("matches keys and scalar values case-insensitively, in display order", () => {
     const matches = findMatches(nodes, "ALPHA");
-    expect(matches.map((m) => [nodes[m.index].id, m.inKey, m.inValue])).toEqual([
-      ["$.name", false, true],
-      ["$.model.note", false, true],
-    ]);
+    expect(matches.map((m) => [nodes[m.index].id, m.keyRanges, m.valueRanges])).toEqual(
+      [
+        ["$.name", null, [[0, 5]]],
+        ["$.model.note", null, [[0, 5]]],
+      ],
+    );
     expect(findMatches(nodes, "units").map((m) => nodes[m.index].id)).toEqual([
       "$.model.layers[0].units",
       "$.model.layers[1].units",
@@ -186,15 +190,122 @@ describe("union", () => {
   });
 });
 
-describe("highlightSegments", () => {
-  it("splits every case-insensitive occurrence", () => {
-    expect(highlightSegments("Alpha alpha", "ALP")).toEqual([
-      { text: "Alp", match: true },
-      { text: "ha ", match: false },
-      { text: "alp", match: true },
-      { text: "ha", match: false },
+describe("fuzzyMatch", () => {
+  const ranges = (text: string, query: string) => fuzzyMatch(text, query)?.ranges;
+
+  it("matches the query's characters in order, case-insensitively", () => {
+    expect(ranges("learning_rate", "LR")).toEqual([
+      [0, 1],
+      [9, 10],
     ]);
-    expect(highlightSegments("abc", "")).toEqual([{ text: "abc", match: false }]);
+    expect(ranges("units", "unts")).toEqual([
+      [0, 2],
+      [3, 5],
+    ]);
+    expect(fuzzyMatch("units", "stun")).toBeNull();
+    expect(fuzzyMatch("units", "unitsx")).toBeNull();
+    expect(fuzzyMatch("units", " ")).toBeNull();
+  });
+
+  it("prefers word starts and contiguous runs when placing the characters", () => {
+    // `b` and `s` at the word starts, not the first `b`/`s` in the text.
+    expect(ranges("xbxs_batch_size", "bs")).toEqual([
+      [5, 6],
+      [11, 12],
+    ]);
+    // camelCase humps.
+    expect(ranges("maxBatchSize", "mbs")).toEqual([
+      [0, 1],
+      [3, 4],
+      [8, 9],
+    ]);
+    // The contiguous occurrence over a scattered one.
+    expect(ranges("t_r_a_i_n train", "train")).toEqual([[10, 15]]);
+  });
+
+  it("needs the first character at a word start, unless the query is contiguous", () => {
+    expect(fuzzyMatch("alpha", "pa")).toBeNull();
+    expect(ranges("alpha", "pha")).toEqual([[2, 5]]);
+    // `a` at the word start of `alpha`, not the `a` inside `max`.
+    expect(ranges("max_alpha", "ap")).toEqual([
+      [4, 5],
+      [6, 7],
+    ]);
+  });
+
+  it("scores contiguous above scattered, and word starts above mid-word", () => {
+    const score = (text: string, query: string) => fuzzyMatch(text, query)!.score;
+    expect(score("batch", "bat")).toBeGreaterThan(score("b_a_t", "bat"));
+    expect(score("batch", "bat")).toBeGreaterThan(score("acrobat", "bat"));
+    expect(score("batch_size", "bs")).toBeGreaterThan(score("abs", "bs"));
+  });
+
+  it("rejects characters strewn far apart mid-word", () => {
+    expect(fuzzyMatch("cxxxxxxxxxxxxxxxe", "ce")).toBeNull();
+    // A hash has one word start, so a short query does not match most of them.
+    expect(fuzzyMatch("9f8a7c6b5e4d3c2b1a0f9e8d", "abc")).toBeNull();
+    expect(fuzzyMatch("9f8a7c6b5e4d3c2b1a0f9e8d", "f8a")).not.toBeNull();
+    // ...but keeps initials however far apart.
+    expect(fuzzyMatch("first_quite_long_segment_last", "fl")).not.toBeNull();
+  });
+
+  it("highlights whole characters when lower-casing changes the length", () => {
+    // "İ" lower-cases to two code units.
+    expect(ranges("İstanbul", "stan")).toEqual([[1, 5]]);
+    expect(ranges("xİy", "i")).toEqual([[1, 2]]);
+    expect(ranges("ΟΔΟΣ", "οδοσ")).toEqual([[0, 4]]);
+  });
+
+  it("falls back to a substring match on very long texts", () => {
+    const long = "x".repeat(MAX_FUZZY_TEXT) + "needle";
+    expect(ranges(long, "needle")).toEqual([[MAX_FUZZY_TEXT, MAX_FUZZY_TEXT + 6]]);
+    expect(fuzzyMatch(long, "nedl")).toBeNull();
+  });
+});
+
+describe("findMatches ordering", () => {
+  it("orders matches best first, document order breaking ties", () => {
+    const nodes = indexJson({
+      a: "b_a_t",
+      b: "acrobat",
+      c: "batch",
+      d: "batch",
+    });
+    expect(findMatches(nodes, "bat").map((m) => nodes[m.index].id)).toEqual([
+      "$.c",
+      "$.d",
+      "$.b",
+      "$.a",
+    ]);
+  });
+
+  it("scores a node by the better of its key and value, and highlights each", () => {
+    const nodes = indexJson({ batch_size: "large", other: "batch" });
+    const [first, second] = findMatches(nodes, "bs");
+    expect(nodes[first.index].id).toBe("$.batch_size");
+    expect(first.keyRanges).toEqual([
+      [0, 1],
+      [6, 7],
+    ]);
+    expect(first.valueRanges).toBeNull();
+    expect(second).toBeUndefined();
+  });
+});
+
+describe("segmentsOf", () => {
+  it("splits a text at the matched ranges", () => {
+    expect(
+      segmentsOf("learning_rate", [
+        [0, 1],
+        [9, 10],
+      ]),
+    ).toEqual([
+      { text: "l", match: true },
+      { text: "earning_", match: false },
+      { text: "r", match: true },
+      { text: "ate", match: false },
+    ]);
+    expect(segmentsOf("abc", [])).toEqual([{ text: "abc", match: false }]);
   });
 });
 
@@ -260,20 +371,6 @@ describe("paging wide containers", () => {
 });
 
 describe("case folding", () => {
-  it("highlights the right characters when lower-casing changes the length", () => {
-    // "İ" lower-cases to two code units.
-    expect(highlightSegments("İstanbul", "stan")).toEqual([
-      { text: "İ", match: false },
-      { text: "stan", match: true },
-      { text: "bul", match: false },
-    ]);
-    expect(highlightSegments("xİy", "i")).toEqual([
-      { text: "x", match: false },
-      { text: "İ", match: true },
-      { text: "y", match: false },
-    ]);
-  });
-
   it("folds per character, so a final sigma matches its query", () => {
     expect(foldCase("ΟΔΟΣ")).toBe(foldCase("οδοσ"));
     const nodes = indexJson({ street: "ΟΔΟΣ" });

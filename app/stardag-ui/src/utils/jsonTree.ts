@@ -300,32 +300,6 @@ export function defaultExpanded(
   return expanded;
 }
 
-export interface JsonMatch {
-  /** Index into the node list. */
-  index: number;
-  inKey: boolean;
-  inValue: boolean;
-}
-
-/**
- * The nodes whose key or scalar value contains `query`, case-insensitively,
- * in display order. Array indices and container values are not searched:
- * an index is a position, not content, and a container's content is its
- * children's. An empty or whitespace-only query matches nothing.
- */
-export function findMatches(nodes: JsonNode[], query: string): JsonMatch[] {
-  const q = foldCase(query.trim());
-  if (!q) return [];
-  const matches: JsonMatch[] = [];
-  for (let i = 1; i < nodes.length; i++) {
-    const node = nodes[i];
-    const inKey = node.keyLower !== null && node.keyLower.includes(q);
-    const inValue = node.valueLower !== null && node.valueLower.includes(q);
-    if (inKey || inValue) matches.push({ index: i, inKey, inValue });
-  }
-  return matches;
-}
-
 /** The ids of every ancestor of the given nodes: what to expand to reveal them. */
 export function ancestorIds(nodes: JsonNode[], indices: Iterable<number>): Set<string> {
   const ids = new Set<string>();
@@ -353,6 +327,60 @@ export function union(
   return out ?? a;
 }
 
+/** A character range `[start, end)` in an original (unfolded) string. */
+export type Range = readonly [number, number];
+
+export interface FuzzyMatch {
+  score: number;
+  /** The matched characters, as merged ranges into the original string. */
+  ranges: Range[];
+}
+
+export interface JsonMatch {
+  /** Index into the node list. */
+  index: number;
+  /** The better of the key's and the value's score. */
+  score: number;
+  /** Matched ranges in the key and in the scalar text; `null` where it did not match. */
+  keyRanges: Range[] | null;
+  valueRanges: Range[] | null;
+}
+
+// Scoring, in the spirit of fzf and VS Code's fuzzy filter: every matched
+// character scores, more at the start of a word, more again when it
+// continues the previous match, and a gap between matches costs per
+// skipped character.
+const SCORE_MATCH = 16;
+const BONUS_START = 8; // the first character of the text
+const BONUS_BOUNDARY = 7; // after a separator: `a_b`, `a.b`, `a b`
+const BONUS_CAMEL = 6; // `aB`
+const BONUS_DIGIT = 3; // letter/digit transition: `v2`
+const BONUS_CONSECUTIVE = 12;
+const FIRST_CHAR_MULTIPLIER = 2;
+const GAP_OPEN = 5;
+const GAP_EXTEND = 1;
+/**
+ * The longest gap allowed before a match that is not at a word start. A
+ * longer gap may only land on a word start (`fl` in `first_..._last`), so
+ * a short query cannot pick its characters out of a long value one here
+ * and one there.
+ */
+export const MAX_MIDWORD_GAP = 8;
+/**
+ * The quality floor, per query character. A short query is a subsequence
+ * of almost any long value; requiring this much per character rejects a
+ * match whose characters are strewn far apart mid-word, while keeping
+ * initials (`fb` in `foo_bar`) and small typos-by-omission (`unts`).
+ */
+export const MIN_SCORE_PER_CHAR = 12;
+/**
+ * Texts longer than this (in folded code units), and queries longer than
+ * `MAX_FUZZY_QUERY`, are matched as a contiguous substring only: the
+ * scoring is quadratic in neither, but its tables are `text × query`.
+ */
+export const MAX_FUZZY_TEXT = 1024;
+const MAX_FUZZY_QUERY = 64;
+
 /**
  * Case folding for search, one character at a time. Lower-casing a whole
  * string is context-sensitive (a final `Σ` becomes `ς`); per character it
@@ -364,22 +392,14 @@ export function foldCase(text: string): string {
   return out;
 }
 
-export interface Segment {
-  text: string;
-  match: boolean;
+interface Folded {
+  folded: string;
+  /** For each folded code unit: the start and length of its original character. */
+  origin: number[];
+  width: number[];
 }
 
-/**
- * `text` split into runs that do and do not contain `query`,
- * case-insensitively. Offsets are mapped back to `text` through the
- * folding, since lower-casing can change a string's length (`İ` becomes
- * two code units).
- */
-export function highlightSegments(text: string, query: string): Segment[] {
-  const q = foldCase(query.trim());
-  if (!q) return [{ text, match: false }];
-  // For each code unit of the folded text: the start and length of the
-  // original character it came from.
+function foldWithMap(text: string): Folded {
   let folded = "";
   const origin: number[] = [];
   const width: number[] = [];
@@ -393,20 +413,232 @@ export function highlightSegments(text: string, query: string): Segment[] {
     folded += lower;
     at += ch.length;
   }
+  return { folded, origin, width };
+}
+
+/** Whether `q` is a subsequence of `text`: the cheap filter before scoring. */
+export function isSubsequence(q: string, text: string): boolean {
+  let i = 0;
+  for (let j = 0; j < text.length && i < q.length; j++) {
+    if (text[j] === q[i]) i++;
+  }
+  return i === q.length;
+}
+
+const WORD = /[\p{L}\p{N}]/u;
+const DIGIT = /\p{N}/u;
+
+function isUpper(ch: string): boolean {
+  return ch !== ch.toLowerCase() && ch === ch.toUpperCase();
+}
+
+function isLower(ch: string): boolean {
+  return ch !== ch.toUpperCase() && ch === ch.toLowerCase();
+}
+
+/** The position bonus for each folded unit, read off the original characters. */
+function bonuses(text: string, { origin, width }: Folded): number[] {
+  const out = new Array<number>(origin.length);
+  const charAt = (j: number) => text.slice(origin[j], origin[j] + width[j]);
+  for (let j = 0; j < origin.length; j++) {
+    if (j === 0) {
+      out[j] = BONUS_START;
+      continue;
+    }
+    if (origin[j] === origin[j - 1]) {
+      out[j] = 0; // the second unit of one character
+      continue;
+    }
+    const prev = charAt(j - 1);
+    const cur = charAt(j);
+    if (!WORD.test(prev) && WORD.test(cur)) out[j] = BONUS_BOUNDARY;
+    else if (isLower(prev) && isUpper(cur)) out[j] = BONUS_CAMEL;
+    else if (WORD.test(prev) && WORD.test(cur) && DIGIT.test(prev) !== DIGIT.test(cur))
+      out[j] = BONUS_DIGIT;
+    else out[j] = 0;
+  }
+  return out;
+}
+
+/** Folded positions to merged ranges of whole original characters. */
+function toRanges({ origin, width }: Folded, positions: number[]): Range[] {
+  const ranges: [number, number][] = [];
+  for (const p of positions) {
+    const start = origin[p];
+    const end = origin[p] + width[p];
+    const last = ranges.at(-1);
+    if (last && start <= last[1]) last[1] = Math.max(last[1], end);
+    else ranges.push([start, end]);
+  }
+  return ranges;
+}
+
+function substringMatch(f: Folded, q: string): FuzzyMatch | null {
+  const at = f.folded.indexOf(q);
+  if (at === -1) return null;
+  const positions = Array.from({ length: q.length }, (_, k) => at + k);
+  const score =
+    q.length * SCORE_MATCH +
+    (q.length - 1) * BONUS_CONSECUTIVE +
+    (at === 0 ? BONUS_START : 0);
+  return { score, ranges: toRanges(f, positions) };
+}
+
+/**
+ * The best-scoring way to match folded query `q` against `text` as a
+ * subsequence, or `null` when it is not one or scores below the floor.
+ *
+ * A dynamic programme over (query character, text position): `H[i][j]` is
+ * the best score with query character `i` matched at text unit `j`. It is
+ * reached either consecutively from `H[i-1][j-1]` or across a gap from the
+ * best `H[i-1][k]`, `k < j - 1`, less the gap's cost. A gap longer than
+ * `MAX_MIDWORD_GAP` may only end at a word start; that case is a running
+ * maximum and the short gaps a bounded window, so the table costs
+ * `|q| × |text| × MAX_MIDWORD_GAP` at most.
+ */
+function scoreFolded(text: string, f: Folded, q: string): FuzzyMatch | null {
+  const n = f.folded.length;
+  const m = q.length;
+  if (m === 0 || m > n) return null;
+  if (n > MAX_FUZZY_TEXT || m > MAX_FUZZY_QUERY) {
+    const hit = substringMatch(f, q);
+    return hit && hit.score >= m * MIN_SCORE_PER_CHAR ? hit : null;
+  }
+  const bonus = bonuses(text, f);
+  const NONE = -Infinity;
+  const H = Array.from({ length: m }, () => new Float64Array(n).fill(NONE));
+  const back = Array.from({ length: m }, () => new Int32Array(n).fill(-1));
+  // The first character only at a word start (see fuzzyMatch).
+  for (let j = 0; j < n; j++) {
+    if (f.folded[j] === q[0] && bonus[j] >= BONUS_CAMEL)
+      H[0][j] = SCORE_MATCH + bonus[j] * FIRST_CHAR_MULTIPLIER;
+  }
+  for (let i = 1; i < m; i++) {
+    const prev = H[i - 1];
+    // The best gapped predecessor over every k < j - 1, for word starts.
+    let farBest = NONE;
+    let farFrom = -1;
+    for (let j = i; j < n; j++) {
+      if (farBest !== NONE) farBest -= GAP_EXTEND;
+      if (j >= 2 && prev[j - 2] !== NONE && prev[j - 2] - GAP_OPEN > farBest) {
+        farBest = prev[j - 2] - GAP_OPEN;
+        farFrom = j - 2;
+      }
+      if (f.folded[j] !== q[i]) continue;
+      let gapBest = NONE;
+      let gapFrom = -1;
+      if (bonus[j] >= BONUS_CAMEL) {
+        gapBest = farBest;
+        gapFrom = farFrom;
+      } else {
+        // Mid-word: only a short gap.
+        for (let k = j - 2; k >= 0 && j - k - 1 <= MAX_MIDWORD_GAP; k--) {
+          if (prev[k] === NONE) continue;
+          const candidate = prev[k] - GAP_OPEN - (j - k - 2) * GAP_EXTEND;
+          if (candidate > gapBest) {
+            gapBest = candidate;
+            gapFrom = k;
+          }
+        }
+      }
+      const consecutive = prev[j - 1] === NONE ? NONE : prev[j - 1] + BONUS_CONSECUTIVE;
+      const base = SCORE_MATCH + bonus[j];
+      if (consecutive !== NONE && consecutive >= gapBest) {
+        H[i][j] = consecutive + base;
+        back[i][j] = j - 1;
+      } else if (gapBest !== NONE) {
+        H[i][j] = gapBest + base;
+        back[i][j] = gapFrom;
+      }
+    }
+  }
+  let best = NONE;
+  let end = -1;
+  for (let j = 0; j < n; j++) {
+    if (H[m - 1][j] > best) {
+      best = H[m - 1][j];
+      end = j;
+    }
+  }
+  // A contiguous occurrence anywhere is always a match, scored as one.
+  const contiguous = substringMatch(f, q);
+  if (end === -1 || best < m * MIN_SCORE_PER_CHAR) return contiguous;
+  if (contiguous && contiguous.score > best) return contiguous;
+  const positions = new Array<number>(m);
+  for (let i = m - 1, j = end; i >= 0; i--) {
+    positions[i] = j;
+    j = back[i][j];
+  }
+  return { score: best, ranges: toRanges(f, positions) };
+}
+
+/**
+ * Fuzzy-match `query` against `text`, in the manner of VS Code's quick-open
+ * filter: the query's characters must appear in order, case-insensitively;
+ * the first must land on a word start (the text's start, after a
+ * separator, or a camelCase hump); a gap may exceed `MAX_MIDWORD_GAP` only
+ * to reach another word start; and the arrangement must score at least
+ * `MIN_SCORE_PER_CHAR` per query character. A contiguous occurrence
+ * anywhere always matches, so a plain substring search still works
+ * (`pha` finds `alpha`). The first-character rule is what keeps a short
+ * query from matching nearly every hash or long identifier.
+ *
+ * Returns the score and the matched characters as ranges into `text`, or
+ * `null`.
+ */
+export function fuzzyMatch(text: string, query: string): FuzzyMatch | null {
+  const q = foldCase(query.trim());
+  if (!q) return null;
+  const f = foldWithMap(text);
+  if (!isSubsequence(q, f.folded)) return null;
+  return scoreFolded(text, f, q);
+}
+
+/**
+ * The nodes whose key or scalar value fuzzy-matches `query`, best first,
+ * document order breaking ties. Array indices and container values are
+ * not searched: an index is a position, not content, and a container's
+ * content is its children's. An empty or whitespace-only query matches
+ * nothing.
+ */
+export function findMatches(nodes: JsonNode[], query: string): JsonMatch[] {
+  const q = foldCase(query.trim());
+  if (!q) return [];
+  const matches: JsonMatch[] = [];
+  const match = (text: string, folded: string | null): FuzzyMatch | null =>
+    folded !== null && isSubsequence(q, folded)
+      ? scoreFolded(text, foldWithMap(text), q)
+      : null;
+  for (let i = 1; i < nodes.length; i++) {
+    const node = nodes[i];
+    const key = typeof node.key === "string" ? match(node.key, node.keyLower) : null;
+    const value =
+      node.valueLower === null ? null : match(scalarText(node.value), node.valueLower);
+    if (key || value) {
+      matches.push({
+        index: i,
+        score: Math.max(key?.score ?? -Infinity, value?.score ?? -Infinity),
+        keyRanges: key?.ranges ?? null,
+        valueRanges: value?.ranges ?? null,
+      });
+    }
+  }
+  return matches.sort((a, b) => b.score - a.score || a.index - b.index);
+}
+
+export interface Segment {
+  text: string;
+  match: boolean;
+}
+
+/** `text` split into runs inside and outside the given sorted, disjoint ranges. */
+export function segmentsOf(text: string, ranges: readonly Range[]): Segment[] {
   const segments: Segment[] = [];
   let from = 0;
-  let hit = folded.indexOf(q);
-  while (hit !== -1) {
-    const last = hit + q.length - 1;
-    const start = origin[hit];
-    const end = origin[last] + width[last];
-    // A hit starting inside a character already highlighted is skipped.
-    if (start >= from) {
-      if (start > from) segments.push({ text: text.slice(from, start), match: false });
-      segments.push({ text: text.slice(start, end), match: true });
-      from = end;
-    }
-    hit = folded.indexOf(q, hit + q.length);
+  for (const [start, end] of ranges) {
+    if (start > from) segments.push({ text: text.slice(from, start), match: false });
+    segments.push({ text: text.slice(start, end), match: true });
+    from = end;
   }
   if (from < text.length) segments.push({ text: text.slice(from), match: false });
   return segments;

@@ -252,10 +252,12 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 - Task parameters are shown as a collapsible, searchable tree instead of
   raw JSON (STA-151): expand/collapse per node or all at once, sizes on
   collapsed containers, nested task bodies labelled with their task name,
-  and copy value / copy JSON path per node. The search matches keys and
-  values case-insensitively, highlights the matches, opens their ancestors
-  and steps through them with next/previous. Keyboard: arrows move and
-  fold, `c` copies the focused value and `p` its path.
+  and copy value / copy JSON path per node. The search fuzzy-matches keys
+  and values in the manner of an editor's quick-open filter (characters
+  in order, case-insensitive, word starts and contiguous runs preferred),
+  highlights the matched characters, opens their ancestors and steps
+  through the matches best first. Keyboard: arrows move and fold, `c`
+  copies the focused value and `p` its path.
 
 ## [0.28.0] — 2026-10-08
 

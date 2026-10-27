@@ -149,6 +149,40 @@ describe("JsonTree", () => {
     expect(screen.queryByText("No matches")).toBeNull();
   });
 
+  it("fuzzy-matches and marks each matched character", () => {
+    renderTree({ layers: 2, learning_rate: 0.1 });
+    search("lr");
+    // Both match; the word-start `r` ranks first despite document order.
+    expect(screen.getByText("1 of 2")).toBeInTheDocument();
+    const best = item("learning_rate: 0.1");
+    expect(best.className).toContain("bg-amber-50");
+    const marks = [...best.querySelectorAll("mark")].map((m) => m.textContent);
+    expect(marks).toEqual(["l", "r"]);
+  });
+
+  it("keeps the search position when the value is refreshed unchanged", () => {
+    const { rerender } = render(<JsonTree value={VALUE} label="Task parameters" />);
+    search("units");
+    fireEvent.click(screen.getByRole("button", { name: "Next match" }));
+    expect(screen.getByText("2 of 2")).toBeInTheDocument();
+
+    // A refresh re-fetches an equal body as a new object.
+    rerender(<JsonTree value={structuredClone(VALUE)} label="Task parameters" />);
+    act(() => {
+      vi.advanceTimersByTime(SEARCH_DEBOUNCE_MS);
+    });
+    expect(screen.getByText("2 of 2")).toBeInTheDocument();
+
+    // A changed body is searched again.
+    const changed = structuredClone(VALUE);
+    changed.model.layers.push({ units: 16 });
+    rerender(<JsonTree value={changed} label="Task parameters" />);
+    act(() => {
+      vi.advanceTimersByTime(SEARCH_DEBOUNCE_MS);
+    });
+    expect(screen.getByText("1 of 3")).toBeInTheDocument();
+  });
+
   it("says when the value is empty", () => {
     render(<JsonTree value={{}} label="Task parameters" emptyText="No parameters." />);
     expect(screen.getByText("No parameters.")).toBeInTheDocument();
@@ -249,6 +283,18 @@ describe("JsonTree on a large value", () => {
     expect(item("449: 449")).toBeInTheDocument();
     expect(item("400: 400")).toHaveFocus();
     expect(screen.queryByRole("treeitem", { name: /^Show/ })).toBeNull();
+  });
+
+  it("moves into a paged container's drawn page with ArrowRight", () => {
+    renderTree({ values: Array(1000).fill("alpha") });
+    search("alpha");
+    fireEvent.click(screen.getByRole("button", { name: "Previous match" }));
+    const values = item(/^values:/);
+    values.focus();
+    fireEvent.keyDown(values, { key: "ArrowRight" });
+    expect(item("Show 200 earlier (800 not shown)")).toHaveFocus();
+    fireEvent.keyDown(item("Show 200 earlier (800 not shown)"), { key: "ArrowDown" });
+    expect(item("800: alpha")).toHaveFocus();
   });
 
   it("scrolls to the current match on every step, even a single one", () => {
