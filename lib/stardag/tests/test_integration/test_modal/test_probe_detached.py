@@ -71,10 +71,10 @@ def _answering(monkeypatch, outcome):
         pytest.param(
             ExecutionCancelled("stopped"), "returned", id="stopped-before-run"
         ),
-        pytest.param(FunctionTimeoutError("t"), "raised", id="backend-timeout"),
+        pytest.param(FunctionTimeoutError("t"), "unknown", id="backend-timeout"),
         pytest.param(_RemoteTimeout(), "raised", id="task-timeout-error"),
         pytest.param(InternalFailure("i"), "raised", id="internal-failure"),
-        pytest.param(RemoteError("r"), "raised", id="remote-error"),
+        pytest.param(RemoteError("r"), "unknown", id="cancellation-remote-error"),
         pytest.param(_Remote(), "raised", id="task-exception"),
         pytest.param(_RemoteExit(), "raised", id="task-system-exit"),
         pytest.param(SystemExit(1), "unknown", id="unmarked-system-exit"),

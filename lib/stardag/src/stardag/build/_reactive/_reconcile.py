@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import typing
 from datetime import datetime, timezone
 
@@ -164,7 +165,12 @@ class Reconciler:
                 self.max_executions is None
                 or running[e.task_id].attempts < self.max_executions
             )
-        ][:_MAX_HOLDERS_PER_ROUND]
+        ]
+        # A random sample, not the ledger's first few: rounds (and successor
+        # ticks, which start afresh) then reach every holder eventually,
+        # even past a prefix of calls that stay running.
+        if len(holders) > _MAX_HOLDERS_PER_ROUND:
+            holders = random.sample(holders, _MAX_HOLDERS_PER_ROUND)
         if not holders:
             return False
         probes = asyncio.Semaphore(_MAX_CONCURRENT_PROBES)

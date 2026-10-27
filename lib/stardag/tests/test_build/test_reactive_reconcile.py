@@ -266,3 +266,39 @@ def test_a_round_is_due_once_per_interval():
     assert reconciler.due(60)
     reconciler.supported = False
     assert not reconciler.due(600)
+
+
+async def test_every_holder_is_reached_across_rounds(
+    default_in_memory_fs_target: Target, monkeypatch
+):
+    """A bounded round does not keep re-examining the same prefix: a dead
+    holder behind calls that stay running is still reached (Copilot on
+    #508)."""
+    from stardag.build._reactive import _reconcile as reconcile_module
+
+    monkeypatch.setattr(reconcile_module, "_MAX_HOLDERS_PER_ROUND", 1)
+    registry = InMemoryRegistry()
+    alive = SyncOnlyTask(name=f"alive-{new_id()}")
+    dead = SyncOnlyTask(name=f"dead-{new_id()}")
+    build_id, _ = await _plan(registry, [alive, dead])
+    await _dead_claim(registry, build_id, alive, ref="fc-alive")
+    dead_execution = await _dead_claim(registry, build_id, dead, ref="fc-dead")
+    executor = FakeDetachedExecutor(registry=registry)
+    executor.probes["fc-alive"] = "running"
+    executor.probes["fc-dead"] = "raised"
+    from stardag.build._reactive._config import TickSummary
+
+    reconciler = reconcile_module.Reconciler()
+    for _ in range(40):
+        frontier = registry.build_get_frontier(build_id)
+        await reconciler.run(
+            frontier,
+            registry=registry,
+            task_executor=executor,
+            summary=TickSummary(outcome="x"),
+            lease_lost=lambda: False,
+        )
+        if registry.called("member_fail", task_id=str(dead.id)):
+            break
+    (fail,) = registry.calls_to("member_fail", task_id=str(dead.id))
+    assert fail["execution_id"] == dead_execution

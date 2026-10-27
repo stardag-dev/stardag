@@ -544,11 +544,13 @@ class ModalTaskExecutor(TaskExecutorABC):
         * no output yet (``TimeoutError``) is ``"running"``: still running,
           queued, or waiting on a preemption's restart;
         * a returned value is ``"returned"``;
-        * the backend's terminal failures (its time limit, an internal
-          failure, a remote error) and an exception Modal re-raised from
-          the container -- recognisable by the remote traceback it
+        * the backend's internal failure and an exception Modal re-raised
+          from the container -- recognisable by the remote traceback it
           attaches (``__line_cache__``), ``SystemExit`` and the task's own
           ``TimeoutError`` included -- are ``"raised"``;
+        * the backend's time limit and a cancellation are ``"unknown"``:
+          Modal exposes them while the container may still be running its
+          interruption handler, so they do not prove the worker is done;
         * everything else is ``"unknown"``: an expired output, and any
           error that could be the client's own (a network or auth error is
           indistinguishable by type from a task's exception without that
@@ -569,13 +571,14 @@ class ModalTaskExecutor(TaskExecutorABC):
             # Unmarked: the poll found no output. Marked: the task's own
             # TimeoutError, re-raised from the container -- it finished.
             return "raised" if hasattr(e, "__line_cache__") else "running"
-        except OutputExpiredError:
+        except (OutputExpiredError, FunctionTimeoutError, RemoteError):
+            # A time limit or a cancellation is visible here while the
+            # container may still be in its interruption handler, about to
+            # report (an interruption, if the task asked to resume): not
+            # proof the worker is done. Its own report, or the claim's
+            # TTL, decides.
             return "unknown"
-        except (FunctionTimeoutError, InternalFailure, RemoteError):
-            # A backend time limit is a failure, as the worker reports a
-            # timeout the task did not ask to resume
-            # (``_interruptions._classify_interruption``); the probe cannot
-            # see a ``ResumableInterruption``, so it takes that default.
+        except InternalFailure:
             return "raised"
         except ExecutionCancelled:
             # The worker stopped before ``run()`` (its execution was not
