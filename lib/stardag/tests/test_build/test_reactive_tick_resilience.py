@@ -154,6 +154,70 @@ async def test_an_outage_exit_hands_off_once_after_a_backoff(
     assert registry.builds[build_id].needs_tick
 
 
+async def test_the_outage_backoff_fits_the_containers_time(
+    default_in_memory_fs_target: Target, monkeypatch
+):
+    """Copilot on #506: with less time left than the backoff, the hand-off
+    is not lost to the container's own timeout; it happens at once and the
+    successor backs off in its turn."""
+    monkeypatch.setattr(_tick, "_OUTAGE_BACKOFF_SECONDS", 30.0)
+    task = SyncOnlyTask(name=f"t-{new_id()}")
+    spawned: list = []
+
+    class Unavailable(InMemoryRegistry):
+        def member_start(self, plan_id, task_id, **kwargs):
+            raise _outage()
+
+    registry = Unavailable()
+    build_id, _ = await _plan(registry, [task])
+    config = TickConfig(
+        linger_seconds=0,
+        poll_interval_seconds=0.01,
+        tick_timeout_seconds=15,
+        spawn_tick=lambda build, app: spawned.append(build),
+    )
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    with pytest.raises(APIError):
+        await tick(registry, build_id, FakeDetachedExecutor(registry=registry), config)
+    assert loop.time() - started < 5
+    assert spawned == [build_id]
+
+
+async def test_a_failed_release_is_retried_before_the_hand_off(
+    default_in_memory_fs_target: Target,
+):
+    """Copilot on #506: a release that failed on the way out leaves this
+    tick's own lease live, which would read as a live scheduler and
+    suppress the successor; the hand-off asks for the release again."""
+    task = SyncOnlyTask(name=f"t-{new_id()}")
+    spawned: list = []
+
+    class OutageAndFlakyRelease(InMemoryRegistry):
+        releases = 0
+
+        def member_start(self, plan_id, task_id, **kwargs):
+            raise _outage()
+
+        def scheduler_lease_release(self, build_id, **kwargs):
+            type(self).releases += 1
+            if type(self).releases == 1:
+                raise _outage()
+            return super().scheduler_lease_release(build_id, **kwargs)
+
+    registry = OutageAndFlakyRelease()
+    build_id, _ = await _plan(registry, [task])
+    config = TickConfig(
+        linger_seconds=0,
+        poll_interval_seconds=0.01,
+        spawn_tick=lambda build, app: spawned.append(build),
+    )
+    with pytest.raises(APIError):
+        await tick(registry, build_id, FakeDetachedExecutor(registry=registry), config)
+    assert OutageAndFlakyRelease.releases == 2
+    assert spawned == [build_id]
+
+
 async def test_queued_members_take_no_claim_after_a_sibling_failed(
     default_in_memory_fs_target: Target,
 ):

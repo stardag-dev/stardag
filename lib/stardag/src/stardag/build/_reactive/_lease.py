@@ -47,6 +47,8 @@ class SchedulerLease:
         # lease (see ``taken_over``).
         self._lost = False
         self._expires_at: float | None = None
+        # Whether the release on exit got an answer (None: not attempted).
+        self.released: bool | None = None
 
     @property
     def lost(self) -> bool:
@@ -99,6 +101,12 @@ class SchedulerLease:
             await asyncio.gather(renewal, return_exceptions=True)
         if not self.acquired:
             return
+        self.released = await self.release()
+
+    async def release(self) -> bool:
+        """Release the lease (owner-checked, so safe to repeat). True if
+        the registry answered; False if the call failed, and the lease then
+        lapses on its own at its expiry."""
         # Bounded by the lease itself: a release still waiting out a rate
         # limit when the lease lapses has nothing left to release.
         try:
@@ -115,6 +123,8 @@ class SchedulerLease:
                 self._build_id,
                 e,
             )
+            return False
+        return True
 
     async def _renew_once(self) -> bool:
         """Extend the lease, re-acquiring if it lapsed. False = really lost

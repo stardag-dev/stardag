@@ -45,7 +45,11 @@ def short_lease(monkeypatch):
 async def test_a_stuck_renewal_is_abandoned_and_retried(short_lease):
     registry = _StuckRegistry()
     async with SchedulerLease(registry, uuid4()) as lease:  # type: ignore[arg-type]
-        await asyncio.sleep(0.5)
+        # Wait on the state, not a clock: a slow runner gets there later.
+        for _ in range(300):
+            if lease.lost and registry.renewals >= 2:
+                break
+            await asyncio.sleep(0.01)
         assert lease.lost
         # Abandoned at the lapse and asked again, not stuck on the first.
         assert registry.renewals >= 2
