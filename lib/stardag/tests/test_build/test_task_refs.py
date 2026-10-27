@@ -75,6 +75,16 @@ class RefInRequires(sd.Task[str]):
         self._save("ok")
 
 
+class YieldsRef(sd.Task[str]):
+    """Yields a reference as a dynamic dependency."""
+
+    model_id: str
+
+    async def run_aio(self):  # type: ignore[override]
+        yield TrainedModel.ref(self.model_id)
+        await self._save_aio("after the model")
+
+
 @pytest.fixture(autouse=True)
 def _fresh_memo():
     clear_hydration_memo()
@@ -180,3 +190,25 @@ def test_a_build_with_an_unknown_ref_fails_before_registering(registry, trained)
     with pytest.raises(sd.TaskRefHydrationError, match="holds no task"):
         sd.build(Evaluate(model=TrainedModel.ref(uuid4())), registry=registry)
     assert not any(b["__name"] == "Evaluate" for b in _stored_bodies(registry))
+
+
+def test_a_ref_in_requires_is_read_from_the_builds_registry(registry, trained):
+    """No configured registry: the reference must come from the one passed
+    to the build."""
+    task = RefInRequires(model_id=str(trained.id))
+    assert sd.build(task, registry=registry).status == BuildExitStatus.SUCCESS
+
+
+@pytest.mark.parametrize(
+    "engine",
+    [ENGINES["build_aio"], ENGINES["build_sequential_aio"]],
+    ids=["build_aio", "build_sequential_aio"],
+)
+def test_a_yielded_ref_is_hydrated_before_the_yield_is_registered(
+    engine, registry, trained
+):
+    task = YieldsRef(model_id=str(trained.id))
+    summary = engine(task, registry)
+    assert summary.status == BuildExitStatus.SUCCESS
+    assert task.load() == "after the model"
+    assert "task_class" not in json.dumps(_stored_bodies(registry))

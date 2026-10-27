@@ -125,7 +125,9 @@ async def roll_over_aio(
             )
         try:
             walk = await walk_aio(
-                roots, max_concurrent_discover=max_concurrent_discover
+                roots,
+                max_concurrent_discover=max_concurrent_discover,
+                registry=registry,
             )
             if preflight is not None:
                 preflight(walk)

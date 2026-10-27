@@ -304,7 +304,32 @@ def _class_import(namespace: str, name: str) -> tuple[str, str, bool]:
                 cls = None
     if cls is None:
         return namespace, name, False
-    return cls.__module__, cls.__qualname__, True
+    bound = _name_bound_to(cls)
+    if bound is None:
+        # Registered, but not importable by its own name (a local class):
+        # the best guess is still its module and name.
+        return cls.__module__, cls.__qualname__, False
+    return cls.__module__, bound, True
+
+
+def _name_bound_to(cls: type) -> str | None:
+    """The name ``cls`` is importable under from its module: its qualified
+    name when that resolves to it, else any module attribute bound to it
+    (``@sd.task(name="Renamed") def add_one`` registers ``Renamed`` but
+    binds ``add_one``). ``None`` when neither does."""
+    try:
+        module = importlib.import_module(cls.__module__)
+    except Exception:
+        return None
+    target: object = module
+    for part in cls.__qualname__.split("."):
+        target = getattr(target, part, None)
+    if target is cls:
+        return cls.__qualname__
+    for attribute, value in vars(module).items():
+        if value is cls and not attribute.startswith("_"):
+            return attribute
+    return None
 
 
 @app.command("ref")
@@ -338,26 +363,28 @@ def tasks_ref(
     if module:
         _import_modules(module)
     registry = _resolve_registry(stardag_profile, stardag_env)
+    pinned = None
     try:
         task = registry.task_get(task_id)
+        if instance is not None:
+            # Read the instance itself: ``task_get`` serves only the newest
+            # few, so an older one is not necessarily among them.
+            pinned = registry.task_instance_get(instance, task_id=task.task_id)
+            if pinned.task_id is not None and pinned.task_id != task.task_id:
+                raise StardagError(
+                    f"Instance {instance} belongs to task {pinned.task_id}, "
+                    f"not to task {task.task_id}."
+                )
     except StardagError as e:
         _fail(e)
     finally:
         registry.close()
-    if not task.instances:
-        _fail(StardagError(f"Task {task_id} has no instance to reference."))
-    if instance is None:
+    if pinned is not None:
+        instance_id = str(pinned.id)
+    elif task.instances:
         instance_id = str(task.instances[0].id)
     else:
-        known = {str(i.id) for i in task.instances}
-        if instance not in known:
-            _fail(
-                StardagError(
-                    f"Task {task_id} has no instance {instance} (it has "
-                    f"{len(known)}: see 'stardag tasks show {task_id}')."
-                )
-            )
-        instance_id = instance
+        _fail(StardagError(f"Task {task_id} has no instance to reference."))
     module_path, class_name, located = _class_import(
         task.task_namespace, task.task_name
     )

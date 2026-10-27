@@ -320,6 +320,24 @@ class TestHydrate:
         with pytest.raises(sd.TaskRefHydrationError, match="'not.imported'.*'Gone'"):
             TrainedModel.ref(model.id, instance_id=instance_id).hydrate(registry)
 
+    def test_an_alias_payload_is_refused_before_it_is_unpickled(
+        self, model, monkeypatch
+    ):
+        def no_unpickling(_data):
+            raise AssertionError("registry bytes were unpickled")
+
+        monkeypatch.setattr("stardag._core.base_task.pickle_loads", no_unpickling)
+        registry = InMemoryRegistry()
+        for pinned in (False, True):
+            instance_id = _store(registry, model)
+            body = registry.instances[instance_id].body
+            body["data"] = {**body["data"], "__aliased": {"loads_type": "AAAA"}}
+            ref = TrainedModel.ref(
+                model.id, instance_id=instance_id if pinned else None
+            )
+            with pytest.raises(sd.TaskRefHydrationError, match="AliasTask"):
+                ref.hydrate(registry)
+
 
 class TestDelegation:
     def test_complete_target_and_load(self, model, default_in_memory_fs_target):

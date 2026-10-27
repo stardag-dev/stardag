@@ -265,7 +265,11 @@ class _SequentialEngine:
                 f"Tasks: {[str(t.id) for t in stuck[:5]]}"
             )
 
-    async def _walk_more(self, parent: BaseTask, deps: list[BaseTask]) -> list:
+    async def _walk_more(
+        self, parent: BaseTask, deps: list[BaseTask]
+    ) -> tuple[list, list[BaseTask]]:
+        """Walk a yield's dependencies; returns its batches and the yielded
+        tasks, with any reference hydrated."""
         parent_path = self.walk.seen.path_of(parent.id) or extend_path(None, parent)
         known = set(self.tasks)
         walk = await walk_aio(
@@ -277,9 +281,13 @@ class _SequentialEngine:
             seen=self.walk.seen,
             prior=self.walk,
             root_path=parent_path,
+            registry=self.session.registry,
         )
         self._add(walk)
-        return yield_batches(walk, deps, suspend=False, known=known)
+        return (
+            yield_batches(walk, walk.roots, suspend=False, known=known),
+            walk.roots,
+        )
 
     async def _execute(self, task: BaseTask) -> None:
         """Run ``task`` (its not-yet-built upstreams first), under a claim."""
@@ -307,7 +315,7 @@ class _SequentialEngine:
                 result = await self.runner.start(task)
                 while (yielded := await self.runner.step(result)) is not _DONE:
                     deps = flatten_task_struct(typing.cast(TaskStruct, yielded))
-                    batches = await self._walk_more(task, deps)
+                    batches, deps = await self._walk_more(task, deps)
                     await self.session.send_yield(task, execution_id, batches)
                     for dep in deps:
                         if dep.id not in self.completed:
@@ -334,6 +342,7 @@ class _SequentialEngine:
                 max_concurrent_discover=self.max_concurrent_discover,
                 check_stability=session.enabled,
                 register_all=self.register_all,
+                registry=session.registry,
             )
             self.walk.seen = walk.seen
             self._add(walk)

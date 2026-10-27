@@ -379,11 +379,12 @@ class _WorkerLifecycleReporter:
                 "plan's own deployment."
             )
         children = flatten_task_struct(task_struct)
-        walk = asyncio.run(walk_aio(children))
+        walk = asyncio.run(walk_aio(children, registry=self.registry))
         self._warn_uncovered(walk.incomplete)
         send_yield(
             self.registry,
-            yield_batches(walk, children, suspend=True),
+            # The yielded tasks with any reference hydrated.
+            yield_batches(walk, walk.roots, suspend=True),
             plan_id=self.plan_id,
             task_id=self._task_id,
             execution_id=self.execution_id,

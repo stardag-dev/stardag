@@ -284,7 +284,9 @@ async def _discovery_job(
     try:
         task = rehydrate(member)
         walk = await walk_aio(
-            [task], max_concurrent_discover=config.max_concurrent_discover
+            [task],
+            max_concurrent_discover=config.max_concurrent_discover,
+            registry=registry,
         )
     except (TaskRehydrationError, StardagError) as e:
         # The code under this scope cannot state this member (a class not

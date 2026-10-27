@@ -12,10 +12,11 @@ A reference is a **driver-side placeholder**:
   and its hash-mode dump is ``{"id": task_id}`` — exactly what a real task
   contributes to a parent's hash — so a downstream task has the same id
   whether it is given the reference or the real task.
-- :meth:`TaskRef.hydrate` reads the instance body from the registry
-  (``from_registry``; a pinned reference is served from the local body
-  cache) and returns the real task object, checked against the referenced
-  class and the task id. ``complete()``, ``target()`` and ``load()``
+- :meth:`TaskRef.hydrate` reads the instance body from the registry (as
+  ``from_registry`` does, a pinned reference from the local body cache,
+  but refusing ``AliasTask`` payloads, which a build-time load must never
+  unpickle) and returns the real task object, checked against the
+  referenced class and the task id. ``complete()``, ``target()`` and ``load()``
   delegate to it.
 - Every build replaces every reference in its DAG with the hydrated task
   before discovery (:func:`resolve_refs`), so the registry only ever stores
@@ -245,12 +246,19 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
         return await asyncio.to_thread(self.hydrate, registry)
 
     def _read(self, registry: RegistryABC) -> BaseTask:
-        from stardag._core.rehydrate import TaskRehydrationError
+        from stardag._core.rehydrate import TaskRehydrationError, load_from_registry
         from stardag.exceptions import NotFoundError
 
         try:
-            task = self.task_class.from_registry(
-                self.task_id, registry, instance_id=self.instance_id
+            # Not ``from_registry``: that is the explicit, trusted path, and a
+            # build hydrates references with no user asking for this load, so
+            # an AliasTask payload (pickled bytes) is refused, not unpickled.
+            task = load_from_registry(
+                typing.cast(type[BaseTask], self.task_class),
+                self.task_id,
+                registry,
+                instance_id=self.instance_id,
+                allow_aliased=False,
             )
         except NotFoundError as e:
             what = (

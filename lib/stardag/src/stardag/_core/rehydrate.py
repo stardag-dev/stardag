@@ -252,7 +252,10 @@ def task_from_registry_data(
 
 
 def _validate_for(
-    cls: type[BaseTask], body: typing.Mapping[str, typing.Any]
+    cls: type[BaseTask],
+    body: typing.Mapping[str, typing.Any],
+    *,
+    allow_aliased: bool = True,
 ) -> BaseTask:
     """Validate ``body`` into the class it names, which must be ``cls`` or a
     subclass of it (a body without discriminator keys validates into
@@ -263,7 +266,19 @@ def _validate_for(
     registered as, a body of an unrelated class is refused by name rather
     than as a task id mismatch, and a task class (nested ones included)
     whose module is not imported is named.
+
+    ``allow_aliased=False`` refuses an ``AliasTask`` payload anywhere in the
+    body before anything is validated: its pickled ``loads_type`` would be
+    unpickled by validation. For loads no user asked for explicitly (a
+    ``TaskRef`` hydrated at build start), as in
+    :func:`task_from_registry_data`.
     """
+    if not allow_aliased and _contains_aliased(body):
+        raise TaskRehydrationError(
+            "The stored body contains AliasTask ('__aliased') payloads, which "
+            "embed pickled bytes and are not rehydrated automatically. Load it "
+            "explicitly with from_registry if you trust the source."
+        )
     target: type[BaseTask] = cls
     namespace, name = body.get(NAMESPACE_KEY), body.get(NAME_KEY)
     own_type_id = getattr(cls, "__type_id__", None)
@@ -321,15 +336,17 @@ def load_from_registry(
     registry: "RegistryABC",
     *,
     instance_id: UUID | str | None = None,
+    allow_aliased: bool = True,
 ) -> BaseTask:
-    """``BaseTask.from_registry``: see there."""
+    """``BaseTask.from_registry``: see there. ``allow_aliased=False``
+    refuses ``AliasTask`` payloads (see :func:`_validate_for`)."""
     if instance_id is None:
         info = registry.task_get(str(task_id))
         if info.body is None:
             raise TaskRehydrationError(
                 f"The registry holds no instance body for task {task_id}."
             )
-        task = _validate_for(cls, info.body)
+        task = _validate_for(cls, info.body, allow_aliased=allow_aliased)
         if task.id != task_id:
             raise _id_mismatch(task, task_id)
         return task
@@ -345,7 +362,7 @@ def load_from_registry(
             )
         error: TaskRehydrationError
         try:
-            task = _validate_for(cls, instance.body)
+            task = _validate_for(cls, instance.body, allow_aliased=allow_aliased)
             rehydrated_id = task.id
         except Exception as e:
             error = TaskRehydrationError(
