@@ -162,6 +162,8 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
     otherwise the execution is ended `lost` and the task re-run;
   - **raised:** the failure is reported, counting against the retry
     budget;
+  - **timed out:** the interruption is reported, as the worker would have
+    (charged to the interruption budget, and restarted);
   - **no executor ref after 10 minutes:** the execution is ended `lost`,
     on the condition, checked by the registry, that no ref was recorded
     meanwhile.
@@ -171,7 +173,9 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   change:** a Modal worker whose start report gets no answer now reads the
   ledger and does not run the task unless its own ref is recorded there.
   It reports nothing and the tick re-drives the task, so a container that
-  landed late can never run alongside its replacement. The conditional end
+  landed late can never run alongside its replacement. The same holds for
+  a reactive worker that cannot create its lifecycle reporter, and for one
+  whose call id is not readable inside its container. The conditional end
   needs a registry that supports it; against an older one the tick leaves
   unspawned claims to their TTL. New executor hooks:
   `TaskExecutorABC.reconciles()` and `probe_detached()`, implemented for

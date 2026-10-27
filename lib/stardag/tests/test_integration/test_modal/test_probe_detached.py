@@ -31,6 +31,15 @@ class _Remote(ValueError):
         self.__line_cache__ = {}
 
 
+class _RemoteExit(SystemExit):
+    """A task's ``sys.exit()``, re-raised by Modal: must not take the tick
+    down with it (local review on #508)."""
+
+    def __init__(self) -> None:
+        super().__init__(1)
+        self.__line_cache__ = {}
+
+
 def _answering(monkeypatch, outcome):
     class _Get:
         async def aio(self, *, timeout=None):
@@ -53,10 +62,12 @@ def _answering(monkeypatch, outcome):
         pytest.param(
             ExecutionCancelled("stopped"), "returned", id="stopped-before-run"
         ),
-        pytest.param(FunctionTimeoutError("t"), "raised", id="backend-timeout"),
+        pytest.param(FunctionTimeoutError("t"), "timed_out", id="backend-timeout"),
         pytest.param(InternalFailure("i"), "raised", id="internal-failure"),
         pytest.param(RemoteError("r"), "raised", id="remote-error"),
         pytest.param(_Remote(), "raised", id="task-exception"),
+        pytest.param(_RemoteExit(), "raised", id="task-system-exit"),
+        pytest.param(SystemExit(1), "unknown", id="unmarked-system-exit"),
         pytest.param(OutputExpiredError(), "unknown", id="output-expired"),
         pytest.param(ConnectionError("no route"), "unknown", id="client-error"),
         pytest.param(ValueError("no marker"), "unknown", id="unmarked-exception"),

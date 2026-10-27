@@ -21,7 +21,8 @@ running its task:
 
 * **R1** -- its executor positively reports the call finished
   (:meth:`~stardag.build.TaskExecutorABC.probe_detached` answers
-  ``"returned"`` or ``"raised"``). A finished call reports nothing more.
+  ``"returned"``, ``"raised"`` or ``"timed_out"``). A finished call
+  reports nothing more.
 * **R2** -- it never recorded an executor ref, it is older than
   ``TickConfig.unspawned_grace_seconds``, and the end is *conditional* on there
   still being no ref when the registry applies it
@@ -40,6 +41,15 @@ lease is not load-bearing for safety**: two ticks reconciling at once
 issue the same idempotent ends, and a zombie tick's late spawn is caught
 by the rule above. The lease bounds wasted work, nothing more.
 
+**A residual risk, stated rather than assumed away.** A Modal worker with
+``retries`` set is retried by Modal under the same call. Reconciliation
+relies on ``get(timeout=0)`` answering only the call's *final* outcome; if
+Modal ever exposed a failed attempt's output while the next attempt runs,
+a ``"raised"`` read would end an execution whose retry is running -- a
+duplicate if that retry had already passed checkpoint one. Modal documents
+outputs per call, not per attempt, but nothing here can verify it; a
+registry-live scenario with ``retries > 0`` is the check.
+
 What an end does to the task:
 
 * returned, target complete -- the completion is reported for the
@@ -49,6 +59,8 @@ What an end does to the task:
   CANCELLED, and the next claiming start re-runs it;
 * raised -- the failure is reported for the execution, so it counts
   against the build's retry budget like any other;
+* timed out -- the interruption is reported, as the worker would have
+  (STA-44): charged to the interruption budget, and restarted;
 * never spawned -- ended ``lost``, and re-driven.
 """
 
@@ -69,8 +81,10 @@ if typing.TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: Probes in flight at once (each is one Modal API call).
+#: Probes in flight at once (each is one Modal API call), and how long one
+#: may take before it counts as ``"unknown"``.
 _MAX_CONCURRENT_PROBES = 8
+_PROBE_TIMEOUT_SECONDS = 15.0
 
 
 class Reconciler:
@@ -156,17 +170,27 @@ class Reconciler:
             if execution.executor_ref is None:
                 return await self._unspawned(execution, registry, summary, lease_lost)
             async with probes:
-                state = await task_executor.probe_detached(
-                    execution.executor, execution.executor_ref
-                )
-            if state not in ("returned", "raised") or lease_lost():
+                try:
+                    state = await asyncio.wait_for(
+                        task_executor.probe_detached(
+                            execution.executor, execution.executor_ref
+                        ),
+                        timeout=_PROBE_TIMEOUT_SECONDS,
+                    )
+                except TimeoutError:
+                    state = "unknown"
+            if state not in ("returned", "raised", "timed_out") or lease_lost():
                 return False
             if state == "raised":
                 return await self._raised(execution, registry, summary)
+            if state == "timed_out":
+                return await self._timed_out(execution, registry, summary)
             return await self._returned(
                 execution, running[execution.task_id], registry, summary
             )
-        except Exception as e:
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            raise
+        except BaseException as e:
             # Best-effort: the claim keeps its TTL. Refusals land here too
             # (the execution moved on between the read and the write).
             level = logging.INFO if is_registry_outage(e) else logging.WARNING
@@ -233,6 +257,30 @@ class Reconciler:
         logger.warning(
             f"Execution {execution.id} of task {execution.task_id}: its call "
             "raised and its failure was never reported; reported now."
+        )
+        summary.reconciled += 1
+        return True
+
+    async def _timed_out(
+        self, execution: ExecutionInfo, registry: RegistryABC, summary: "TickSummary"
+    ) -> bool:
+        """What the worker reports when its own time runs out: an
+        interruption, charged to the build's interruption budget and
+        restarted -- not a failure (STA-44)."""
+        assert execution.plan_id is not None and execution.task_id is not None
+        await registry.member_interrupt_aio(
+            execution.plan_id,
+            execution.task_id,
+            execution_id=execution.id,
+            error_message=(
+                f"Execution {execution.id} ended without reporting: its "
+                f"{execution.executor} call {execution.executor_ref!r} hit its "
+                "time limit."
+            ),
+        )
+        logger.warning(
+            f"Execution {execution.id} of task {execution.task_id}: its call "
+            "timed out and the interruption was never reported; reported now."
         )
         summary.reconciled += 1
         return True

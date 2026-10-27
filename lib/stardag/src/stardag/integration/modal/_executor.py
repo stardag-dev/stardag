@@ -544,10 +544,11 @@ class ModalTaskExecutor(TaskExecutorABC):
         * no output yet (``TimeoutError``) is ``"running"``: still running,
           queued, or waiting on a preemption's restart;
         * a returned value is ``"returned"``;
-        * the backend's own terminal failures (its timeout, an internal
-          failure, a remote error) and an exception Modal re-raised from
-          the container -- recognisable by the remote traceback it
-          attaches (``__line_cache__``) -- are ``"raised"``;
+        * the backend's time limit is ``"timed_out"``; its other terminal
+          failures (an internal failure, a remote error) and an exception
+          Modal re-raised from the container -- recognisable by the remote
+          traceback it attaches (``__line_cache__``), ``SystemExit``
+          included -- are ``"raised"``;
         * everything else is ``"unknown"``: an expired output, and any
           error that could be the client's own (a network or auth error is
           indistinguishable by type from a task's exception without that
@@ -568,7 +569,9 @@ class ModalTaskExecutor(TaskExecutorABC):
             return "running"
         except OutputExpiredError:
             return "unknown"
-        except (FunctionTimeoutError, InternalFailure, RemoteError):
+        except FunctionTimeoutError:
+            return "timed_out"
+        except (InternalFailure, RemoteError):
             return "raised"
         except ExecutionCancelled:
             # The worker stopped before ``run()`` (its execution was not
@@ -577,7 +580,12 @@ class ModalTaskExecutor(TaskExecutorABC):
             # finished call with nothing written, which reconciliation
             # re-drives rather than charging the task a failed attempt.
             return "returned"
-        except Exception as e:
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            # This tick being cancelled or interrupted, not the call.
+            raise
+        except BaseException as e:
+            # Including a remote ``SystemExit``, which Modal re-raises here
+            # and which must not take the tick down with it.
             if hasattr(e, "__line_cache__"):
                 return "raised"
             logger.debug(f"Probing Modal call {ref!r} failed: {e!r}")

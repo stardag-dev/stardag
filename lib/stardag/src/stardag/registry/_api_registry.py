@@ -433,6 +433,25 @@ class APIRegistry(APIRegistryReads, RegistryABC):
             )
         )
 
+    async def member_interrupt_aio(
+        self,
+        plan_id: UUID,
+        task_id: str,
+        *,
+        execution_id: UUID,
+        error_message: str | None = None,
+    ) -> TransitionResult:
+        return await self.acall(
+            _member_req(
+                plan_id,
+                task_id,
+                "interrupt",
+                _drop_none(
+                    {"execution_id": str(execution_id), "error_message": error_message}
+                ),
+            )
+        )
+
     def member_preempt(
         self, plan_id: UUID, task_id: str, *, execution_id: UUID
     ) -> TransitionResult:

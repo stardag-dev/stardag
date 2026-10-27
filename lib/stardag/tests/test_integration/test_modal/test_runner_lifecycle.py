@@ -513,3 +513,55 @@ class TestTheWorkerRule:
         with pytest.raises(ExecutionCancelled):
             _run(planned)
         assert not planned.task.complete()
+
+
+class TestTheWorkerRuleFailsClosed:
+    """The paths a worker could otherwise enter ``run()`` without its ref on
+    the ledger (local review on #508)."""
+
+    def test_a_reactive_worker_without_a_reporter_does_not_run(
+        self, default_in_memory_fs_target, monkeypatch
+    ):
+        from stardag.exceptions import ExecutionCancelled
+        from stardag.integration.modal import _runner as runner_module
+
+        planned = plan_and_claim(make_range(limit=2))
+
+        def no_reporter(*args, **kwargs):
+            raise RuntimeError("broken registry config")
+
+        monkeypatch.setattr(
+            runner_module._WorkerLifecycleReporter, "create", staticmethod(no_reporter)
+        )
+        with pytest.raises(ExecutionCancelled):
+            _run(planned, reactive=True)
+        assert not planned.task.complete()
+
+    def test_a_resident_worker_without_a_reporter_still_runs(
+        self, default_in_memory_fs_target, monkeypatch
+    ):
+        """Only a reactive tick reconciles, so the rule binds only there."""
+        from stardag.integration.modal import _runner as runner_module
+
+        planned = plan_and_claim(make_range(limit=2))
+
+        def no_reporter(*args, **kwargs):
+            raise RuntimeError("broken registry config")
+
+        monkeypatch.setattr(
+            runner_module._WorkerLifecycleReporter, "create", staticmethod(no_reporter)
+        )
+        assert _run(planned) is None
+        assert planned.task.complete()
+
+    def test_an_unreadable_call_id_in_a_container_does_not_run(
+        self, default_in_memory_fs_target, monkeypatch
+    ):
+        from stardag.exceptions import ExecutionCancelled
+
+        planned = plan_and_claim(make_range(limit=2))
+        monkeypatch.setattr(modal, "current_function_call_id", lambda: None)
+        monkeypatch.setattr(modal, "is_local", lambda: False)
+        with pytest.raises(ExecutionCancelled):
+            _run(planned)
+        assert not planned.task.complete()

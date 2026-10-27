@@ -395,6 +395,18 @@ class RegistryABC(RegistryReadsABC):
         INTERRUPTED (actionable), claim released."""
         raise _missing(self, "member_interrupt")
 
+    async def member_interrupt_aio(
+        self,
+        plan_id: UUID,
+        task_id: str,
+        *,
+        execution_id: UUID,
+        error_message: str | None = None,
+    ) -> TransitionResult:
+        return self.member_interrupt(
+            plan_id, task_id, execution_id=execution_id, error_message=error_message
+        )
+
     def member_preempt(
         self, plan_id: UUID, task_id: str, *, execution_id: UUID
     ) -> TransitionResult:

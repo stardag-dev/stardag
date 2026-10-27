@@ -432,7 +432,9 @@ class _Driver:
         )
         try:
             with settings_applied(settings, owner=self.build_id):
-                if self.reconciler.due(asyncio.get_running_loop().time()):
+                if not self._out_of_time() and self.reconciler.due(
+                    asyncio.get_running_loop().time()
+                ):
                     if await self.reconciler.run(
                         frontier,
                         registry=self.registry,

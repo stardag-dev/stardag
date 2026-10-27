@@ -95,6 +95,14 @@ def _positive_int(raw: str | None, name: str) -> int | None:
     return value
 
 
+def _in_modal_container() -> bool:
+    """Whether this process is a Modal container (not a local run)."""
+    try:
+        return not modal.is_local()
+    except Exception:
+        return False
+
+
 # How ``started()``'s report ended, when it got an answer at all.
 _APPLIED = object()
 _REFUSED = object()
@@ -258,8 +266,15 @@ class _WorkerLifecycleReporter:
             return _APPLIED
 
         answer = self._guard(_do, "start")
-        if answer is _APPLIED or answer is _REFUSED:
+        if answer is _REFUSED:
             return
+        if answer is _APPLIED and (
+            self._executor_ref() is not None or not _in_modal_container()
+        ):
+            return
+        # Unanswered -- or applied without a ref, which in a container means
+        # the call id was not readable here (a run function on a thread
+        # without the call's context): the ledger decides.
         self._require_ref_recorded()
 
     def _require_ref_recorded(self) -> None:
@@ -278,7 +293,14 @@ class _WorkerLifecycleReporter:
         delayed run, never a duplicate one."""
         ref = self._executor_ref()
         if ref is None:
-            # Not a Modal container (a test double): nothing to reconcile by.
+            if not _in_modal_container():
+                # Not a Modal container (a local run, a test): no call to
+                # reconcile by.
+                return
+            self.cancellation.note_cancelled(
+                "this container's call id is not readable, so its ref cannot "
+                "be on the ledger and it may not run the task"
+            )
             return
         try:
             ledger = self.registry.build_list_executions(self.build_id)
