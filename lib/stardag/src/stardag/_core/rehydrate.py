@@ -43,6 +43,9 @@ from __future__ import annotations
 import typing
 from uuid import UUID
 
+if typing.TYPE_CHECKING:
+    from stardag.registry import RegistryABC
+
 from pydantic import TypeAdapter
 
 from stardag._core.base_task import BaseTask
@@ -71,10 +74,77 @@ def _contains_aliased(value: typing.Any) -> bool:
     return False
 
 
+def _unregistered_task_types(value: typing.Any) -> set[tuple[str, str]]:
+    """Every ``(namespace, name)`` pair in ``value`` (nested dicts and lists
+    included) that names no registered task class.
+
+    Read only after validation has failed, to name the class behind it: a
+    nested polymorphic value that is not a task (a ``SubClass`` of some
+    other model) is reported too, which is harmless there because it is a
+    candidate cause, never a refusal on its own.
+    """
+    found: set[tuple[str, str]] = set()
+    if isinstance(value, typing.Mapping):
+        ns, n = value.get(NAMESPACE_KEY), value.get(NAME_KEY)
+        if isinstance(ns, str) and isinstance(n, str):
+            try:
+                BaseTask._registry().get_class(TypeId(namespace=ns, name=n))
+            except KeyError:
+                found.add((ns, n))
+        for v in value.values():
+            found |= _unregistered_task_types(v)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            found |= _unregistered_task_types(v)
+    return found
+
+
 # Validates any dict carrying the polymorphic discriminator keys into the
 # registered concrete BaseTask subclass (same machinery as nested task
 # fields). Module-level: TypeAdapter construction is not free.
 _TASK_ADAPTER: TypeAdapter[BaseTask] = TypeAdapter(SubClass[BaseTask])
+
+
+def task_from_body(
+    body: typing.Mapping[str, typing.Any],
+    *,
+    expected_task_id: str | UUID | None = None,
+) -> BaseTask:
+    """Reconstruct a task object from a stored instance body.
+
+    The supported way to validate a body kept anywhere: one read from the
+    registry (``stardag tasks show <id> --json``, ``registry.task_get``,
+    ``registry.task_instance_get``) or a copy of ``task.instance_body()``
+    saved by the user. The body must carry the polymorphic discriminator
+    keys (``__namespace`` / ``__name``), as every instance body does.
+
+    Validated in **compat mode**: strict for significant fields through the
+    task id check, lenient for non-significant ones (an unknown key is
+    dropped with a warning, a missing one takes the class default). That is
+    what lets a body stored by older code be re-read under newer code.
+
+    Every task class in the body, nested ones included, must be importable
+    and imported: classes register when they are defined. A missing one is
+    reported by namespace and name.
+
+    Args:
+        body: The instance body.
+        expected_task_id: When given, the reconstructed task object's
+            (recomputed) task id must match — catching lossy
+            serialization round-trips, or a significant field the class
+            no longer declares, that would otherwise silently yield a
+            different completion identity. Pass it whenever the id is
+            known.
+
+    Returns:
+        The reconstructed task object, of the concrete class the body names.
+
+    Raises:
+        TaskRehydrationError: If the task class is not registered (module
+            not imported), the body doesn't validate, or the identity check
+            fails.
+    """
+    return task_from_registry_data(body, expected_task_id=expected_task_id)
 
 
 def task_from_registry_data(
@@ -84,12 +154,11 @@ def task_from_registry_data(
 ) -> BaseTask:
     """Reconstruct a task object from an instance body.
 
-    The body is the payload stored at registration for one instance (also
-    served on the frontier for every member the tick acts on):
-    ``task.instance_body()``, including the polymorphic discriminator keys.
-    Validated in compat mode: strict for significant fields through the
-    task id check, lenient for non-significant ones (an unknown key is
-    dropped with a warning, a missing one takes the class default).
+    The engine-side name of :func:`task_from_body`, kept for existing
+    callers; the two are the same function. The body is the payload stored
+    at registration for one instance (also served on the frontier for every
+    member the tick acts on): ``task.instance_body()``, including the
+    polymorphic discriminator keys.
 
     Args:
         task_data: The instance body.
@@ -143,6 +212,17 @@ def task_from_registry_data(
             dict(task_data), context={CONTEXT_MODE_KEY: "compat"}
         )
     except Exception as e:
+        missing = _unregistered_task_types(task_data)
+        if missing:
+            listed = ", ".join(
+                f"namespace={ns!r}, name={n!r}" for ns, n in sorted(missing)
+            )
+            raise TaskRehydrationError(
+                f"Failed to validate task_data for {namespace!r}.{name!r}: no "
+                f"task class registered for the nested {listed}. The module "
+                "defining each task class in the body must be imported before "
+                "rehydration (task classes register at definition time)."
+            ) from e
         raise TaskRehydrationError(
             f"Failed to validate task_data for {namespace!r}.{name!r}: {e}"
         ) from e
@@ -169,3 +249,62 @@ def task_from_registry_data(
                 "is likely not losslessly round-trippable."
             )
     return task
+
+
+def _validate_for(
+    cls: type[BaseTask], body: typing.Mapping[str, typing.Any]
+) -> BaseTask:
+    return cls.model_validate(body, context={CONTEXT_MODE_KEY: "compat"})
+
+
+def _id_mismatch(task: BaseTask, task_id: UUID) -> TaskRehydrationError:
+    return TaskRehydrationError(
+        f"Rehydrated task id {task.id} does not match the requested "
+        f"id {task_id} — a field's serialization is likely not "
+        "losslessly round-trippable, or a significant field the "
+        "class no longer declares was silently dropped by compat "
+        "mode's lenient rules for non-significant fields."
+    )
+
+
+def load_from_registry(
+    cls: type[BaseTask],
+    task_id: UUID,
+    registry: "RegistryABC",
+    *,
+    instance_id: UUID | str | None = None,
+) -> BaseTask:
+    """``BaseTask.from_registry``: see there."""
+    if instance_id is None:
+        info = registry.task_get(str(task_id))
+        if info.body is None:
+            raise TaskRehydrationError(
+                f"The registry holds no instance body for task {task_id}."
+            )
+        task = _validate_for(cls, info.body)
+        if task.id != task_id:
+            raise _id_mismatch(task, task_id)
+        return task
+
+    from stardag.registry import _instance_cache
+
+    for attempt in (1, 2):
+        instance = registry.task_instance_get(instance_id, task_id=str(task_id))
+        if instance.task_id is not None and instance.task_id != str(task_id):
+            raise TaskRehydrationError(
+                f"Instance {instance_id} belongs to task {instance.task_id}, "
+                f"not to the requested task {task_id}."
+            )
+        task = _validate_for(cls, instance.body)
+        if task.id == task_id:
+            return task
+        # A body that no longer recomputes to its task id. If it was a
+        # cached copy, it may be the copy that is wrong: drop it, and read
+        # the registry's once more. Either way, it is not kept.
+        partition = _instance_cache.registry_partition(registry)
+        discarded = partition is not None and _instance_cache.discard(
+            partition, instance_id
+        )
+        if not discarded or attempt == 2:
+            raise _id_mismatch(task, task_id)
+    raise AssertionError("unreachable")  # pragma: no cover

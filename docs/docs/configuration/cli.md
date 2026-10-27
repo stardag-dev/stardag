@@ -755,6 +755,22 @@ holds it: for a holder whose worker is gone, `stardag builds stop
 
 See `stardag concurrency-limits --help` for full options.
 
+## Cache Commands
+
+Instance bodies read from the registry are cached on disk, under
+`~/.stardag/registry-cache/`, so that a task pinned to an instance loads
+without a network call after the first read (see
+[Loading a task from the registry](../how-to/use-api-registry.md#loading-a-task-from-the-registry)).
+Entries are immutable copies, so clearing is never needed for correctness.
+
+```sh
+stardag cache clear          # the active profile's partition
+stardag cache clear --all    # every partition
+```
+
+`clear` accepts `-p/--stardag-profile` and `-e/--stardag-env`, and makes no
+registry call. Set `STARDAG_REGISTRY_CACHE=0` to turn the cache off.
+
 ## Environment Variables
 
 All CLI behavior can be overridden with environment variables:
@@ -768,6 +784,7 @@ All CLI behavior can be overridden with environment variables:
 | `STARDAG_ENVIRONMENT_ID`     | Environment UUID              |
 | `STARDAG_TARGET_ROOTS`       | JSON string of target roots   |
 | `STARDAG_TARGET_ROOTS__NAME` | Specific target root override |
+| `STARDAG_REGISTRY_CACHE`     | `0` turns off the body cache  |
 
 ## Common Workflows
 

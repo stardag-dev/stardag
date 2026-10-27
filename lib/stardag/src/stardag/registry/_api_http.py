@@ -49,6 +49,7 @@ from stardag.exceptions import (
     TokenExpiredError,
 )
 from stardag.registry._auth import StardagAPIKeyAuth, StardagTokenAuth
+from stardag.registry._instance_cache import secret_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -324,6 +325,20 @@ class HTTPTransport:
             reg.auth.api_key.get_secret_value() if reg and reg.auth.api_key else None
         )
         self._auth: httpx.Auth | None
+        # What decides which environment answers, for the instance-body
+        # cache's partition (``_instance_cache``): the key itself with
+        # API-key auth (the server reads the environment off the key, so a
+        # configured environment id may not be the one answering), the
+        # workspace and environment otherwise. Never the raw key.
+        self.cache_identity: tuple[str, ...] = (
+            ("api-key", secret_fingerprint(resolved_api_key))
+            if resolved_api_key
+            else (
+                "environment",
+                (reg.workspace_id if reg else "") or "",
+                self.environment_id or "",
+            )
+        )
         if resolved_api_key:
             self._auth = StardagAPIKeyAuth(resolved_api_key)
         elif reg and reg.auth.access_token:

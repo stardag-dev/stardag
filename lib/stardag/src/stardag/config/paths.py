@@ -47,6 +47,11 @@ def get_id_cache_path() -> Path:
     return get_stardag_dir() / "id-cache.json"
 
 
+def get_registry_cache_dir() -> Path:
+    """Get the instance-body cache directory (~/.stardag/registry-cache)."""
+    return get_stardag_dir() / "registry-cache"
+
+
 def get_local_target_roots_dir() -> Path:
     """Get the local target roots directory (~/.stardag/local-target-roots)."""
     return get_stardag_dir() / "local-target-roots"
@@ -154,6 +159,7 @@ __all__ = [
     "get_target_root_cache_path",
     "get_id_cache_path",
     "get_local_target_roots_dir",
+    "get_registry_cache_dir",
     "_sanitize_user_for_path",
     "get_registry_credentials_path",
     "get_access_token_cache_path",

@@ -513,17 +513,26 @@ class BaseTask(
         cls,
         id: UUID | str,
         registry: Union["RegistryABC", None] = None,
+        *,
+        instance_id: UUID | str | None = None,
     ) -> "BaseTask":
         """Instantiate the task from the registry.
 
         A task id may have several instances — constructions under
         different scopes — any of which rehydrates into this completion. A
-        task has no parameters, an instance does, so without a scope to
-        narrow by, this takes the newest instance's body (``TaskInfo``
-        orders them newest first).
+        task has no parameters, an instance does:
 
-        Validated in compat mode, same as ``task_from_registry_data``: the
-        recomputed task id is checked against the requested one, so a
+        - with ``instance_id``, that instance's body is used, after
+          checking it belongs to task ``id``. Instances are immutable, so
+          it is served from the local body cache when present
+          (``~/.stardag/registry-cache/``): a pinned load works offline
+          after one online read, and its non-significant fields are the
+          same on every load;
+        - without, the newest instance's body (``TaskInfo`` orders them
+          newest first), which always asks the registry.
+
+        Validated in compat mode, same as :func:`stardag.task_from_body`:
+        the recomputed task id is checked against the requested one, so a
         removed or renamed significant field — dropped by compat mode's
         lenient rules for non-significant fields — cannot silently return a
         task with a different completion identity than the one asked for.
@@ -532,39 +541,28 @@ class BaseTask(
             id: The UUID (or string representation) of the task to load.
             registry: An optional registry instance to use for loading metadata. If not
                 provided, the default registry from `registry_provider` will be used.
+            instance_id: The instance to load, pinned. Defaults to the
+                newest.
+
         Returns:
             The reconstructed task object.
 
         Raises:
             TaskRehydrationError: The recomputed task id does not match the
-                requested one.
+                requested one, or the instance belongs to another task.
         """
         # Local import: rehydrate.py imports base_task at module level, so
         # this must stay a lazy, in-method import to avoid a circular import
         # at module load time.
-        from stardag._core.rehydrate import TaskRehydrationError
+        from stardag._core.rehydrate import load_from_registry
         from stardag.registry import registry_provider
 
-        if isinstance(id, str):
-            id = UUID(id)
-
-        registry = registry or registry_provider.get()
-        info = registry.task_get(str(id))
-        if info.body is None:
-            raise TaskRehydrationError(
-                f"The registry holds no instance body for task {id}."
-            )
-
-        task = cls.model_validate(info.body, context={CONTEXT_MODE_KEY: "compat"})
-        if task.id != id:
-            raise TaskRehydrationError(
-                f"Rehydrated task id {task.id} does not match the requested "
-                f"id {id} — a field's serialization is likely not "
-                "losslessly round-trippable, or a significant field the "
-                "class no longer declares was silently dropped by compat "
-                "mode's lenient rules for non-significant fields."
-            )
-        return task
+        return load_from_registry(
+            cls,
+            UUID(id) if isinstance(id, str) else id,
+            registry or registry_provider.get(),
+            instance_id=instance_id,
+        )
 
 
 def auto_namespace(scope: str):

@@ -165,3 +165,58 @@ class TestErrors:
 
                 def run(self):
                     self._save(1)
+
+
+class TestTaskFromBody:
+    """``sd.task_from_body``: the public, documented entry point for
+    validating a stored instance body (``task_from_registry_data`` stays as
+    the same function under its engine-side name)."""
+
+    def test_round_trips_an_instance_body_in_compat_mode(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        caplog: pytest.LogCaptureFixture,
+    ):
+        root = RehydrateClassTask(factor=2, values=rehydrate_range(limit=3))
+        body = root.instance_body()
+        body["no_longer_declared"] = "dropped"  # compat: unknown key dropped
+
+        back = sd.task_from_body(body, expected_task_id=root.id)
+
+        assert "no_longer_declared" in caplog.text
+        assert isinstance(back, RehydrateClassTask)
+        assert back == root
+
+    def test_identity_check(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        body = rehydrate_range(limit=3).instance_body()
+        with pytest.raises(TaskRehydrationError, match="does not match"):
+            sd.task_from_body(body, expected_task_id=rehydrate_range(limit=4).id)
+
+    def test_unregistered_root_class_names_namespace_and_name(self):
+        with pytest.raises(TaskRehydrationError) as info:
+            sd.task_from_body({NAMESPACE_KEY: "models", NAME_KEY: "TrainedModel"})
+        message = str(info.value)
+        assert "namespace='models'" in message and "name='TrainedModel'" in message
+        assert "must be imported" in message
+
+    def test_unregistered_nested_class_names_namespace_and_name(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A nested task class whose module is not imported is named too,
+        not left as a bare validation error."""
+        body = RehydrateClassTask(
+            factor=1, values=rehydrate_range(limit=1)
+        ).instance_body()
+        body["values"][NAMESPACE_KEY] = "datasets"
+        body["values"][NAME_KEY] = "Dataset"
+        with pytest.raises(TaskRehydrationError) as info:
+            sd.task_from_body(body)
+        message = str(info.value)
+        assert "namespace='datasets'" in message and "name='Dataset'" in message
+        assert "must be imported" in message
+
+    def test_refuses_a_partial_dump(self):
+        with pytest.raises(TaskRehydrationError, match="discriminator keys"):
+            sd.task_from_body({"limit": 3})

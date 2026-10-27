@@ -86,6 +86,8 @@ class AliasTask(Task[LoadedT], Generic[LoadedT]):
         cls,
         id: UUID | str,
         registry: Union["RegistryABC", None] = None,
+        *,
+        instance_id: UUID | str | None = None,
     ) -> "AliasTask[LoadedT]":
         """Create an AliasTask by loading metadata from the Stardag APIRegistry.
 
@@ -93,6 +95,8 @@ class AliasTask(Task[LoadedT], Generic[LoadedT]):
             id: The UUID (or string representation) of the task to alias.
             registry: An optional registry instance to use for loading metadata. If not
                 provided, the default registry from `registry_provider` will be used.
+            instance_id: The instance whose body to record. Defaults to the
+                newest.
         Returns:
             An AliasTask instance referencing the specified task.
         """
@@ -112,11 +116,21 @@ class AliasTask(Task[LoadedT], Generic[LoadedT]):
                 "output."
             )
 
+        body = info.body
+        if instance_id is not None:
+            instance = registry.task_instance_get(instance_id, task_id=str(id))
+            if instance.task_id is not None and instance.task_id != str(id):
+                raise ValueError(
+                    f"Instance {instance_id} belongs to task {instance.task_id}, "
+                    f"not to task {id}."
+                )
+            body = instance.body
+
         return cls(
             aliased=AliasedMetadata(
                 id=UUID(info.task_id),
                 uri=info.output_uri,
-                body=info.body,
+                body=body,
             )
         )
 

@@ -122,3 +122,16 @@ def hermetic_config(
         # roots, not a factory lazily built from ambient config earlier.
         with target_factory_provider.override(TargetFactory()):
             yield
+
+
+@pytest.fixture(scope="function", autouse=True)
+def isolated_registry_cache(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Point the instance-body cache at a per-test directory, so no test
+    reads or writes the developer's ``~/.stardag/registry-cache/``."""
+    root = tmp_path_factory.mktemp("registry-cache")
+    monkeypatch.setattr(
+        "stardag.registry._instance_cache.get_registry_cache_dir", lambda: root
+    )
+    return root
