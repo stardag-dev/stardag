@@ -26,8 +26,8 @@ builds refuses the request (422), raised as
 build was created fails it, best effort; one that cannot be recorded leaves
 it PENDING, which no consumer acts on.
 
-:func:`register` adds the roots' handles: per root, the ``ref(...)`` line
-that pins it by task id and instance id.
+:func:`register` adds the roots' handles: per root, a :class:`RegisteredTask`
+carrying the ``ref(...)`` line that pins it by task id and instance id.
 """
 
 from __future__ import annotations
@@ -58,28 +58,46 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class RegisteredRoot:
-    """One root of a plan-only build, as the registry recorded it."""
+class RegisteredTask:
+    """One root of a plan-only build, as the registry recorded it, with the
+    line of code that pins it.
+
+    TODO(STA-145): return a ``TaskRef`` (``Cls.ref(task_id,
+    instance_id=...)``) from ``sd.register`` once task references land, and
+    share their reference-line helper.
+    """
 
     task: BaseTask
     task_id: str
     #: The root's instance under the build's scope: the body a reference
     #: pinned to it hydrates from.
     instance_id: UUID
+    #: ``Cls.ref("<task_id>", instance_id="<instance_id>")``, as printed.
+    ref_line: str
+
+    @classmethod
+    def of(cls, task: BaseTask, instance_id: UUID) -> "RegisteredTask":
+        _, path = _import_path(type(task))
+        return cls(
+            task=task,
+            task_id=str(task.id),
+            instance_id=instance_id,
+            ref_line=f'{path}.ref("{task.id}", instance_id="{instance_id}")',
+        )
 
     @property
     def import_line(self) -> str:
+        """``from <module> import <name>``, or a ``#`` note when the class
+        cannot be imported from other code."""
         module, path = _import_path(type(self.task))
         if "<locals>" in path:
             return f"# {path} is defined inside a function in {module}: not importable"
+        if module == "__main__":
+            return (
+                f"# {path.split('.')[0]} is defined in the script being run "
+                "(__main__): move it to a module to reference it from other code"
+            )
         return f"from {module} import {path.split('.')[0]}"
-
-    @property
-    def ref_snippet(self) -> str:
-        """The reference that pins this root: ``Cls.ref(task_id,
-        instance_id=...)``."""
-        _, path = _import_path(type(self.task))
-        return f'{path}.ref("{self.task_id}", instance_id="{self.instance_id}")'
 
 
 def _import_path(cls: type) -> tuple[str, str]:
@@ -100,7 +118,7 @@ class PlanOnlyResult:
     build_id: UUID
     plan_id: UUID
     #: The distinct roots, in request order.
-    roots: list[RegisteredRoot]
+    roots: list[RegisteredTask]
     task_count: TaskCount
 
     def summary(self) -> BuildSummary:
@@ -116,6 +134,11 @@ def _distinct(roots: Sequence[BaseTask]) -> list[BaseTask]:
     one task id that differ (a non-significant parameter) are both kept, so
     the walk refuses them (``InstanceConflictError``) before any build
     exists."""
+    for index, task in enumerate(roots):
+        if not isinstance(task, BaseTask):
+            raise ValueError(
+                f"Invalid task at index {index}: {task!r} (must be BaseTask)"
+            )
     seen: dict[tuple[UUID, UUID], BaseTask] = {}
     for root in roots:
         seen.setdefault((root.id, root.instance_hash), root)
@@ -155,11 +178,6 @@ async def build_plan_only_aio(
         APIError: The registry refused (the build is failed, best effort).
     """
     roots = _distinct([tasks] if isinstance(tasks, BaseTask) else list(tasks))
-    for index, task in enumerate(roots):
-        if not isinstance(task, BaseTask):
-            raise ValueError(
-                f"Invalid task at index {index}: {task} (must be BaseTask)"
-            )
     if not roots:
         raise ValueError("A plan-only build needs at least one task.")
     registry = registry if registry is not None else registry_provider.get()
@@ -199,7 +217,7 @@ async def build_plan_only_aio(
 
 async def _registered_roots(
     registry: RegistryABC, plan_id: UUID, roots: Sequence[BaseTask]
-) -> list[RegisteredRoot]:
+) -> list[RegisteredTask]:
     """The roots' instance ids, from the plan's root members (matched on
     task id and instance hash: a scope may hold several instances of one
     completion)."""
@@ -214,9 +232,7 @@ async def _registered_roots(
                 f"plan {plan_id} with this instance; it was registered, but "
                 "its instance id is unknown."
             )
-        registered.append(
-            RegisteredRoot(task=root, task_id=str(root.id), instance_id=instance_id)
-        )
+        registered.append(RegisteredTask.of(root, instance_id))
     return registered
 
 
@@ -241,13 +257,13 @@ async def register_aio(
     tasks: Sequence[BaseTask] | BaseTask,
     *,
     tags: Sequence[str] | None = None,
-    description: str | None = None,
+    task_description: str | None = None,
     registry: RegistryABC | None = None,
     app_name: str | None = None,
     settings: Mapping[str, str] | None = None,
     echo: bool = True,
-) -> list[UUID]:
-    """Register ``tasks`` without running them, and print a handle per root.
+) -> list[RegisteredTask]:
+    """Register ``tasks`` without running them, and return a handle per root.
 
     A plan-only build (see :func:`build_plan_only_aio`): the tasks and
     their static closure are recorded under the scope, whether or not they
@@ -259,8 +275,10 @@ async def register_aio(
 
     Args:
         tasks: The root task(s).
-        tags: Not available yet (annotating the roots).
-        description: Not available yet (annotating the roots).
+        tags: Not available yet: tags on each root's completion.
+        task_description: Not available yet: a description of each root's
+            completion (named apart from ``sd.build``'s ``description``,
+            which describes the build).
         registry: Default: the configured registry (one is required).
         app_name: Register under this deployed app's current deployment
             (default: a local deployment derived from the code).
@@ -269,14 +287,15 @@ async def register_aio(
         echo: Print the handles (default).
 
     Returns:
-        The roots' instance ids, one per given task, in order.
+        One :class:`RegisteredTask` per given task, in order: its
+        ``task_id``, ``instance_id`` and ``ref_line``.
     """
-    # TODO(STA-149): annotate the roots (tags, description) once the
+    # TODO(STA-149): annotate the roots (tags, task_description) once the
     # registry's task annotations land; until then these are refused rather
     # than silently dropped.
-    if tags is not None or description is not None:
+    if tags is not None or task_description is not None:
         raise NotImplementedError(
-            "sd.register(tags=..., description=...) is not available yet: "
+            "sd.register(tags=..., task_description=...) is not available yet: "
             "annotating registered tasks needs registry support that has not "
             "shipped. Register without them."
         )
@@ -284,25 +303,25 @@ async def register_aio(
     result = await build_plan_only_aio(
         task_list, registry=registry, app_name=app_name, settings=settings
     )
-    by_task_id = {r.task_id: r for r in result.roots}
+    by_key = {(r.task_id, str(r.task.instance_hash)): r for r in result.roots}
     if echo:
         print(f"Registered build {result.build_id} (nothing was run):")
         for root in result.roots:
             print(f"  {root.import_line}")
-            print(f"  {root.ref_snippet}")
-    return [by_task_id[str(t.id)].instance_id for t in task_list]
+            print(f"  {root.ref_line}")
+    return [by_key[(str(t.id), str(t.instance_hash))] for t in task_list]
 
 
 def register(
     tasks: Sequence[BaseTask] | BaseTask,
     *,
     tags: Sequence[str] | None = None,
-    description: str | None = None,
+    task_description: str | None = None,
     registry: RegistryABC | None = None,
     app_name: str | None = None,
     settings: Mapping[str, str] | None = None,
     echo: bool = True,
-) -> list[UUID]:
+) -> list[RegisteredTask]:
     """Register tasks without running them (sync wrapper for
     :func:`register_aio`; see it for the arguments)."""
     try:
@@ -310,7 +329,7 @@ def register(
             register_aio(
                 tasks,
                 tags=tags,
-                description=description,
+                task_description=task_description,
                 registry=registry,
                 app_name=app_name,
                 settings=settings,

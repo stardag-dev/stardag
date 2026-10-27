@@ -161,6 +161,11 @@ class BuildSummary:
         ]
         if self.build_id:
             lines.append(f"  Build ID: {self.build_id}")
+        if self.status == BuildExitStatus.REGISTERED:
+            # A plan-only build ran nothing by design: what it did is register.
+            lines.append(f"  Registered: {tc.discovered}")
+            lines.append(f"  Previously completed: {tc.previously_completed}")
+            return "\n".join(lines)
         lines.extend(
             [
                 f"  Discovered: {tc.discovered}",

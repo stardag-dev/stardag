@@ -11,8 +11,9 @@ registry, which follows the server's seams:
   ``resume`` and the reactive marker;
 - it never carries on without the registry (``on_registry_failure`` does
   not apply), and an older registry's 422 is a clear error;
-- ``sd.register`` prints a ``ref(...)`` line per root and returns the
-  roots' instance ids; ``tags`` / ``description`` are refused for now.
+- ``sd.register`` prints a ``ref(...)`` line per root and returns a
+  ``RegisteredTask`` per root; ``tags`` / ``task_description`` are refused
+  for now.
 """
 
 from __future__ import annotations
@@ -71,6 +72,9 @@ class TestPlanOnlyBuild:
 
         assert summary.status == BuildExitStatus.REGISTERED
         assert summary.task_count.discovered == 3
+        text = repr(summary)
+        assert "Build REGISTERED" in text and "Registered: 3" in text
+        assert "Succeeded" not in text and "Pending" not in text
         build = _only_build(registry)
         assert (build.id, build.status, build.plan_only) == (
             summary.build_id,
@@ -184,20 +188,28 @@ class TestCreateRequest:
 
 
 class TestRegister:
-    async def test_prints_a_ref_per_root_and_returns_the_instance_ids(
+    async def test_returns_and_prints_a_ref_per_root(
         self, default_in_memory_fs_target: Target, capsys
     ):
         registry = InMemoryRegistry()
         leaf, _, root = _chain()
-        instance_ids = await sd.register_aio([root, leaf], registry=registry)
+        registered = await sd.register_aio([root, leaf], registry=registry)
 
         by_task = {i.task_id: i.id for i in registry.instances.values()}
-        assert instance_ids == [by_task[str(root.id)], by_task[str(leaf.id)]]
-        assert all(isinstance(i, UUID) for i in instance_ids)
+        assert [r.instance_id for r in registered] == [
+            by_task[str(root.id)],
+            by_task[str(leaf.id)],
+        ]
+        assert [r.task_id for r in registered] == [str(root.id), str(leaf.id)]
+        assert all(isinstance(r.instance_id, UUID) for r in registered)
+        assert registered[0].task is root
+        expected = (
+            f'SyncOnlyTask.ref("{root.id}", instance_id="{by_task[str(root.id)]}")'
+        )
+        assert registered[0].ref_line == expected
         out = capsys.readouterr().out
         assert f"from {SyncOnlyTask.__module__} import SyncOnlyTask" in out
-        assert f'SyncOnlyTask.ref("{root.id}", instance_id="{instance_ids[0]}")' in out
-        assert f'SyncOnlyTask.ref("{leaf.id}", instance_id="{instance_ids[1]}")' in out
+        assert all(r.ref_line in out for r in registered)
         assert _only_build(registry).status == "registered"
         assert registry.executions == {}
 
@@ -206,8 +218,10 @@ class TestRegister:
     ):
         registry = InMemoryRegistry()
         _, _, root = _chain()
-        ids = await sd.register_aio([root, root], registry=registry, echo=False)
-        assert ids[0] == ids[1]
+        first, second = await sd.register_aio(
+            [root, root], registry=registry, echo=False
+        )
+        assert first == second
         (created,) = registry.calls_to("build_create")
         assert created["root_task_ids"] == [str(root.id)]
 
@@ -225,6 +239,15 @@ class TestRegister:
             await sd.register_aio([a, b], registry=registry, echo=False)
         assert registry.builds == {}
 
+    async def test_a_non_task_is_refused_before_anything_is_read(
+        self, default_in_memory_fs_target: Target
+    ):
+        registry = InMemoryRegistry()
+        _, _, root = _chain()
+        with pytest.raises(ValueError, match="index 1"):
+            await sd.register_aio([root, "not a task"], registry=registry)  # type: ignore[list-item]
+        assert registry.builds == {}
+
     async def test_a_function_task_is_referred_to_by_its_function_name(
         self, default_in_memory_fs_target: Target, capsys
     ):
@@ -232,29 +255,38 @@ class TestRegister:
         ``double_it`` in its module; the class name would not import."""
         registry = InMemoryRegistry()
         task = double_it(value=int(new_id()) % 1000)
-        (instance_id,) = await sd.register_aio(task, registry=registry)
+        (registered,) = await sd.register_aio(task, registry=registry)
         out = capsys.readouterr().out
         assert f"from {__name__} import double_it" in out
-        assert f'double_it.ref("{task.id}", instance_id="{instance_id}")' in out
+        assert registered.ref_line == (
+            f'double_it.ref("{task.id}", instance_id="{registered.instance_id}")'
+        )
 
-    def test_a_nested_class_is_imported_by_its_outermost_name(self):
-        from stardag.build._plan_only import RegisteredRoot
+    def test_the_import_line_says_when_a_class_cannot_be_imported(self):
+        """A nested class is imported by its outermost name; a class inside
+        a function, or in ``__main__``, gets a note instead of an import
+        that would fail."""
+        from stardag.build._plan_only import RegisteredTask, _import_path
 
-        class Outer:
-            class Inner:
-                pass
+        def handle(module: str, qualname: str) -> RegisteredTask:
+            cls = type("C", (), {"__module__": module, "__qualname__": qualname})
+            return RegisteredTask(
+                task=cls(),  # type: ignore[arg-type]
+                task_id="t",
+                instance_id=new_id(),
+                ref_line="",
+            )
 
-        root = RegisteredRoot(task=Outer.Inner(), task_id="t", instance_id=new_id())  # type: ignore[arg-type]
-        assert "<locals>" in root.ref_snippet  # defined in this function
-        assert root.import_line.startswith("# ")
-
-        Inner = type("Inner", (), {"__module__": "pkg.mod", "__qualname__": "A.Inner"})
-        nested = RegisteredRoot(task=Inner(), task_id="t", instance_id=new_id())  # type: ignore[arg-type]
+        nested = handle("pkg.mod", "A.Inner")
         assert nested.import_line == "from pkg.mod import A"
-        assert nested.ref_snippet.startswith('A.Inner.ref("t"')
+        assert _import_path(type(nested.task)) == ("pkg.mod", "A.Inner")
+        assert handle("pkg.mod", "f.<locals>.C").import_line.startswith("# ")
+        main = handle("__main__", "Model").import_line
+        assert main.startswith("# Model is defined in the script being run")
+        assert "from __main__" not in main
 
     @pytest.mark.parametrize(
-        "annotation", [{"tags": ["best"]}, {"description": "the baseline"}]
+        "annotation", [{"tags": ["best"]}, {"task_description": "the baseline"}]
     )
     async def test_annotations_are_not_available_yet(
         self, default_in_memory_fs_target: Target, annotation: dict
@@ -268,5 +300,5 @@ class TestRegister:
     def test_the_sync_wrapper(self, default_in_memory_fs_target: Target, capsys):
         registry = InMemoryRegistry()
         _, _, root = _chain()
-        (instance_id,) = sd.register(root, registry=registry)
-        assert str(instance_id) in capsys.readouterr().out
+        (registered,) = sd.register(root, registry=registry)
+        assert str(registered.instance_id) in capsys.readouterr().out

@@ -13,15 +13,16 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   closure, complete tasks expanded too, are registered under the build's
   scope as a build's static phase registers them, and nothing is claimed or
   executed. `sd.register` prints, per root, the import line and
-  `Cls.ref("<task_id>", instance_id="<instance_id>")`, and returns the
-  roots' instance ids; `app_name=` registers under a deployed app's current
-  deployment. `sd.build(..., plan_only=True)` returns a summary with the new
-  `BuildExitStatus.REGISTERED`. A plan-only build never carries on without
+  `Cls.ref("<task_id>", instance_id="<instance_id>")`, and returns one
+  `RegisteredTask` per root (`task_id`, `instance_id`, `ref_line`);
+  `app_name=` registers under a deployed app's current deployment.
+  `sd.build(..., plan_only=True)` returns a summary with the new
+  `BuildExitStatus.REGISTERED`, which reads `Registered: N`. A plan-only build never carries on without
   the registry (`on_registry_failure` does not apply), and an older registry
   that does not know plan-only builds is reported as
   `PlanOnlyUnsupportedError` rather than worked around. `tags=` and
-  `description=` on `sd.register` are reserved for annotating the roots and
-  raise `NotImplementedError` until the registry supports it. Registry
+  `task_description=` on `sd.register` are reserved for annotating the
+  roots and raise `NotImplementedError` until the registry supports it. Registry
   client: `build_create(plan_only=)` (sent only when set) and
   `build_registered()`; `BuildInfo.plan_only`. **Needs a registry with
   plan-only builds** (this release's server); every other feature is
@@ -240,12 +241,14 @@ deploy` now **warns** about a worker with `retries` above zero (an `int`
   (event `build_registered`) once its active plan is sealed, running the
   closure step first. `resume`, the reactive marker, `complete` and
   `exit-early` refuse a plan-only build (409 `build_plan_only`); `fail` and
-  `cancel` close one that went wrong. `BuildResponse.plan_only`. Migration:
+  `cancel` close one that went wrong, and `skip-blocked` is a no-op on one. `BuildResponse.plan_only`. Migration:
   `build.plan_only` (default false), the two enum labels, and the event
   table's build-level CHECK recreated to compare `event_type::text` (an
-  enum label cannot be used in the transaction that adds it). Additive for
-  a rolling deploy; downgrade rewrites `registered` builds and events to
-  `cancelled`.
+  enum label cannot be used in the transaction that adds it), added `NOT
+  VALID` and validated in a separate step so event appends are not blocked
+  while it scans. **Rolling back** the image once a `registered` build
+  exists requires the downgrade first, which rewrites those builds and
+  events to `cancelled`: an older server cannot read the new labels.
 
 - **Changed: the writes that finish running work get their own rate-limit
   window, and a workspace can have its own limit** (STA-135). The

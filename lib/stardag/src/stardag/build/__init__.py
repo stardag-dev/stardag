@@ -69,7 +69,7 @@ from stardag.build._reactive import (
 )
 from stardag.build._plan_only import (
     PlanOnlyResult,
-    RegisteredRoot,
+    RegisteredTask,
     build_plan_only_aio,
     register,
     register_aio,
@@ -127,7 +127,7 @@ __all__ = [
     # Errors
     "DeploymentResolutionError",
     "PlanOnlyResult",
-    "RegisteredRoot",
+    "RegisteredTask",
     "RequiresError",
     "build_plan_only_aio",
     "register",

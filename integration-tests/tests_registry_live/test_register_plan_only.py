@@ -71,7 +71,8 @@ def test_a_registered_dag_is_never_started(deployment: Deployment) -> None:
         if d.app_name == APP_NAME
     ]
 
-    (instance_id,) = sd.register(registered_root, app_name=APP_NAME)
+    (handle,) = sd.register(registered_root, app_name=APP_NAME)
+    instance_id = handle.instance_id
 
     # The salted root is this scenario's alone, so its REGISTERED build is
     # the one ``sd.register`` just created.
