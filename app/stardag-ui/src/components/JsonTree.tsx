@@ -5,15 +5,25 @@ import {
   copyValueText,
   defaultExpanded,
   findMatches,
+  hiddenCount,
   highlightSegments,
   indexJson,
   isContainer,
+  isMoreRow,
+  moreOf,
+  nthChild,
+  PAGE_SIZE,
+  windowOf,
+  revealInPages,
   scalarText,
+  showMore,
   sizeLabel,
   union,
   visibleRows,
   type JsonMatch,
   type JsonNode,
+  type MoreDirection,
+  type Windows,
 } from "../utils/jsonTree";
 
 /** How long typing must pause before the tree is searched. */
@@ -62,6 +72,11 @@ const NO_SEARCH: SearchState = { query: "", matches: [], current: 0 };
  * The copy buttons on each row are the same actions for a pointer, and
  * are kept out of the tab order for that reason.
  *
+ * A wide container draws a page of children at a time, with "show
+ * more" rows either side, so the number of rows stays bounded however
+ * many siblings a search matches; navigating to a match moves its
+ * parent's page to it.
+ *
  * State is per value: give the component a `key` when the value it shows
  * can change identity, so expansion and search start over.
  */
@@ -78,13 +93,20 @@ export function JsonTree({
   );
   const [input, setInput] = useState("");
   const [search, setSearch] = useState<SearchState>(NO_SEARCH);
+  const [windows, setWindows] = useState<Windows>(() => new Map());
+  // The focused row: a node index, or a "show more" row (see visibleRows).
   const [focused, setFocused] = useState(1);
   const [status, setStatus] = useState("");
   const treeRef = useRef<HTMLDivElement>(null);
   const treeId = useId();
   const statusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // A row to focus once it has rendered (after "show more").
+  const pendingFocus = useRef<number | null>(null);
 
-  const rows = useMemo(() => visibleRows(nodes, expanded), [nodes, expanded]);
+  const rows = useMemo(
+    () => visibleRows(nodes, expanded, windows),
+    [nodes, expanded, windows],
+  );
   const matchByIndex = useMemo(
     () => new Map(search.matches.map((m) => [m.index, m])),
     [search.matches],
@@ -110,20 +132,33 @@ export function JsonTree({
             ),
           ),
         );
+        setWindows((prev) => revealInPages(nodes, prev, matches[0].index));
         setFocused(matches[0].index);
       }
     }, SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(timer);
   }, [input, nodes]);
 
-  // Keep the current match in view.
+  // Bring the current match into view on every search and every
+  // next/previous, including a step that lands on the same match (a
+  // single result the user has scrolled or folded away from).
   useEffect(() => {
-    if (currentMatch === undefined) return;
+    const match = search.matches[search.current];
+    if (match === undefined) return;
     const el = treeRef.current?.querySelector<HTMLElement>(
-      `[data-index="${currentMatch.index}"]`,
+      `[data-row="${match.index}"]`,
     );
     el?.scrollIntoView?.({ block: "nearest" });
-  }, [currentMatch]);
+  }, [search]);
+
+  // Focus a row that "show more" has just drawn.
+  useEffect(() => {
+    if (pendingFocus.current === null) return;
+    treeRef.current
+      ?.querySelector<HTMLElement>(`[data-row="${pendingFocus.current}"]`)
+      ?.focus();
+    pendingFocus.current = null;
+  }, [rows]);
 
   useEffect(
     () => () => {
@@ -176,18 +211,36 @@ export function JsonTree({
     if (count === 0) return;
     const current = (search.current + step + count) % count;
     const index = search.matches[current].index;
+    // A new object even when `current` is unchanged, so the scroll runs.
     setSearch((prev) => ({ ...prev, current }));
-    // The user may have folded it away since the search ran.
+    // The user may have folded it away since the search ran, and it may
+    // lie past its parent's page.
     setExpanded((prev) => union(prev, ancestorIds(nodes, [index])));
+    setWindows((prev) => revealInPages(nodes, prev, index));
     setFocused(index);
   };
 
-  // The roving tab stop: the focused row if visible, else the first row.
-  const tabStop = rows.includes(focused) ? focused : rows[0] ?? -1;
+  const more = useCallback(
+    (row: number, focus: boolean) => {
+      const { parent, direction } = moreOf(row);
+      const [start, end] = windowOf(nodes, windows, parent);
+      // The newly drawn child next to the row: where focus goes.
+      const first = nthChild(nodes, parent, direction === "before" ? start - 1 : end);
+      setWindows((prev) => showMore(nodes, prev, parent, direction));
+      if (first !== -1) {
+        setFocused(first);
+        if (focus) pendingFocus.current = first;
+      }
+    },
+    [nodes, windows],
+  );
 
-  const focusRow = useCallback((index: number) => {
-    setFocused(index);
-    treeRef.current?.querySelector<HTMLElement>(`[data-index="${index}"]`)?.focus();
+  // The roving tab stop: the focused row if visible, else the first row.
+  const tabStop = rows.includes(focused) ? focused : rows[0] ?? null;
+
+  const focusRow = useCallback((row: number) => {
+    setFocused(row);
+    treeRef.current?.querySelector<HTMLElement>(`[data-row="${row}"]`)?.focus();
   }, []);
 
   const onTreeKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
@@ -195,12 +248,40 @@ export function JsonTree({
     if (target.getAttribute("role") !== "treeitem") return;
     // Leave the browser's own shortcuts (Ctrl+C on a selection, say) alone.
     if (event.ctrlKey || event.metaKey || event.altKey) return;
-    const index = Number(target.dataset.index);
-    const node = nodes[index];
+    const index = Number(target.dataset.row);
     const row = rows.indexOf(index);
-    if (node === undefined || row === -1) return;
-    const open = isContainer(node) && expanded.has(node.id);
+    if (row === -1) return;
     let handled = true;
+    if (isMoreRow(index)) {
+      const { parent } = moreOf(index);
+      switch (event.key) {
+        case "ArrowDown":
+          if (row + 1 < rows.length) focusRow(rows[row + 1]);
+          break;
+        case "ArrowUp":
+          if (row > 0) focusRow(rows[row - 1]);
+          break;
+        case "Home":
+          focusRow(rows[0]);
+          break;
+        case "End":
+          focusRow(rows[rows.length - 1]);
+          break;
+        case "ArrowLeft":
+          if (parent > 0) focusRow(parent);
+          break;
+        case "Enter":
+        case " ":
+          more(index, true);
+          break;
+        default:
+          handled = false;
+      }
+      if (handled) event.preventDefault();
+      return;
+    }
+    const node = nodes[index];
+    const open = isContainer(node) && expanded.has(node.id);
     switch (event.key) {
       case "ArrowDown":
         if (row + 1 < rows.length) focusRow(rows[row + 1]);
@@ -319,6 +400,21 @@ export function JsonTree({
           className={`overflow-auto py-1 font-mono text-sm text-gray-800 dark:text-gray-200 ${className}`}
         >
           {rows.map((index) => {
+            if (isMoreRow(index)) {
+              const { parent, direction } = moreOf(index);
+              return (
+                <MoreRow
+                  key={`${nodes[parent].id} ${direction}`}
+                  row={index}
+                  level={nodes[parent].depth + 1}
+                  direction={direction}
+                  hidden={hiddenCount(nodes, windows, parent, direction)}
+                  tabbable={index === tabStop}
+                  onMore={more}
+                  onFocusRow={setFocused}
+                />
+              );
+            }
             const match = matchByIndex.get(index);
             return (
               <JsonRow
@@ -392,7 +488,7 @@ const JsonRow = memo(function JsonRow({
         node.taskLabel ? `${node.taskLabel} ` : ""
       }${summary}`}
       tabIndex={tabbable ? 0 : -1}
-      data-index={index}
+      data-row={index}
       onFocus={(e) => {
         if (e.target === e.currentTarget) onFocusRow(index);
       }}
@@ -462,6 +558,47 @@ const JsonRow = memo(function JsonRow({
           path
         </RowCopyButton>
       </span>
+    </div>
+  );
+});
+
+/** The "show more" row closing a wide container's page. */
+const MoreRow = memo(function MoreRow({
+  row,
+  level,
+  direction,
+  hidden,
+  tabbable,
+  onMore,
+  onFocusRow,
+}: {
+  row: number;
+  level: number;
+  direction: MoreDirection;
+  hidden: number;
+  tabbable: boolean;
+  onMore: (row: number, focus: boolean) => void;
+  onFocusRow: (row: number) => void;
+}) {
+  const label = `Show ${Math.min(PAGE_SIZE, hidden)} ${
+    direction === "before" ? "earlier" : "more"
+  } (${hidden.toLocaleString()} not shown)`;
+  return (
+    <div
+      role="treeitem"
+      aria-level={level}
+      aria-label={label}
+      tabIndex={tabbable ? 0 : -1}
+      data-row={row}
+      onFocus={(e) => {
+        if (e.target === e.currentTarget) onFocusRow(row);
+      }}
+      onClick={() => onMore(row, false)}
+      style={{ paddingLeft: `${(level - 1) * 1.25 + 0.5}rem` }}
+      className="flex cursor-pointer items-center gap-1 pr-2 font-sans text-xs leading-6 text-blue-700 hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-inset dark:text-blue-300 dark:hover:bg-gray-800"
+    >
+      <span aria-hidden="true" className="inline-block w-3 shrink-0" />
+      {label}
     </div>
   );
 });

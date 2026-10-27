@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { PAGE_SIZE } from "../utils/jsonTree";
 import { JsonTree, REVEAL_MATCHES, SEARCH_DEBOUNCE_MS } from "./JsonTree";
 
 const VALUE = {
@@ -187,8 +188,10 @@ describe("JsonTree copy", () => {
 });
 
 describe("JsonTree on a large value", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
   it("indexes and searches thousands of nodes", () => {
-    vi.useFakeTimers();
     const big = Object.fromEntries(
       Array.from({ length: 300 }, (_, i) => [
         `task_${i}`,
@@ -200,19 +203,62 @@ describe("JsonTree on a large value", () => {
       ]),
     );
     renderTree(big);
-    // The top level only: opening the next one would pass the row budget.
-    expect(screen.getAllByRole("treeitem")).toHaveLength(300);
+    // The top level only, one page of it: opening the next level would
+    // pass the row budget.
+    expect(screen.getAllByRole("treeitem")).toHaveLength(PAGE_SIZE + 1);
+    expect(item("Show 100 more (100 not shown)")).toBeInTheDocument();
+
+    // A match past the page moves the page to it.
     search("item 299");
     expect(screen.getByText("1 of 1")).toBeInTheDocument();
     expect(item("label: item 299")).toBeInTheDocument();
 
-    // A query matching most of it reveals only the first matches (plus
-    // the one the previous search opened: expansion is kept).
+    // A query matching most of it reveals only the first matches. (The
+    // one the previous search opened stays expanded, but the page has
+    // moved back to the first match, away from it.)
     search("item");
     expect(screen.getByText("1 of 300")).toBeInTheDocument();
     expect(screen.getAllByRole("treeitem", { name: /^label:/ })).toHaveLength(
-      REVEAL_MATCHES + 1,
+      REVEAL_MATCHES,
     );
-    vi.useRealTimers();
+  });
+
+  it("draws a page of a wide array however many of its children match", () => {
+    const tree = renderTree({ values: Array(10_000).fill("alpha") });
+    search("alpha");
+    expect(screen.getByText("1 of 10000")).toBeInTheDocument();
+    expect(screen.getAllByRole("treeitem")).toHaveLength(1 + PAGE_SIZE + 1);
+    expect(tree.querySelectorAll("mark")).toHaveLength(PAGE_SIZE);
+
+    // Stepping back to the last match moves the page to it: still a page.
+    fireEvent.click(screen.getByRole("button", { name: "Previous match" }));
+    expect(screen.getByText("10000 of 10000")).toBeInTheDocument();
+    expect(item("9999: alpha")).toBeInTheDocument();
+    expect(item("Show 200 earlier (9,800 not shown)")).toBeInTheDocument();
+    expect(screen.getAllByRole("treeitem")).toHaveLength(1 + 1 + PAGE_SIZE);
+  });
+
+  it("shows the next page from the show-more row, by click or keyboard", () => {
+    renderTree({ values: Array.from({ length: 450 }, (_, i) => i) });
+    fireEvent.click(item(/^values:/));
+    fireEvent.click(item("Show 200 more (250 not shown)"));
+    expect(item("399: 399")).toBeInTheDocument();
+    const next = item("Show 50 more (50 not shown)");
+    next.focus();
+    fireEvent.keyDown(next, { key: "Enter" });
+    expect(item("449: 449")).toBeInTheDocument();
+    expect(item("400: 400")).toHaveFocus();
+    expect(screen.queryByRole("treeitem", { name: /^Show/ })).toBeNull();
+  });
+
+  it("scrolls to the current match on every step, even a single one", () => {
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    renderTree();
+    search("beta");
+    expect(scroll).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Next match" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next match" }));
+    expect(scroll).toHaveBeenCalledTimes(3);
   });
 });

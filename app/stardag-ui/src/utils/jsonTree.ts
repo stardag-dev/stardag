@@ -113,9 +113,9 @@ export function indexJson(root: unknown): JsonNode[] {
       setSize,
       taskLabel:
         kind === "object" ? taskLabelOf(value as Record<string, unknown>) : null,
-      keyLower: typeof key === "string" ? key.toLowerCase() : null,
+      keyLower: typeof key === "string" ? foldCase(key) : null,
       valueLower:
-        kind === "object" || kind === "array" ? null : scalarText(value).toLowerCase(),
+        kind === "object" || kind === "array" ? null : foldCase(scalarText(value)),
     };
     nodes.push(node);
     entries.forEach(([childKey, childValue], i) =>
@@ -136,22 +136,138 @@ export function indexJson(root: unknown): JsonNode[] {
   return nodes;
 }
 
+/** How many children of a container are drawn at a time. */
+export const PAGE_SIZE = 200;
+
+/** The children of a container that are drawn: `[start, end)`, 0-based. */
+export type Window = readonly [number, number];
+
+/** Drawn windows by container id; a container not in it draws its first page. */
+export type Windows = ReadonlyMap<string, Window>;
+
+export type MoreDirection = "before" | "after";
+
 /**
- * The indices of the visible rows, in display order. The root itself is
- * not drawn — its children are the top level — and is always expanded.
+ * A row is a node index (>= 1), or a "show more" row standing for the
+ * undrawn children of container `p` before or after its window, encoded
+ * as `-(2p + 1)` and `-(2p + 2)`.
+ */
+export function moreRow(parent: number, direction: MoreDirection): number {
+  return direction === "before" ? -(2 * parent + 1) : -(2 * parent + 2);
+}
+
+export function isMoreRow(row: number): boolean {
+  return row < 0;
+}
+
+/** The container a "show more" row belongs to, and which side it is on. */
+export function moreOf(row: number): { parent: number; direction: MoreDirection } {
+  const n = -row - 1;
+  return { parent: Math.floor(n / 2), direction: n % 2 === 0 ? "before" : "after" };
+}
+
+export function windowOf(nodes: JsonNode[], windows: Windows, parent: number): Window {
+  const node = nodes[parent];
+  return windows.get(node.id) ?? [0, Math.min(node.size, PAGE_SIZE)];
+}
+
+/**
+ * The visible rows, in display order. The root itself is not drawn — its
+ * children are the top level — and is always expanded.
+ *
+ * A container draws only the children in its window (its first page by
+ * default), with a "show more" row on each side that has more, so a wide
+ * array costs at most a page of rows however wide it is and however many
+ * of its children a search matches.
  */
 export function visibleRows(
   nodes: JsonNode[],
   expanded: ReadonlySet<string>,
+  windows: Windows = new Map(),
 ): number[] {
   const rows: number[] = [];
-  let i = 1;
-  while (i < nodes.length) {
-    const node = nodes[i];
-    rows.push(i);
-    i = isContainer(node) && !expanded.has(node.id) ? node.end : i + 1;
+  function walk(parent: number): void {
+    const node = nodes[parent];
+    const [start, end] = windowOf(nodes, windows, parent);
+    if (start > 0) rows.push(moreRow(parent, "before"));
+    let position = 0;
+    for (let child = parent + 1; child < node.end; child = nodes[child].end) {
+      if (position >= end) break;
+      if (position++ < start) continue;
+      rows.push(child);
+      if (isContainer(nodes[child]) && expanded.has(nodes[child].id)) walk(child);
+    }
+    if (end < node.size) rows.push(moreRow(parent, "after"));
   }
+  if (nodes.length > 0) walk(0);
   return rows;
+}
+
+/** The index of `parent`'s `n`th child (0-based), or -1. */
+export function nthChild(nodes: JsonNode[], parent: number, n: number): number {
+  let position = 0;
+  for (let child = parent + 1; child < nodes[parent].end; child = nodes[child].end) {
+    if (position === n) return child;
+    position++;
+  }
+  return -1;
+}
+
+/** How many of `parent`'s children a "show more" row on that side stands for. */
+export function hiddenCount(
+  nodes: JsonNode[],
+  windows: Windows,
+  parent: number,
+  direction: MoreDirection,
+): number {
+  const [start, end] = windowOf(nodes, windows, parent);
+  return direction === "before" ? start : nodes[parent].size - end;
+}
+
+/** `windows` with `parent`'s window grown by one page on one side. */
+export function showMore(
+  nodes: JsonNode[],
+  windows: Windows,
+  parent: number,
+  direction: MoreDirection,
+): Windows {
+  const [start, end] = windowOf(nodes, windows, parent);
+  const next = new Map(windows);
+  next.set(
+    nodes[parent].id,
+    direction === "before"
+      ? [Math.max(0, start - PAGE_SIZE), end]
+      : [start, Math.min(nodes[parent].size, end + PAGE_SIZE)],
+  );
+  return next;
+}
+
+/**
+ * `windows` moved so that `index` and each of its ancestors is drawn: a
+ * parent whose window misses the child gets the page holding it instead.
+ * Moving rather than growing keeps a jump to the far end of a wide array
+ * at one page of rows. Returns `windows` itself when nothing moves.
+ */
+export function revealInPages(
+  nodes: JsonNode[],
+  windows: Windows,
+  index: number,
+): Windows {
+  let out = windows;
+  for (let i = index; i > 0; i = nodes[i].parent) {
+    const parent = nodes[i].parent;
+    const position = nodes[i].posInSet - 1;
+    const [start, end] = windowOf(nodes, out, parent);
+    if (position >= start && position < end) continue;
+    const pageStart = Math.floor(position / PAGE_SIZE) * PAGE_SIZE;
+    const next = new Map(out);
+    next.set(nodes[parent].id, [
+      pageStart,
+      Math.min(nodes[parent].size, pageStart + PAGE_SIZE),
+    ]);
+    out = next;
+  }
+  return out;
 }
 
 /** Every container's id: "expand all". */
@@ -176,7 +292,7 @@ export function defaultExpanded(
   let shown = nodes[0].size;
   for (let depth = 1; depth < maxDepth; depth++) {
     const level = nodes.filter((node) => node.depth === depth && isContainer(node));
-    const added = level.reduce((sum, node) => sum + node.size, 0);
+    const added = level.reduce((sum, node) => sum + Math.min(node.size, PAGE_SIZE), 0);
     if (level.length === 0 || shown + added > budget) break;
     for (const node of level) expanded.add(node.id);
     shown += added;
@@ -198,7 +314,7 @@ export interface JsonMatch {
  * children's. An empty or whitespace-only query matches nothing.
  */
 export function findMatches(nodes: JsonNode[], query: string): JsonMatch[] {
-  const q = query.trim().toLowerCase();
+  const q = foldCase(query.trim());
   if (!q) return [];
   const matches: JsonMatch[] = [];
   for (let i = 1; i < nodes.length; i++) {
@@ -237,24 +353,60 @@ export function union(
   return out ?? a;
 }
 
+/**
+ * Case folding for search, one character at a time. Lower-casing a whole
+ * string is context-sensitive (a final `Σ` becomes `ς`); per character it
+ * is not, so the index, the query and the highlighting all agree.
+ */
+export function foldCase(text: string): string {
+  let out = "";
+  for (const ch of text) out += ch.toLowerCase();
+  return out;
+}
+
 export interface Segment {
   text: string;
   match: boolean;
 }
 
-/** `text` split into runs that do and do not contain `query`, case-insensitively. */
+/**
+ * `text` split into runs that do and do not contain `query`,
+ * case-insensitively. Offsets are mapped back to `text` through the
+ * folding, since lower-casing can change a string's length (`İ` becomes
+ * two code units).
+ */
 export function highlightSegments(text: string, query: string): Segment[] {
-  const q = query.trim().toLowerCase();
+  const q = foldCase(query.trim());
   if (!q) return [{ text, match: false }];
-  const lower = text.toLowerCase();
+  // For each code unit of the folded text: the start and length of the
+  // original character it came from.
+  let folded = "";
+  const origin: number[] = [];
+  const width: number[] = [];
+  let at = 0;
+  for (const ch of text) {
+    const lower = ch.toLowerCase();
+    for (let k = 0; k < lower.length; k++) {
+      origin.push(at);
+      width.push(ch.length);
+    }
+    folded += lower;
+    at += ch.length;
+  }
   const segments: Segment[] = [];
   let from = 0;
-  let at = lower.indexOf(q);
-  while (at !== -1) {
-    if (at > from) segments.push({ text: text.slice(from, at), match: false });
-    segments.push({ text: text.slice(at, at + q.length), match: true });
-    from = at + q.length;
-    at = lower.indexOf(q, from);
+  let hit = folded.indexOf(q);
+  while (hit !== -1) {
+    const last = hit + q.length - 1;
+    const start = origin[hit];
+    const end = origin[last] + width[last];
+    // A hit starting inside a character already highlighted is skipped.
+    if (start >= from) {
+      if (start > from) segments.push({ text: text.slice(from, start), match: false });
+      segments.push({ text: text.slice(start, end), match: true });
+      from = end;
+    }
+    hit = folded.indexOf(q, hit + q.length);
   }
   if (from < text.length) segments.push({ text: text.slice(from), match: false });
   return segments;

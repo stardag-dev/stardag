@@ -5,8 +5,16 @@ import {
   copyValueText,
   defaultExpanded,
   findMatches,
+  foldCase,
+  hiddenCount,
   highlightSegments,
   indexJson,
+  moreOf,
+  moreRow,
+  nthChild,
+  PAGE_SIZE,
+  revealInPages,
+  showMore,
   pathSegment,
   sizeLabel,
   union,
@@ -208,5 +216,67 @@ describe("copyValueText / sizeLabel", () => {
     expect(sizeLabel(node("$.flags"))).toBe("2 items");
     expect(sizeLabel(node("$.empty"))).toBe("0 keys");
     expect(sizeLabel(indexJson({ a: 1 })[0])).toBe("1 key");
+  });
+});
+
+describe("paging wide containers", () => {
+  const nodes = indexJson({ wide: Array.from({ length: 450 }, (_, i) => i), x: 1 });
+  const expanded = new Set(["$", "$.wide"]);
+
+  it("draws the first page of children, then a show-more row", () => {
+    const rows = visibleRows(nodes, expanded);
+    expect(rows).toHaveLength(1 + PAGE_SIZE + 1 + 1);
+    expect(rows[PAGE_SIZE + 1]).toBe(moreRow(1, "after"));
+    expect(moreOf(rows[PAGE_SIZE + 1])).toEqual({ parent: 1, direction: "after" });
+    expect(moreOf(moreRow(0, "before"))).toEqual({ parent: 0, direction: "before" });
+    expect(nodes[rows.at(-1)!].id).toBe("$.x");
+    expect(hiddenCount(nodes, new Map(), 1, "after")).toBe(250);
+    expect(hiddenCount(nodes, new Map(), 1, "before")).toBe(0);
+  });
+
+  it("grows the window a page at a time", () => {
+    const windows = showMore(nodes, new Map(), 1, "after");
+    expect(visibleRows(nodes, expanded, windows)).toHaveLength(1 + 400 + 1 + 1);
+    expect(hiddenCount(nodes, windows, 1, "after")).toBe(50);
+    expect(nodes[nthChild(nodes, 1, 400)].id).toBe("$.wide[400]");
+    expect(nthChild(nodes, 1, 450)).toBe(-1);
+  });
+
+  it("moves the window to the page holding a node, and leaves it alone otherwise", () => {
+    const deep = nodes.findIndex((n) => n.id === "$.wide[420]");
+    const windows = revealInPages(nodes, new Map(), deep);
+    expect(windows.get("$.wide")).toEqual([400, 450]);
+    const rows = visibleRows(nodes, expanded, windows);
+    // A show-earlier row, the last 50 children, and the next top-level key.
+    expect(rows).toHaveLength(1 + 1 + 50 + 1);
+    expect(rows[1]).toBe(moreRow(1, "before"));
+    expect(hiddenCount(nodes, windows, 1, "before")).toBe(400);
+    expect(showMore(nodes, windows, 1, "before").get("$.wide")).toEqual([200, 450]);
+
+    const near = nodes.findIndex((n) => n.id === "$.wide[3]");
+    const same = new Map();
+    expect(revealInPages(nodes, same, near)).toBe(same);
+  });
+});
+
+describe("case folding", () => {
+  it("highlights the right characters when lower-casing changes the length", () => {
+    // "İ" lower-cases to two code units.
+    expect(highlightSegments("İstanbul", "stan")).toEqual([
+      { text: "İ", match: false },
+      { text: "stan", match: true },
+      { text: "bul", match: false },
+    ]);
+    expect(highlightSegments("xİy", "i")).toEqual([
+      { text: "x", match: false },
+      { text: "İ", match: true },
+      { text: "y", match: false },
+    ]);
+  });
+
+  it("folds per character, so a final sigma matches its query", () => {
+    expect(foldCase("ΟΔΟΣ")).toBe(foldCase("οδοσ"));
+    const nodes = indexJson({ street: "ΟΔΟΣ" });
+    expect(findMatches(nodes, "οδοσ")).toHaveLength(1);
   });
 });
