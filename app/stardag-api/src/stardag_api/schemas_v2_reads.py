@@ -199,7 +199,9 @@ class InstanceResponse(BaseModel):
 class TaskAnnotateRequest(BaseModel):
     """``PATCH /tasks/{task_id}``: the annotations to change. An omitted
     field is left as it is; ``tags`` replaces the whole set (``[]`` clears
-    it, ``null`` is refused); ``description: null`` or ``""`` clears it.
+    it, ``null`` is refused) — last writer wins: two clients adding a tag
+    each by read-modify-write can lose one of the additions, there is no
+    server-side add/remove; ``description: null`` or ``""`` clears it.
     Tags are normalised — trimmed, deduplicated, sorted — and refused (422)
     if empty, longer than 64 characters, carrying a control character, or
     more than 32 distinct."""

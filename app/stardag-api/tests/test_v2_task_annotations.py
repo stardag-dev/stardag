@@ -246,11 +246,13 @@ async def test_task_list_filters(client: AsyncClient, h: Harness):
     # Free text: case-insensitive, over name, namespace and description.
     assert await listed(q="baseline") == ids(train)
     assert await listed(q="EVAL") == ids(evaluate)
-    assert await listed(q="ml") == ids(train, train2, evaluate, load)
+    # "ml" is too short (3+); "ml." only in a namespace, " ml " only in a
+    # description.
+    assert await listed(q="raw") == ids(load)
     assert await listed(q="100%") == ids(load)
     assert await listed(q="o_d") == set()  # "_" is not a wildcard ("Load")
-    assert await listed(q="ml", tag="best", status="pending") == ids(train, train2)
-    assert await listed(q="ml", status="completed") == set()
+    assert await listed(q="TRAIN", tag="best", status="pending") == ids(train, train2)
+    assert await listed(q="Train", status="completed") == set()
 
     item_ = (await _get(client, "/tasks", tag="prod"))["tasks"][0]
     assert item_["tags"] == ["best", "prod"]
@@ -264,6 +266,7 @@ async def test_task_list_filters(client: AsyncClient, h: Harness):
         {"tag": ""},
         {"tag": "x" * 65},
         {"q": ""},
+        {"q": "ab"},
         {"id_prefix": ""},
         {"name": "n" * 256},
         {"q": "a\x00b"},
@@ -349,10 +352,10 @@ async def test_an_unknown_or_foreign_instance_is_404(
 async def test_search_patterns_are_bound_whole(
     client: AsyncClient, h: Harness, async_engine: AsyncEngine
 ):
-    """``q`` and ``id_prefix`` reach Postgres as one bound pattern each
-    (``ILIKE $n`` / ``LIKE $n``), never as ``'%' || $n || '%'``: the planner
-    derives an index condition (trigram, ``text_pattern_ops``) only from a
-    pattern it can see, so the concatenated form never uses the indexes."""
+    """``q`` reaches Postgres as one bound pattern (``ILIKE $n``), never as
+    ``'%' || $n || '%'``: the planner derives a trigram index condition
+    only from a pattern it can see. ``id_prefix`` is a ``~>=~``/``~<~``
+    range, which the ``text_pattern_ops`` index serves under any plan."""
     t = item("Train")
     await h.planned([t], [t])
     statements: list[tuple[str, Any]] = []
@@ -363,7 +366,6 @@ async def test_search_patterns_are_bound_whole(
     event.listen(async_engine.sync_engine, "before_cursor_execute", capture)
     try:
         page = await _get(client, "/tasks", q="rai", id_prefix=t.task_id[:8])
-    # The trigram index needs a pattern it can see; so does the btree.
     finally:
         event.remove(async_engine.sync_engine, "before_cursor_execute", capture)
     assert _ids(page) == [t.task_id]
@@ -371,5 +373,35 @@ async def test_search_patterns_are_bound_whole(
         (s, p) for s, p in statements if "ORDER BY task.status_at DESC" in s
     )
     assert "||" not in listing
+    assert "~>=~" in listing and "~<~" in listing and " LIKE " not in listing
     assert "%rai%" in [str(p) for p in params]
-    assert f"{t.task_id[:8]}%" in [str(p) for p in params]
+    assert t.task_id[:8] in [str(p) for p in params]
+
+
+async def test_id_prefix_is_an_exact_range(client: AsyncClient, h: Harness):
+    """The prefix range matches exactly the ids starting with it: a whole
+    id, one character more or less, and neighbours that share all but the
+    last character of the prefix."""
+    tasks = [item(f"T{i}") for i in range(40)]
+    await h.planned(tasks, tasks)
+    ids = sorted(t.task_id for t in tasks)
+
+    async def listed(prefix: str) -> list[str]:
+        return sorted(_ids(await _get(client, "/tasks", id_prefix=prefix)))
+
+    for task_id in ids[:5]:
+        assert await listed(task_id) == [task_id]
+        for n in (1, 2, 3):
+            expected = [i for i in ids if i.startswith(task_id[:n])]
+            assert await listed(task_id[:n]) == expected
+    assert await listed("g") == []  # past every hex digit
+    assert await listed("\U0010ffff") == []  # no successor: no upper bound
+
+
+def test_prefix_successor_edges():
+    from stardag_api.services.reads import _prefix_successor
+
+    assert _prefix_successor("ab") == "ac"
+    assert _prefix_successor("a\U0010ffff") == "b"
+    assert _prefix_successor("\U0010ffff") is None
+    assert _prefix_successor("\ud7ff") == "\ue000"  # over the surrogates

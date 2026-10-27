@@ -250,6 +250,26 @@ def _with_claim_build(stmt: Select[tuple[Task]]) -> Select[tuple[Task, UUID | No
 
 _LIKE_ESCAPE = "\\"
 
+_MAX_CODE_POINT = 0x10FFFF
+_SURROGATES = range(0xD800, 0xE000)
+
+
+def _prefix_successor(prefix: str) -> str | None:
+    """The least string greater than every string starting with ``prefix``,
+    in bytewise (UTF-8, so code point) order; ``None`` if there is none.
+
+    The last character incremented (over the surrogates, which UTF-8 cannot
+    encode); a trailing U+10FFFF has no successor, so it is dropped and the
+    one before it incremented instead."""
+    chars = list(prefix)
+    while chars:
+        code = ord(chars.pop()) + 1
+        if code <= _MAX_CODE_POINT:
+            if code in _SURROGATES:
+                code = _SURROGATES.stop
+            return "".join(chars) + chr(code)
+    return None
+
 
 def _like_escape(value: str) -> str:
     """``value`` matched literally inside a ``LIKE`` pattern."""
@@ -294,13 +314,20 @@ async def list_tasks(
     - ``q``: case-insensitive substring of the name, the namespace or the
       description.
 
-    ``%`` and ``_`` in ``id_prefix`` and ``q`` match themselves. Indexes
+    ``%`` and ``_`` in ``q`` match themselves; ``id_prefix`` is a range,
+    not a pattern. Indexes
     (``models/task.py``): ``ix_task_environment_status_at`` for the order
     and keyset, ``ix_task_search_trgm`` for ``q`` (3+ characters),
     ``ix_task_environment_task_id_prefix`` for ``id_prefix``,
-    ``ix_task_tags`` for ``tags``. The filters only narrow the set; the order and the keyset cursor are those of the
-    unfiltered listing, so paging stays gap- and repeat-free as long as the
-    same filters are passed with each cursor."""
+    ``ix_task_tags`` for ``tags``.
+
+    The filters only narrow the set: the order and the keyset cursor
+    (``(status_at, id)``) are those of the unfiltered listing, so pass the
+    same filters with each cursor. The cursor is a position, not a
+    snapshot: a task whose status changes while a caller pages moves to the
+    front (its ``status_at`` advances), so it is not seen again on a later
+    page if it was already passed, and is skipped if it was not reached
+    yet. Tasks that do not change are each listed exactly once."""
     limit = max(1, min(limit, MAX_LIST_LIMIT))
     stmt = _with_claim_build(select(Task)).where(
         Task.environment_id == environment_id, Task.status_at.is_not(None)
@@ -317,9 +344,14 @@ async def list_tasks(
     # derives an index condition from a pattern it can see (a custom plan),
     # never from ``'%' || $1 || '%'`` assembled at run time.
     if id_prefix:
-        stmt = stmt.where(
-            Task.task_id.like(f"{_like_escape(id_prefix)}%", escape=_LIKE_ESCAPE)
-        )
+        # A range in ``text_pattern_ops``' bytewise order rather than ``LIKE
+        # 'p%'``: ``ix_task_environment_task_id_prefix`` serves it under any
+        # plan, a generic one included, where ``LIKE $1`` has no prefix the
+        # planner could extract.
+        stmt = stmt.where(Task.task_id.op("~>=~")(id_prefix))
+        upper = _prefix_successor(id_prefix)
+        if upper is not None:
+            stmt = stmt.where(Task.task_id.op("~<~")(upper))
     if q:
         pattern = f"%{_like_escape(q)}%"
         stmt = stmt.where(

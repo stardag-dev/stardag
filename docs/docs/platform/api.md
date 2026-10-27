@@ -192,9 +192,11 @@ POST /api/v2/tasks/{task_id}/claim/renew                           # Renew an in
 ```
 GET /api/v2/tasks                        # Tasks, most recent status change first (?status, ?limit, ?cursor; next_cursor)
                                          #   filters AND together: ?namespace, ?name (exact), ?tag (repeatable: all of them),
-                                         #   ?id_prefix, ?q (case-insensitive substring of name, namespace or description)
+                                         #   ?id_prefix, ?q (3+ characters; case-insensitive substring of name, namespace or description)
 GET /api/v2/tasks/{task_id}              # The task: status, claim (claim_plan_id, claim_build_id), current execution, tags, description, instances
 PATCH /api/v2/tasks/{task_id}            # Annotate: {tags?, description?}; omitted = unchanged, tags replace the set (normalised)
+                                         #   tags are last-writer-wins: no server-side add/remove, so concurrent
+                                         #   read-modify-write edits of the set can lose one of the changes
 GET /api/v2/instances/{instance_id}      # One instance: id, task_id, deployment_id, settings_hash, instance_hash, body, created_at, expanded_at
 GET /api/v2/tasks/{task_id}/executions   # Its executions across builds, newest first (?include_ended, default true; ?limit)
 GET /api/v2/tasks/{task_id}/artifacts    # This task's artifacts
