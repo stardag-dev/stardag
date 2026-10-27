@@ -431,6 +431,8 @@ async def _spawn(
                 error_message=f"Spawn failed: {type(error).__name__}: {error}",
             )
         except Exception as e:
+            if not is_registry_outage(e):
+                raise
             # Nothing ran; the claim lapses on its own.
             logger.warning(
                 f"Could not record the failed spawn of task {member.task_id} "

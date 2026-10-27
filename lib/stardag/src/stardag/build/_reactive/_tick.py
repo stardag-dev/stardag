@@ -439,7 +439,10 @@ class _Driver:
         finally:
             current_build_context_var.reset(token)
         self.admission.after_pass()
-        if result.lease_lost:
+        # The pass checks the lease before each action, not after its last:
+        # one that lapsed during the final spawn stops the tick here, before
+        # a drain could spawn neighbours into the same outage.
+        if result.lease_lost or lease.lost:
             self.summary.outcome = "lease_lost"
             return True, result.acted
         if result.superseded:

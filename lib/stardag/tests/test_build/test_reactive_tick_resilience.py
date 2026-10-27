@@ -303,6 +303,24 @@ async def test_a_ref_the_registry_did_not_answer_for_is_not_an_orphan(
     assert executor.cancel_detached_calls == []
 
 
+async def test_a_refused_spawn_failure_record_still_fails_the_pass(
+    default_in_memory_fs_target: Target,
+):
+    """Copilot on #506: only an outage recording a failed spawn is let go;
+    a refusal propagates (after the siblings finish)."""
+    task = SyncOnlyTask(name=f"t-{new_id()}")
+
+    class FailRecordRefused(InMemoryRegistry):
+        def member_fail(self, *args, **kwargs):
+            raise APIError("unprocessable", status_code=422)
+
+    registry = FailRecordRefused()
+    build_id, _ = await _plan(registry, [task])
+    executor = FakeDetachedExecutor(registry=registry, spawn_error=RuntimeError("no"))
+    with pytest.raises(APIError):
+        await tick(registry, build_id, executor, ONE_PASS)
+
+
 async def test_a_spawn_failure_that_cannot_be_recorded_does_not_fail_the_pass(
     default_in_memory_fs_target: Target,
 ):
