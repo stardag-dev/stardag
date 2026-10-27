@@ -317,9 +317,15 @@ async def test_task_annotations_migrate_over_existing_rows(migrated_database_url
         ):
             await _in_annotations_schema(engine, statement)
 
-        await _in_annotations_schema(
-            engine, step=lambda c: command.upgrade(c, ANNOTATIONS)
-        )
+        # Inside the caller's transaction no autocommit is possible: the
+        # indexes are built plainly, in that transaction.
+        with _capturing_statements() as statements:
+            await _in_annotations_schema(
+                engine, step=lambda c: command.upgrade(c, ANNOTATIONS)
+            )
+        creates = [s for s in statements if s.startswith("CREATE INDEX")]
+        assert len(creates) == 4
+        assert all(s.startswith("CREATE INDEX IF NOT EXISTS") for s in creates)
         assert await _in_annotations_schema(
             engine,
             "SELECT tags = '{}' AND description IS NULL FROM task WHERE task_id = 't'",
@@ -368,3 +374,143 @@ async def test_task_annotations_migrate_over_existing_rows(migrated_database_url
                 text(f"DROP SCHEMA IF EXISTS {ANNOTATIONS_SCHEMA} CASCADE")
             )
         await engine.dispose()
+
+
+def _capturing_statements():
+    """Every statement any engine sends, while the context is open."""
+    import contextlib
+
+    from sqlalchemy import event
+    from sqlalchemy.engine import Engine
+
+    @contextlib.contextmanager
+    def capture():
+        statements: list[str] = []
+
+        def listener(conn, cursor, statement, *args):  # noqa: ARG001
+            statements.append(statement)
+
+        event.listen(Engine, "before_cursor_execute", listener)
+        try:
+            yield statements
+        finally:
+            event.remove(Engine, "before_cursor_execute", listener)
+
+    return capture()
+
+
+CONCURRENT_SCHEMA = "annotations_concurrent"
+
+
+async def test_task_annotation_indexes_build_concurrently_and_rerun_after_a_failure(
+    migrated_database_url: str,
+):
+    """On a connection Alembic owns (how a deployment migrates), the indexes
+    are built ``CONCURRENTLY`` in an autocommit block. That block commits
+    the columns first, so the upgrade must survive a re-run after a failed
+    build: an index a failed concurrent build left INVALID is dropped and
+    rebuilt, not skipped by ``IF NOT EXISTS``, and the already-added
+    columns are no error. No superuser needed (CI migrates as a plain
+    owner role): the INVALID index is a real failed concurrent build."""
+    from sqlalchemy.pool import NullPool
+
+    engine = create_async_engine(migrated_database_url, poolclass=NullPool)
+    config = get_alembic_config(engine.url.render_as_string(hide_password=False))
+
+    async def on_owned_connection(fn) -> list[str]:
+        """``fn(sync_conn)`` on a connection outside any transaction, with
+        the scratch schema on its (session-level) ``search_path``."""
+        async with engine.connect() as conn:
+            await conn.execute(text(f"SET search_path TO {CONCURRENT_SCHEMA}"))
+            await conn.commit()
+            with _capturing_statements() as statements:
+                await conn.run_sync(fn)
+            return statements
+
+    def alembic(step):
+        def run(sync_conn) -> None:
+            config.attributes["connection"] = sync_conn
+            step(config)
+
+        return run
+
+    def autocommit(sql: str):
+        def run(sync_conn) -> None:
+            sync_conn.execution_options(isolation_level="AUTOCOMMIT").execute(text(sql))
+
+        return run
+
+    async with engine.begin() as conn:
+        await conn.execute(text(f"DROP SCHEMA IF EXISTS {CONCURRENT_SCHEMA} CASCADE"))
+        await conn.execute(text(f"CREATE SCHEMA {CONCURRENT_SCHEMA}"))
+    try:
+        await on_owned_connection(
+            alembic(lambda c: command.upgrade(c, PRE_ANNOTATIONS))
+        )
+        statements = await on_owned_connection(
+            alembic(lambda c: command.upgrade(c, ANNOTATIONS))
+        )
+        creates = [s for s in statements if s.startswith("CREATE INDEX")]
+        assert len(creates) == 4
+        assert all(
+            s.startswith("CREATE INDEX CONCURRENTLY IF NOT EXISTS") for s in creates
+        )
+        valid = (
+            "SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid"
+            f" WHERE i.indisvalid AND c.relnamespace = '{CONCURRENT_SCHEMA}'::regnamespace"
+            " AND c.relname IN ('ix_task_tags', 'ix_task_search_trgm',"
+            " 'ix_task_environment_task_id_prefix', 'ix_task_environment_status_at')"
+        )
+        assert await _in_concurrent_schema(engine, valid) == 4
+
+        # A failed run: the columns committed, one index left INVALID by a
+        # failed concurrent build (a UNIQUE one over duplicates), and the
+        # version not advanced.
+        for statement in (
+            "INSERT INTO workspaces (id, name, slug, created_at) VALUES"
+            " ('00000000-0000-0000-0000-00000000000a', 'w', 'w', now())",
+            "INSERT INTO environments (id, workspace_id, name, slug, created_at)"
+            " VALUES ('00000000-0000-0000-0000-00000000000b',"
+            " '00000000-0000-0000-0000-00000000000a', 'e', 'e', now())",
+            "INSERT INTO task (id, environment_id, task_id, task_name, created_at)"
+            " SELECT gen_random_uuid(), '00000000-0000-0000-0000-00000000000b',"
+            " 't' || g, 'Same', now() FROM generate_series(1, 2) g",
+            "DROP INDEX ix_task_search_trgm",
+        ):
+            await on_owned_connection(autocommit(statement))
+        with pytest.raises(Exception, match="could not create unique index"):
+            await on_owned_connection(
+                autocommit(
+                    "CREATE UNIQUE INDEX CONCURRENTLY ix_task_search_trgm"
+                    " ON task (task_name)"
+                )
+            )
+        assert await _in_concurrent_schema(engine, valid) == 3
+        await on_owned_connection(alembic(lambda c: command.stamp(c, PRE_ANNOTATIONS)))
+        statements = await on_owned_connection(
+            alembic(lambda c: command.upgrade(c, ANNOTATIONS))
+        )
+        assert 'DROP INDEX CONCURRENTLY IF EXISTS "ix_task_search_trgm"' in statements
+        assert await _in_concurrent_schema(engine, valid) == 4
+
+        await on_owned_connection(
+            alembic(lambda c: command.downgrade(c, PRE_ANNOTATIONS))
+        )
+        assert not await _in_concurrent_schema(
+            engine,
+            "SELECT count(*) FROM information_schema.columns"
+            f" WHERE table_schema = '{CONCURRENT_SCHEMA}' AND table_name = 'task'"
+            " AND column_name IN ('tags', 'description')",
+        )
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(f"DROP SCHEMA IF EXISTS {CONCURRENT_SCHEMA} CASCADE")
+            )
+        await engine.dispose()
+
+
+async def _in_concurrent_schema(engine, sql: str):
+    async with engine.begin() as conn:
+        await conn.execute(text(f"SET LOCAL search_path TO {CONCURRENT_SCHEMA}"))
+        return await conn.scalar(text(sql))
