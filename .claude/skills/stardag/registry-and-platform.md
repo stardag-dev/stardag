@@ -4,13 +4,15 @@
 
 The Stardag platform consists of:
 
-- **Registry API** (`stardag-api`, server `0.6`): FastAPI backend — the ledger of tasks,
+- **Registry API** (`stardag-api`, server `0.7`): FastAPI backend — the ledger of tasks,
   task instances, plans, deployments, settings and executions
 - **Registry UI** (`stardag-ui`): React frontend for monitoring and exploration
 - **CLI** (`stardag` command): builds, inspection, auth, configuration, Modal, self-hosting
 
-The SDK integrates with the API optionally — tasks work standalone without it. The SDK and the
-server upgrade **together**: there is no compatibility between v1 and v2 in either direction.
+The SDK integrates with the API optionally — tasks work standalone without it. There is no
+compatibility between v1 and v2 in either direction. Within v2, a newer SDK degrades against
+an older v2 server: a feature that needs a newer route stays inert rather than failing the
+build. Upgrade the server first all the same.
 
 ## The Registry as a Ledger
 
@@ -45,25 +47,35 @@ What a user of the SDK needs from this:
 Registry routes live under **`/api/v2`**; auth, UI, workspace and target-root routes stay under
 `/api/v1`. The full list is `docs/docs/platform/api.md`.
 
-| Endpoint                                                     | Method         | Purpose                                                              |
-| ------------------------------------------------------------ | -------------- | -------------------------------------------------------------------- |
-| `/api/v2/version`                                            | GET            | Server and API version (no auth)                                     |
-| `/api/v2/deployments`, `/deployments/{id}/activate`          | GET/POST       | Record, activate and list deployments                                |
-| `/api/v2/settings/{settings_hash}`                           | GET            | A stored settings body                                               |
-| `/api/v2/builds`, `/builds/{id}`                             | GET/POST       | Create, list, read builds                                            |
-| `/api/v2/builds/{id}/{complete,fail,cancel,resume}`          | POST           | Build lifecycle (cancel releases every plan's claims)                |
-| `/api/v2/builds/{id}/frontier`                               | GET            | Runnable / discovery-job / running members                           |
-| `/api/v2/builds/{id}/executions`                             | GET            | The build's unended (or all) executions                              |
-| `/api/v2/builds/{id}/plans`, `/plans/{id}[/graph]`           | GET            | Plans, their members and instance edges                              |
-| `/api/v2/plans/{id}/members[/{task_id}/...]`                 | POST           | Register, seal, start (claim), complete, fail, yield, retry, exclude |
-| `/api/v2/tasks`, `/tasks/{id}[/executions,events,artifacts]` | GET            | Tasks and their history                                              |
-| `/api/v2/executions/{id}/stopped`                            | POST           | Record a stop (`stopped` / `lost`)                                   |
-| `/api/v2/concurrency-limits[/{key}]`                         | GET/PUT/DELETE | Named environment-wide limits                                        |
-| `/api/v1/auth/exchange`                                      | POST           | OIDC token exchange                                                  |
+| Endpoint                                                      | Method         | Purpose                                                              |
+| ------------------------------------------------------------- | -------------- | -------------------------------------------------------------------- |
+| `/api/v2/version`                                             | GET            | Server and API version (no auth)                                     |
+| `/api/v2/deployments`, `/deployments/{id}/activate`           | GET/POST       | Record, activate and list deployments                                |
+| `/api/v2/settings/{settings_hash}`                            | GET            | A stored settings body                                               |
+| `/api/v2/builds`, `/builds/{id}`                              | GET/POST       | Create, list, read builds                                            |
+| `/api/v2/builds/{id}/{complete,fail,cancel,resume}`           | POST           | Build lifecycle (cancel releases every plan's claims)                |
+| `/api/v2/builds/{id}/frontier`                                | GET            | Runnable / discovery-job / running members                           |
+| `/api/v2/builds/{id}/executions`                              | GET            | The build's unended (or all) executions                              |
+| `/api/v2/builds/{id}/plans`, `/plans/{id}[/graph]`            | GET            | Plans, their members and instance edges                              |
+| `/api/v2/plans/{id}/members[/{task_id}/...]`                  | POST           | Register, seal, start (claim), complete, fail, yield, retry, exclude |
+| `/api/v2/tasks`, `/tasks/{id}[/executions,events,artifacts]`  | GET            | Tasks and their history                                              |
+| `/api/v2/executions/{id}/stopped`                             | POST           | Record a stop (`stopped` / `lost`); `only_if_unspawned` conditional  |
+| `/api/v2/builds/{id}/{notify,scheduler-lease,tick-summaries}` | various        | Reactive scheduler: wake-up flag, lease, tick reports                |
+| `/api/v2/builds/wake-candidates`                              | POST           | Flagged builds no scheduler serves, handed out once per window       |
+| `/api/v2/stalled-builds`                                      | GET            | Running reactive builds nobody has served for `older_than_seconds`   |
+| `/api/v2/concurrency-limits[/{key}]`                          | GET/PUT/DELETE | Named environment-wide limits                                        |
+| `/api/v1/auth/exchange`                                       | POST           | OIDC token exchange                                                  |
 
 Refusals carry a code (`instance_conflict`, `plan_superseded`, `reserved_settings_key`,
-`concurrency_limit_reached`, ...). A v2 SDK against a v1 server fails on its first call with a
-404 (`NotFoundError`): the routes do not exist there.
+`concurrency_limit_reached`, `execution_spawned`, `rate_limited`, ...). A v2 SDK against a
+v1 server fails on its first call with a 404 (`NotFoundError`): the routes do not exist there.
+
+**Rate limits.** Writes are limited per workspace (`LIMITS_MAX_REQUESTS_PER_MINUTE`; 429
+`rate_limited`, which the SDK waits out and re-sends). Writes that finish running work (end
+reports, claim and lease renewals, lease release, notify, an operator's stop) have their own
+window at 10× the limit, so a busy workspace finishes what it runs before it takes on more.
+A self-hosted operator can set one workspace's limit in the database
+(`workspaces.max_write_requests_per_minute`; `0` blocks new work). No API route exposes it.
 
 ### Authentication Methods
 
@@ -115,7 +127,8 @@ no plan, no claims. Tasks still execute and persist to local targets normally.
 `stardag.registry.RegistryABC` is organised around plans and members: `build_create`,
 `plan_create`, `plan_register_members`, `plan_seal`, `member_start` (the claiming start),
 `member_complete` / `member_fail` / `member_yield`, `build_complete` / `build_fail`,
-deployments, settings and executions (each with an `_aio` twin). A custom registry is written
+deployments, settings and executions (each with an `_aio` twin), plus sync reads such as
+`build_list_stalled`. A custom registry is written
 against it; `stardag.testing.InMemoryRegistry` is the reference implementation that follows
 the server's seams, and the one to use in tests:
 
@@ -157,6 +170,9 @@ stardag builds list [--status S] [--app NAME]        # most recently active firs
 stardag builds show <build-id>                       # status, failure reason, active plan
 stardag builds frontier <build-id>                   # what a tick sees: discovery jobs, runnable, running
 stardag builds ticks <build-id>                      # the reactive scheduler's recent ticks
+stardag builds tick <build-id>                       # start a reactive build's scheduler by hand
+stardag builds tick --flagged                        # ... for every flagged, unserved build
+stardag builds stalled [--older-than 5m]             # running reactive builds nobody serves
 stardag builds cancel <build-id>                     # release claims; stops nothing
 stardag builds stop <build-id> [--dry-run]           # stop unended executions, then cancel
 stardag builds stop <build-id> --not-in-current-plan # only orphans of a rollover (implies --no-cancel)
@@ -171,6 +187,17 @@ the ledger, cancels each Modal call it can identify, reports it stopped, and can
 unless `--no-cancel`. Filters: `--executor`, `--worker`, `--namespace`, `--older-than 2h`,
 `--task-id`. Use `--mark-lost` only when the container is known gone: a later report from a
 lost execution is refused.
+
+`builds tick` flags the build and, unless a scheduler holds its lease, spawns its app's `tick`
+in the Modal environment the build records. It needs the `modal` extra and a Modal token for
+that workspace. It is the manual fallback for a stalled reactive build when no watchdog is
+deployed. `builds stalled` should normally be empty. It lists builds that were flagged with no
+scheduler, or whose last tick died holding the lease.
+
+After `tasks retry`, `cancel` and `exclude`, and `builds stop` when the build keeps running,
+the CLI starts that build's tick itself (unless one is running), when it holds a Modal token
+for the build's workspace. Otherwise it flags the build and prints the `builds tick` command.
+The write never fails because its wake-up did.
 
 ### Plans, deployments, executions, tasks
 

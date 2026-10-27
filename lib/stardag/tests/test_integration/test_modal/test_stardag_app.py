@@ -2891,6 +2891,94 @@ class TestUnreachableWorkerWarning:
         assert "worker_selector" not in caplog.text
 
 
+class TestRetriesOnSelfReportingWorkerWarning:
+    """finalize() warns about Modal ``retries`` on a worker whose run
+    function reports its own lifecycle.
+
+    Such a worker records a raised exception as ``FAILED``, which ends the
+    execution, so a Modal retry of the call stops at its start-of-attempt
+    checkpoint: a container start that re-runs nothing. A warning, not a
+    refusal -- ``retries`` still re-runs an attempt that recorded nothing.
+    """
+
+    _LOGGER = "stardag.integration.modal._functions"
+
+    @staticmethod
+    def _app(worker: FunctionSettings, **kwargs) -> StardagApp:
+        return StardagApp(
+            "test-retries",
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={"default": worker},
+            **kwargs,
+        )
+
+    def _warnings(self, app: StardagApp, caplog) -> list[str]:
+        with caplog.at_level("WARNING", logger=self._LOGGER):
+            _finalize_capturing_functions(app)
+        return [
+            r.getMessage()
+            for r in caplog.records
+            if r.name == self._LOGGER and "retries=" in r.getMessage()
+        ]
+
+    def test_warns_for_an_int(self, caplog):
+        app = self._app(FunctionSettings(image=_make_image(), retries=3))
+
+        (message,) = self._warnings(app, caplog)
+
+        assert "'worker_default'" in message
+        assert "retries=3" in message
+        assert "stardag tasks retry" in message
+
+    def test_warns_for_a_modal_retries(self, caplog):
+        app = self._app(
+            FunctionSettings(
+                image=_make_image(),
+                retries=modal.Retries(max_retries=2, initial_delay=1.0),
+            )
+        )
+
+        (message,) = self._warnings(app, caplog)
+
+        assert "retries=2" in message
+
+    @pytest.mark.parametrize(
+        "retries",
+        [0, modal.Retries(max_retries=0, initial_delay=1.0)],
+        ids=["int", "modal-retries"],
+    )
+    def test_silent_for_zero_retries(self, caplog, retries):
+        app = self._app(FunctionSettings(image=_make_image(), retries=retries))
+
+        assert self._warnings(app, caplog) == []
+
+    def test_silent_when_retries_is_unset(self, caplog):
+        app = self._app(FunctionSettings(image=_make_image()))
+
+        assert self._warnings(app, caplog) == []
+
+    def test_silent_for_a_run_function_that_does_not_report(self, caplog):
+        """The build engine reports the outcome once Modal's retries are
+        spent, so every retry is a real one."""
+        app = self._app(
+            FunctionSettings(image=_make_image(), retries=3),
+            run_function=Runner(report_lifecycle=False),
+        )
+
+        assert self._warnings(app, caplog) == []
+
+    def test_silent_for_the_builder(self, caplog):
+        """Restarting a crashed build function is a legitimate use: the
+        build resumes from the registry."""
+        app = StardagApp(
+            "test-retries",
+            builder_settings=FunctionSettings(image=_make_image(), retries=2),
+            worker_settings={"default": FunctionSettings(image=_make_image())},
+        )
+
+        assert self._warnings(app, caplog) == []
+
+
 ENTRY_POINT_SOURCE = '''\
 """Stands in for a deploy entry point — a conventional modal/app.py."""
 

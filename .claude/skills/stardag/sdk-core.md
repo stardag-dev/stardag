@@ -12,6 +12,10 @@ All tasks inherit from `BaseTask`. It provides:
 - `requires()`: Declare dependencies (return single task, list, or dict)
 - `get_name()`, `get_namespace()`, `get_version()`: Task metadata
 
+A concrete task class implements `run()` or `run_aio()`. The check runs when the class is
+first **constructed** (or validated), not when it is defined, so an abstract intermediate
+base without `run()` is fine; constructing it raises `TaskImplementationError`.
+
 ### LoadableTask[T] (No Filesystem Target)
 
 For tasks that produce data without persisting to filesystem targets:
@@ -122,7 +126,10 @@ sd.build(root)
 ```
 
 **Important**: `sd.Depends[T]` is the decorator API equivalent of `sd.TaskLoads[T]`.
-Both accept any `LoadableTask[T]` subclass, enabling polymorphic composition.
+Both accept any `LoadableTask[T]` subclass, enabling polymorphic composition. A
+`Depends` parameter takes a **task**: passing a raw value (`with_dependency(upstream=[1, 2])`)
+is a `ValidationError`. `@sd.task` resolves annotations, so a module using
+`from __future__ import annotations` behaves exactly like one without it.
 
 ## Dependencies
 
@@ -246,6 +253,18 @@ print(summary.build_id)
   purely local — no plan, no claims.
 - **`on_registry_failure="warn"`** carries on through a registry _outage_; a _refusal_ (an
   instance conflict, a reserved settings key) always raises.
+
+**Registry transport.** Every registry call retries a lost answer (timeout, network error, a
+body cut short, 502/503/504, Modal proxy 500) up to three times with jittered backoff, and
+waits out the registry's rate limit (429 `rate_limited`, at least `Retry-After`, about 150 s
+in total). An answer the server wrote (any other error) is never retried. Each retry is
+logged as a warning and counted:
+
+```python
+from stardag.registry._api_http import transport_retry_counts
+
+transport_retry_counts()  # e.g. {"HTTP 429": 3, "ReadTimeout": 1}
+```
 
 ### Settings: build-wide values that are not parameters
 
@@ -416,6 +435,10 @@ Same significant parameters → same ID → same output path → skips re-execut
 what a task produces, change its task id (bump `__version__` or add/change a significant
 parameter); downstream ids follow on their own. Nothing marks a completed task incomplete by
 fiat: delete its target and build again.
+
+To derive a variant, `task.model_copy(update={"a": 2})` is safe: the copy drops the source's
+cached identity (`id`, `instance_hash`, and any `functools.cached_property`) and recomputes
+it from its own fields, so `copy.id == MyTask(a=2).id`.
 
 ## Versioning
 

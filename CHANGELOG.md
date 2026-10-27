@@ -87,6 +87,23 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 - **Note: a task field named `ref`** now shadows `Task.ref`: pydantic
   warns at class definition, the field still works, and that class loses
   `.ref(...)`.
+- **Corrected: a worker's `retries=` does not recover a task that raises**
+  (STA-154). The docs and the `FunctionSettings.retries` docstring said
+  Modal's retry covers an exception raised inside the container. Under the
+  default `Runner` the worker records that exception `FAILED`, which ends
+  the execution, and the retry stops at its start-of-attempt checkpoint:
+  a container start that runs nothing. A retry re-runs the task only when
+  the attempt recorded nothing — an exception before the failure report
+  (in `setup()`, or a report that never landed), or a function timeout the
+  task did not catch. Retry transient errors inside the task, and a real
+  failure with `stardag tasks retry` or a re-trigger. `stardag modal
+deploy` now **warns** about a worker with `retries` above zero (an `int`
+  or a `modal.Retries`) whose run function reports its own lifecycle. A
+  warning, not a refusal, since the cases above are still covered. No
+  behaviour change otherwise.
+- **`FunctionSettings.retries` accepts a `modal.Retries`** as well as a count
+  (STA-146). It was always passed through to Modal unchanged; only the type
+  said `int`, so setting the retry backoff took a type ignore.
 - **Fixed: a detached claim could record no executor** (STA-90). The
   claiming start of a detached execution (a reactive tick's spawn, or a
   resident build's Modal-routed task) carried only the best-effort executor
@@ -263,6 +280,16 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   unspawned claims to their TTL. New executor hooks:
   `TaskExecutorABC.reconciles()` and `probe_detached()`, implemented for
   Modal. The tick summary counts `reconciled`.
+
+- **Docs: the bundled agent skill (`.claude/skills/stardag/`) is brought up
+  to date** (STA-153). It had not changed since 0.27.0, so it was missing
+  everything since: tasks sent to Modal as instance bodies, the reactive
+  pre-flight, reconciliation and the worker rule, `reports_lifecycle`,
+  worker timeouts and claim TTLs, the new `TickConfig` defaults and knobs,
+  `builds tick` / `builds stalled`, the CLI's own wake-ups, transport and
+  rate-limit retries, the per-workspace rate limit, and the second-signal
+  checkpoint recipe. Its README now records the commit it was last synced
+  at.
 
 ### Server
 
