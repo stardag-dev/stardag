@@ -55,12 +55,13 @@ const TASK_INFO = new Map<string, ExecutionTaskInfo>([
   ["task-bbbbbbbb", { namespace: "demo", name: "Brew", status: "running" }],
 ]);
 
-function renderDialog(buildStatus: BuildStatus = "running") {
+function renderDialog(buildStatus: BuildStatus = "running", planOnly = false) {
   return render(
     <BuildControlsDialog
       buildId={BUILD}
       environmentId="env-1"
       buildStatus={buildStatus}
+      planOnly={planOnly}
       onBuildChanged={vi.fn()}
       taskInfo={TASK_INFO}
     />,
@@ -397,6 +398,17 @@ describe("BuildControlsDialog overrides", () => {
       await user.click(screen.getByRole("button", { name: "Cancel build" }));
     });
     await waitFor(() => expect(cancelBuild).toHaveBeenCalledWith(BUILD, "env-1"));
+  });
+
+  it("offers no Mark completed on a plan-only build, only fail and cancel", async () => {
+    vi.mocked(fetchBuildExecutions).mockResolvedValue([]);
+    const user = userEvent.setup();
+    renderDialog("pending", true);
+    await open(user);
+    await screen.findByText(/nothing to stop/);
+    expect(screen.queryByRole("button", { name: "Mark completed" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Mark failed" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel build" })).toBeInTheDocument();
   });
 
   it("offers no override on a build whose record is already final", async () => {

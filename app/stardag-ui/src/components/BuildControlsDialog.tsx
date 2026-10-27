@@ -35,6 +35,9 @@ interface BuildControlsDialogProps {
   buildId: string;
   environmentId: string;
   buildStatus: BuildStatus;
+  // A plan-only build: Mark completed is not offered (see
+  // BuildOverrideSection).
+  planOnly?: boolean;
   // Bumped by the parent on every refresh.
   refreshToken?: number;
   onBuildChanged: (build: Build) => void;
@@ -58,6 +61,7 @@ export function BuildControlsDialog({
   buildId,
   environmentId,
   buildStatus,
+  planOnly = false,
   refreshToken = 0,
   onBuildChanged,
   onOpenTask,
@@ -383,6 +387,7 @@ export function BuildControlsDialog({
             buildId={buildId}
             environmentId={environmentId}
             buildStatus={buildStatus}
+            planOnly={planOnly}
             runningExecutions={
               executions === null || error !== null
                 ? "unknown"

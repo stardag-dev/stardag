@@ -374,14 +374,18 @@ the line that pins the registered instance:
 ```python
 import stardag as sd
 
-sd.register(trained_model)
+(registered,) = sd.register(trained_model)
 # Registered build 0193... (nothing was run):
 #   from my_project.models import TrainedModel
 #   TrainedModel.ref("<task_id>", instance_id="<instance_id>")
+registered.instance_id  # also .task_id, .ref_line
 ```
 
-It returns the roots' instance ids. `sd.build(tasks, plan_only=True)` does
-the same and returns a `BuildSummary` whose status is `REGISTERED`. Pass
+It returns one handle per root, carrying its `task_id`, `instance_id` and
+the printed `ref_line`. A class defined in the script being run
+(`__main__`) gets a note instead of an import line, since other code cannot
+import it from there. `sd.build(tasks, plan_only=True)` does the same and
+returns a `BuildSummary` whose status is `REGISTERED`. Pass
 `app_name=` to `sd.register` (or a Modal `task_executor` to `sd.build`) to
 register under a deployed app's current deployment, the scope its reactive
 builds plan under.
@@ -399,7 +403,9 @@ A plan-only build never carries on without the registry
 (`on_registry_failure` does not apply), and a registry that predates
 plan-only builds refuses it with `PlanOnlyUnsupportedError`; upgrade the
 registry. A plan-only build whose driver died before it finished shows as
-"registration incomplete" in the UI; nothing runs from it, so cancel it and
+"registration incomplete" in the UI and stays `pending`; it holds no claim
+and runs nothing, so it is harmless, but `stardag builds list --status
+pending` finds it and `stardag builds cancel <build-id>` closes it. Then
 register again.
 
 ### Concurrency limits across builds

@@ -362,6 +362,7 @@ function BuildViewForIdentity({
                     buildId={buildId}
                     environmentId={environmentId}
                     buildStatus={build.status}
+                    planOnly={build.plan_only}
                     refreshToken={refreshToken}
                     onBuildChanged={handleBuildChanged}
                     onOpenTask={setSelectedTaskId}
