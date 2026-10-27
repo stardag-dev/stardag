@@ -8,6 +8,9 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **`FunctionSettings.retries` accepts a `modal.Retries`** as well as a count
+  (STA-146). It was always passed through to Modal unchanged; only the type
+  said `int`, so setting the retry backoff took a type ignore.
 - **Fixed: a detached claim could record no executor** (STA-90). The
   claiming start of a detached execution (a reactive tick's spawn, or a
   resident build's Modal-routed task) carried only the best-effort executor
