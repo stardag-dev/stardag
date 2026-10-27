@@ -166,8 +166,13 @@ def write(partition: str, info: TaskInstanceInfo) -> None:
 
 
 def has_entry(partition: str, instance_id: UUID | str) -> bool:
-    """Whether an entry exists (not whether it is readable)."""
-    return _entry_path(partition, instance_id).is_file()
+    """Whether an entry exists (not whether it is readable). An
+    inaccessible cache directory reads as no entry, like every other cache
+    failure."""
+    try:
+        return _entry_path(partition, instance_id).is_file()
+    except OSError:
+        return False
 
 
 def discard(partition: str, instance_id: UUID | str) -> bool:

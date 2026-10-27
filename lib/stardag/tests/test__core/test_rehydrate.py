@@ -8,7 +8,7 @@ import pytest
 
 import stardag as sd
 from stardag import TaskRehydrationError, task_from_registry_data
-from stardag.polymorphic import NAME_KEY, NAMESPACE_KEY
+from stardag.polymorphic import NAME_KEY, NAMESPACE_KEY, PolymorphicRoot
 from stardag.target import InMemoryFileTarget
 
 sd.auto_namespace(__name__)
@@ -33,6 +33,23 @@ class RehydrateClassTask(sd.Task[int]):
 
     def run(self):
         self._save(self.factor * sum(self.values.load()))
+
+
+class RehydrateOptimizer(PolymorphicRoot):
+    """A non-task polymorphic family: its classes register in its own
+    registry, not the task registry."""
+
+
+class RehydrateAdam(RehydrateOptimizer):
+    lr: float = 0.1
+
+
+class RehydrateWithOptimizer(sd.Task[int]):
+    optimizer: sd.SubClass[RehydrateOptimizer]
+    epochs: int
+
+    def run(self):
+        self._save(self.epochs)
 
 
 class RehydrateDynamicTask(sd.Task[int]):
@@ -221,6 +238,21 @@ class TestTaskFromBody:
         )
         assert "Import the module that defines" in message
         assert "task_data" not in message and "'" not in message
+
+    def test_a_non_task_polymorphic_value_is_not_reported_missing(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A ``SubClass`` of another family is not in the task registry; it
+        must not be blamed when an unrelated field is what fails."""
+        task = RehydrateWithOptimizer(optimizer=RehydrateAdam(), epochs=3)
+        body = task.instance_body()
+        assert sd.task_from_body(body, expected_task_id=task.id) == task
+        body["epochs"] = "not a number"
+        with pytest.raises(TaskRehydrationError) as info:
+            sd.task_from_body(body)
+        message = str(info.value)
+        assert "does not validate" in message and "epochs" in message
+        assert "RehydrateAdam" not in message
 
     def test_the_id_mismatch_names_the_common_causes(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]

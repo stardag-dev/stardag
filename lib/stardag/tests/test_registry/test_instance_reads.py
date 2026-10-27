@@ -185,6 +185,15 @@ class TestCacheEntries:
         assert hit is not None and hit.expanded_at is None
         assert hit.body == info.body
 
+    def test_an_inaccessible_cache_reads_as_no_entry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        def denied(self):
+            raise PermissionError("denied")
+
+        monkeypatch.setattr(Path, "is_file", denied)
+        assert _instance_cache.has_entry("p", uuid4()) is False
+
     def test_an_instance_without_task_id_is_not_cached(self):
         info = self._info().model_copy(update={"task_id": None})
         _instance_cache.write("p", info)
@@ -617,3 +626,41 @@ def test_alias_task_compares_task_ids_as_uuids(model):
         model.id, registry=_registry(server), instance_id=iid
     )
     assert alias.aliased.id == model.id
+
+
+def test_pinned_load_through_the_in_memory_registry(model):
+    """The in-memory registry serves ``GET /instances/{id}`` too, so a pinned
+    load works against it (it has no cache partition, so nothing is cached)."""
+    from datetime import datetime, timezone
+
+    from stardag.build._registration import new_id
+    from stardag.registry import RegistrationItem
+    from stardag.testing import InMemoryRegistry
+
+    registry = InMemoryRegistry()
+    item = RegistrationItem(
+        task_id=str(model.id),
+        task_namespace=model.get_namespace(),
+        task_name=model.get_name(),
+        instance_hash=str(model.instance_hash),
+        body=model.instance_body(),
+        observed_at=datetime.now(timezone.utc),
+    )
+    build = registry.build_create(root_task_ids=[str(model.id)])
+    registry.plan_create(
+        build.id,
+        plan_id=new_id(),
+        deployment_id=registry.add_deployment(),
+        settings={},
+        roots=[item],
+    )
+    (instance,) = registry.task_get(str(model.id)).instances
+
+    info = registry.task_instance_get(instance.id)
+    assert info.task_id == str(model.id) and info.body == model.instance_body()
+    loaded = TrainedModel.from_registry(
+        model.id, registry=registry, instance_id=instance.id
+    )
+    assert loaded == model
+    with pytest.raises(NotFoundError):
+        registry.task_instance_get(uuid4())
