@@ -15,6 +15,7 @@ from typing import Any, TypeVar
 from uuid import UUID
 
 from stardag.exceptions import APIError
+from stardag.registry._api_reads import _BARE_STRING_TAGS
 from stardag.registry import (
     BuildInfo,
     BuildListPage,
@@ -292,6 +293,8 @@ class ReadsMixin(RegistryState):
             cursor=cursor,
         )
         _check_task_filters(namespace=namespace, name=name, id_prefix=id_prefix, q=q)
+        if isinstance(tags, str):
+            raise TypeError(_BARE_STRING_TAGS)
         try:
             wanted = set(normalise_tags(tags)) if tags else set()
         except APIError as e:
