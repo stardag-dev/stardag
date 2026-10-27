@@ -354,12 +354,18 @@ class RateLimitError(APIError):
     propagated, the retry budget was exhausted.
     """
 
-    def __init__(self, retry_after: int, detail: str | None = None):
+    def __init__(
+        self,
+        retry_after: int,
+        detail: str | None = None,
+        payload: dict | None = None,
+    ):
         self.retry_after = retry_after
         super().__init__(
             f"Rate limit exceeded (retry after {retry_after}s)",
             status_code=429,
             detail=detail,
+            payload=payload,
         )
 
 

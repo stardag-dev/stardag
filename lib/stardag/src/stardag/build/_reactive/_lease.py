@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from uuid import UUID, uuid4
 
 from stardag.registry import RegistryABC
+from stardag.registry._api_http import last_call_delivered_no_earlier_than
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +19,10 @@ _LEASE_TTL_SECONDS = 60
 # A third of the TTL: two consecutive renewals may fail before the lease
 # is at risk, and a refused renewal re-acquires.
 _LEASE_RENEW_INTERVAL_SECONDS = _LEASE_TTL_SECONDS / 3
+# The least time a release is given, even past the client-side deadline:
+# that deadline is anchored before the granting request, so the server
+# may still hold the lease a moment longer.
+_MIN_CALL_SECONDS = 5.0
 
 
 class SchedulerLease:
@@ -49,7 +55,20 @@ class SchedulerLease:
         return asyncio.get_running_loop().time() >= self._expires_at
 
     def _arm(self, asked_at: float) -> None:
+        """Start the client-side TTL at ``asked_at`` -- or later, if the
+        call that just returned spent part of its time waiting out a rate
+        limit, which no attempt the server saw was inside (STA-135)."""
+        delivered = last_call_delivered_no_earlier_than()
+        if delivered is not None:
+            loop = asyncio.get_running_loop()
+            asked_at = max(asked_at, loop.time() - (time.monotonic() - delivered))
         self._expires_at = asked_at + _LEASE_TTL_SECONDS
+
+    def _time_left(self) -> float:
+        """Seconds until the lease lapses on its own (client-side)."""
+        if self._expires_at is None:
+            return float(_LEASE_TTL_SECONDS)
+        return max(self._expires_at - asyncio.get_running_loop().time(), 0.0)
 
     async def __aenter__(self) -> "SchedulerLease":
         asked_at = asyncio.get_running_loop().time()
@@ -71,9 +90,14 @@ class SchedulerLease:
             await asyncio.gather(renewal, return_exceptions=True)
         if not self.acquired:
             return
+        # Bounded by the lease itself: a release still waiting out a rate
+        # limit when the lease lapses has nothing left to release.
         try:
-            await self._registry.scheduler_lease_release_aio(
-                self._build_id, owner_id=self._owner_id
+            await asyncio.wait_for(
+                self._registry.scheduler_lease_release_aio(
+                    self._build_id, owner_id=self._owner_id
+                ),
+                timeout=max(self._time_left(), _MIN_CALL_SECONDS),
             )
         except Exception as e:
             logger.warning(
@@ -105,8 +129,16 @@ class SchedulerLease:
     async def _renew_forever(self) -> None:
         while True:
             await asyncio.sleep(_LEASE_RENEW_INTERVAL_SECONDS)
+            # A renewal still waiting out a rate limit when the lease lapses
+            # is abandoned so the next one starts (``lost`` is true by the
+            # deadline either way). Never bounded below one interval: a
+            # lapsed lease is re-acquired by the renewal, so it must still
+            # get to ask.
             try:
-                held = await self._renew_once()
+                held = await asyncio.wait_for(
+                    self._renew_once(),
+                    timeout=max(self._time_left(), _LEASE_RENEW_INTERVAL_SECONDS),
+                )
             except Exception as e:
                 logger.warning(
                     "Could not renew the scheduler lease for build %s (will "

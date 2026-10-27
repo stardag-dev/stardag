@@ -88,6 +88,22 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   resident builds switch the delegated `Runner`'s reporting off in favour of
   the engine's, losing cooperative cancellation and interruption
   classification (see [RELEASE_NOTES.md](RELEASE_NOTES.md)).
+- **Fixed: the registry's rate limit was never retried** (STA-135). The SDK
+  re-sent a 429 only when it carried the v1 code `RATE_LIMIT`, and the v2
+  write routes answer `rate_limited`. So every rate-limited write failed at
+  once, including a worker's end report and a tick's lease release. Under
+  load this orphaned claims, and builds stalled until the claims expired. A
+  rate-limit 429 is now waited out and re-sent on every route. The wait is at
+  least the server's `Retry-After`, with jitter, for at most about 150
+  seconds in total. Re-sending is safe because the registry refuses a
+  rate-limited request before the route runs, so the retry is the request's
+  first delivery. Other 429s, the creation quotas, are still not retried.
+  Each wait is logged as a warning and counted in `transport_retry_counts()`
+  under `HTTP 429`. A tick's lease renewal or release that is still waiting
+  when the lease lapses is abandoned, so it never holds the tick past the
+  lease. The lease's client-side expiry is timed from the first attempt
+  that could have reached the server, so a rate-limit wait no longer makes a
+  freshly granted lease look already lapsed.
 
 ### Server
 
