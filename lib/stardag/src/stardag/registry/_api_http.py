@@ -432,11 +432,20 @@ class HTTPTransport:
             kwargs["headers"] = headers
         return f"{self.api_url}{API_PREFIX}{request.path}", kwargs
 
-    def _may_retry(self, request: Request[Any], retries: int, started: float) -> bool:
+    def _may_retry(
+        self,
+        request: Request[Any],
+        retries: int,
+        started: float,
+        rate_limit_waited: float = 0.0,
+    ) -> bool:
+        # Time spent waiting out a rate limit is not the exchange's: it
+        # would otherwise leave a lost answer after a minute's wait with no
+        # retry at all.
         return (
             request.retry
             and retries < _MAX_TRANSIENT_RETRIES
-            and time.monotonic() - started < 2 * self.timeout
+            and time.monotonic() - started - rate_limit_waited < 2 * self.timeout
         )
 
     def call(self, request: Request[T]) -> T:
@@ -452,7 +461,7 @@ class HTTPTransport:
             try:
                 response = self.client.request(request.method, url, **kwargs)
             except _TRANSIENT_EXCEPTIONS as e:
-                if not self._may_retry(request, transient, started):
+                if not self._may_retry(request, transient, started, rate_limit_waited):
                     raise
                 transient += 1
                 delay = _transient_delay(transient)
@@ -460,7 +469,9 @@ class HTTPTransport:
                 time.sleep(delay)
                 continue
             cause = _transient_cause(response)
-            if cause is not None and self._may_retry(request, transient, started):
+            if cause is not None and self._may_retry(
+                request, transient, started, rate_limit_waited
+            ):
                 transient += 1
                 delay = _transient_delay(transient)
                 _note_retry(request, cause, response.text[:120], transient, delay)
@@ -499,7 +510,7 @@ class HTTPTransport:
                     request.method, url, **kwargs
                 )
             except _TRANSIENT_EXCEPTIONS as e:
-                if not self._may_retry(request, transient, started):
+                if not self._may_retry(request, transient, started, rate_limit_waited):
                     raise
                 transient += 1
                 delay = _transient_delay(transient)
@@ -507,7 +518,9 @@ class HTTPTransport:
                 await asyncio.sleep(delay)
                 continue
             cause = _transient_cause(response)
-            if cause is not None and self._may_retry(request, transient, started):
+            if cause is not None and self._may_retry(
+                request, transient, started, rate_limit_waited
+            ):
                 transient += 1
                 delay = _transient_delay(transient)
                 _note_retry(request, cause, response.text[:120], transient, delay)

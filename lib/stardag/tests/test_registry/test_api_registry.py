@@ -823,6 +823,29 @@ class TestLostExchange:
         assert str(build.id) == BUILD["id"]
         assert len(script.requests) == 4
 
+    def test_a_rate_limit_wait_does_not_spend_the_lost_answer_budget(self, monkeypatch):
+        """Copilot on #495: a minute waiting out a rate limit, then a lost
+        answer, with a 30 s timeout -- the lost answer is still retried,
+        because the wait is not the exchange's time."""
+        now = [0.0]
+
+        def sleep(delay: float) -> None:
+            now[0] += delay
+
+        monkeypatch.setattr(_api_http.time, "monotonic", lambda: now[0])
+        monkeypatch.setattr(_api_http.time, "sleep", sleep)
+        script = _Script(
+            _rate_limited(retry_after="60"),
+            _body_cut(),
+            httpx.Response(200, json=BUILD),
+        )
+        registry = _registry(script)
+        registry.timeout = 30.0
+        build = registry.build_get(UUID(BUILD["id"]))
+        assert str(build.id) == BUILD["id"]
+        assert len(script.requests) == 3
+        assert now[0] >= 60
+
     def test_a_quota_refusal_is_not_retried(self):
         script = _Script(
             httpx.Response(429, json={"detail": {"code": "QUOTA", "message": "q"}})
