@@ -450,6 +450,11 @@ class ModalTaskExecutor(TaskExecutorABC):
         """Detached mode is per-executor (constructor flag), not per-task."""
         return self.detached
 
+    def detached_executor_name(self, task: BaseTask) -> str | None:
+        """``"modal"``: what every handle :meth:`submit_detached` returns
+        records, known without resolving the worker."""
+        return MODAL_EXECUTOR_NAME
+
     def _make_handle(
         self,
         task: BaseTask,

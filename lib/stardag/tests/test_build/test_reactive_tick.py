@@ -28,7 +28,7 @@ from stardag.testing._registry_state import refuse
 from stardag.utils.testing.dynamic_deps_dag import DynamicDepsTask
 from stardag.utils.testing.helper_tasks import SyncOnlyTask
 
-from tests.test_build.fakes import FakeDetachedExecutor
+from tests.test_build.fakes import FAKE_EXECUTOR, FakeDetachedExecutor
 
 auto_namespace(__name__)
 
@@ -126,6 +126,28 @@ class TestDriving:
         assert claim["limit_keys"] == ["pool"]
         ((_, spawned_execution, _),) = executor.spawns
         assert spawned_execution == claim["execution_id"]
+
+    async def test_the_claim_names_its_executor_even_without_metadata(
+        self, default_in_memory_fs_target: Target
+    ):
+        """Before the spawn there is no ref, but the claim still says the
+        execution is detached (STA-90), whether or not the metadata lookup
+        succeeded."""
+
+        class MetadataFails(FakeDetachedExecutor):
+            async def get_executor_metadata(self, task):
+                raise RuntimeError("metadata lookup failed")
+
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"named-{new_id()}")
+        build_id, _ = await _plan(registry, [task])
+        await _tick(registry, build_id, MetadataFails(registry=registry, workers=True))
+        claim = next(
+            c for c in registry.calls_to("member_start", task_id=task.id) if c["claim"]
+        )
+        assert claim["executor"] == FAKE_EXECUTOR
+        assert claim["executor_metadata"] is None
+        assert claim["executor_ref"] is None
 
     async def test_settings_are_applied_in_the_pass_and_reach_the_spawn(
         self, default_in_memory_fs_target: Target

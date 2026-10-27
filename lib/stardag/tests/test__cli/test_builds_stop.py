@@ -250,8 +250,25 @@ class TestStoppable:
         execution = self._execution(executor_metadata={"kind": "modal"})
         assert _stop.not_stoppable_reason(execution) == _stop.NO_REF_YET
 
-    def test_no_executor_is_ambiguous(self):
+    def test_a_modal_claim_naming_its_executor_waits_for_its_call_id(self):
+        execution = self._execution(executor="modal")
+        assert _stop.not_stoppable_reason(execution) == _stop.NO_REF_YET
+
+    def test_an_in_process_execution_is_named_as_such(self):
+        from stardag.build._concurrent import ExecutionMode
+
+        kinds = {mode.value for mode in ExecutionMode} | {"sequential"}
+        assert kinds == _stop.IN_PROCESS_EXECUTORS
+        for kind in kinds:
+            execution = self._execution(executor=kind, executor_ref="host:123")
+            expected = (
+                _stop.IN_WORKER_PROCESS if kind == "sync_process" else _stop.IN_PROCESS
+            )
+            assert _stop.not_stoppable_reason(execution) == expected
+
+    def test_no_executor_is_ambiguous_and_blamed_on_an_older_sdk(self):
         assert _stop.not_stoppable_reason(self._execution()) == _stop.NO_EXECUTOR
+        assert "older SDK" in _stop.NO_EXECUTOR
 
     def test_another_executor_is_never_stoppable(self):
         reason = _stop.not_stoppable_reason(self._execution(executor="local"))

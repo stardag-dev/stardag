@@ -24,6 +24,13 @@ reason and left alone: an in-process execution of a resident driver, an
 execution on another executor, and a claim whose spawn has not reported
 its call id yet (re-run a few seconds later to catch it).
 
+Every execution an SDK since STA-90 starts records its executor at claim:
+an in-process one its execution mode (or ``sequential``), a detached claim
+its backend (``modal``) before the spawn. So the reason is certain for any
+row that names an executor; only a row recording neither an executor nor
+a metadata ``kind`` — written by an older SDK — keeps the hedged
+:data:`NO_EXECUTOR`.
+
 Each stopped call is reported with ``POST /executions/{id}/stopped``
 (outcome ``stopped``), which ends it on the ledger and releases its claim
 if it still holds one. A call that could not be cancelled is **not**
@@ -49,10 +56,24 @@ from stardag.registry import ExecutionInfo
 # alone, with a reason.
 MODAL_EXECUTOR = "modal"
 
+#: What an in-process execution records as its executor: the concurrent
+#: executor's execution modes (``ExecutionMode``) and the sequential build.
+IN_PROCESS_EXECUTORS = frozenset(
+    {"sequential", "sync_blocking", "sync_thread", "sync_process", "async_main_loop"}
+)
+
 NO_REF_YET = "no call id recorded yet — it was claimed but not yet spawned"
+IN_PROCESS = "runs in its driver's own process — stop the driver to stop it"
+#: ``sync_process`` runs the task in a worker of the driver's process pool,
+#: which can outlive a driver that is killed rather than stopped.
+IN_WORKER_PROCESS = (
+    "runs in a worker process of its driver's pool — stop the driver, then "
+    "any worker process that outlives it"
+)
 NO_EXECUTOR = (
-    "no executor recorded — it runs in its driver's own process, or its "
-    "spawn has not reported yet; re-run to see whether a call id appears"
+    "no executor recorded (written by an older SDK) — it runs in its "
+    "driver's own process, or its spawn has not reported yet; re-run to see "
+    "whether a call id appears"
 )
 
 
@@ -72,6 +93,10 @@ def not_stoppable_reason(execution: ExecutionInfo) -> str | None:
     executor = executor_of(execution)
     if not executor:
         return NO_EXECUTOR
+    if executor == "sync_process":
+        return IN_WORKER_PROCESS
+    if executor in IN_PROCESS_EXECUTORS:
+        return IN_PROCESS
     if executor != MODAL_EXECUTOR:
         return f"stardag cannot stop a {executor!r} execution"
     if not execution.executor_ref:

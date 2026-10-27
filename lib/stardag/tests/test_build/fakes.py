@@ -78,6 +78,9 @@ class FakeDetachedExecutor(TaskExecutorABC):
     def supports_detached(self, task: BaseTask) -> bool:
         return True
 
+    def detached_executor_name(self, task: BaseTask) -> str | None:
+        return FAKE_EXECUTOR
+
     def reports_lifecycle(self, task: BaseTask) -> bool:
         return self.reports
 

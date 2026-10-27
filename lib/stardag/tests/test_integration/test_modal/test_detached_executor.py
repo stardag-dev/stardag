@@ -123,6 +123,19 @@ class TestSupportsDetached:
         )
         assert executor.supports_detached(_make_task()) is False
 
+    def test_names_the_handles_executor_even_when_worker_selection_fails(self):
+        """The claiming start names the executor before the spawn (STA-90),
+        and must do so even when the metadata lookup cannot resolve a
+        worker."""
+
+        def broken_selector(task):
+            raise RuntimeError("no worker for this task")
+
+        executor = ModalTaskExecutor(
+            modal_app_name="test-app", worker_selector=broken_selector
+        )
+        assert executor.detached_executor_name(_make_task()) == MODAL_EXECUTOR_NAME
+
 
 class TestSubmitDetached:
     async def test_a_real_task_is_sent_as_its_instance_body(self):

@@ -274,6 +274,12 @@ async def _spawn(
         metadata = await task_executor.get_executor_metadata(task)
     except Exception:
         metadata = None
+    # Named on the claim, metadata or not: a claim with no executor reads as
+    # an in-process execution until the spawn reports its ref (STA-90).
+    try:
+        executor_name = task_executor.detached_executor_name(task)
+    except Exception:
+        executor_name = None
     if _stop_for_lost_lease(lease_lost, result):
         return
     # Last, right before the claim: a claim taken is carried through its
@@ -289,6 +295,7 @@ async def _spawn(
             execution_id=execution_id,
             claim=True,
             claim_ttl_seconds=claim_ttl_seconds(task, task_executor),
+            executor=executor_name,
             executor_metadata=metadata,
             limit_keys=limit_keys,
         )
