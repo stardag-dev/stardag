@@ -204,8 +204,9 @@ class TestTaskFromBody:
     def test_unregistered_nested_class_names_namespace_and_name(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
-        """A nested task class whose module is not imported is named too,
-        not left as a bare validation error."""
+        """A nested task class whose module is not imported is named, with
+        its namespace and what to do, in plain terms: no internal names
+        (``task_data``) and no repr quoting."""
         body = RehydrateClassTask(
             factor=1, values=rehydrate_range(limit=1)
         ).instance_body()
@@ -214,8 +215,32 @@ class TestTaskFromBody:
         with pytest.raises(TaskRehydrationError) as info:
             sd.task_from_body(body)
         message = str(info.value)
-        assert "namespace='datasets'" in message and "name='Dataset'" in message
-        assert "must be imported" in message
+        assert message.startswith(
+            f"Cannot rehydrate {__name__}.RehydrateClassTask: no task class is "
+            "registered for Dataset (namespace datasets)"
+        )
+        assert "Import the module that defines" in message
+        assert "task_data" not in message and "'" not in message
+
+    def test_the_id_mismatch_names_the_common_causes(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        body = rehydrate_range(limit=3).instance_body()
+        with pytest.raises(TaskRehydrationError) as info:
+            sd.task_from_body(body, expected_task_id=rehydrate_range(limit=4).id)
+        message = str(info.value)
+        assert "compat_default" in message
+        assert "removed or renamed" in message
+        assert "https://stardag-dev.github.io/stardag/how-to/evolve-dags/" in message
+
+    def test_the_expected_id_is_compared_as_a_uuid(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        task = rehydrate_range(limit=3)
+        back = sd.task_from_body(
+            task.instance_body(), expected_task_id=str(task.id).upper()
+        )
+        assert back.id == task.id
 
     def test_refuses_a_partial_dump(self):
         with pytest.raises(TaskRehydrationError, match="discriminator keys"):

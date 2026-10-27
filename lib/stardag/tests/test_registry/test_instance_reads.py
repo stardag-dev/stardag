@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import typing
 from pathlib import Path
 from typing import Annotated
@@ -286,6 +287,17 @@ class TestTaskInstanceGet:
         _registry(other, api_key="sk-two").task_instance_get(iid)
         assert len(other.requests) == 1  # asked its own registry
 
+    def test_a_hit_compares_task_ids_as_uuids(self, model):
+        """A differently formatted task id of the same task is still a hit."""
+        iid = uuid4()
+        server = _Server(
+            {("GET", f"/api/v2/instances/{iid}"): _instance_payload(model, iid)}
+        )
+        registry = _registry(server)
+        registry.task_instance_get(iid)
+        registry.task_instance_get(iid, task_id=str(model.id).upper())
+        assert len(server.requests) == 1
+
     def test_a_hit_for_another_task_id_is_re_read(self, model):
         iid = uuid4()
         server = _Server(
@@ -384,7 +396,9 @@ class TestTaskInstanceGet:
         assert len(server.requests) == 2
         assert not any(isolated_registry_cache.rglob("*.json"))
 
-    async def test_aio_reads_through_the_same_cache(self, model):
+    async def test_aio_reads_through_the_same_cache(
+        self, model, monkeypatch: pytest.MonkeyPatch
+    ):
         iid = uuid4()
         newest = _instance_payload(model, iid, with_task_id=False)
         server = _Server(
@@ -398,8 +412,21 @@ class TestTaskInstanceGet:
         registry = _registry(server)
 
         _use_async_transport(registry, server)
+        loop_thread = threading.get_ident()
+        cache_threads: list[int] = []
+        for name in ("read", "write"):
+            original = getattr(_instance_cache, name)
+
+            def spy(*args, _original=original, **kwargs):
+                cache_threads.append(threading.get_ident())
+                return _original(*args, **kwargs)
+
+            monkeypatch.setattr(_instance_cache, name, spy)
         first = await registry.task_instance_get_aio(iid, task_id=str(model.id))
         again = await registry.task_instance_get_aio(iid, task_id=str(model.id))
+        # The cache's file I/O ran off the event loop's thread.
+        assert len(cache_threads) == 3  # miss, write, hit
+        assert loop_thread not in cache_threads
         assert first == again and first.task_id == str(model.id)
         assert len(server.requests) == 2  # route + fallback, then the cache
 
@@ -459,6 +486,16 @@ class TestFromRegistryPinned:
         )
         loaded = TrainedModel.from_registry(
             model.id, registry=_registry(server), instance_id=iid
+        )
+        assert loaded == model
+
+    def test_accepts_a_differently_formatted_task_id(self, model):
+        iid = uuid4()
+        server = _Server(
+            {("GET", f"/api/v2/instances/{iid}"): _instance_payload(model, iid)}
+        )
+        loaded = TrainedModel.from_registry(
+            str(model.id).upper(), registry=_registry(server), instance_id=iid
         )
         assert loaded == model
 
@@ -524,10 +561,11 @@ class TestFromRegistryPinned:
         body = _instance_payload(model, iid)
         body["body"]["learning_rate"] = "not a number"
         server = _Server({("GET", f"/api/v2/instances/{iid}"): body})
+        registry = _registry(server)
         with pytest.raises(sd.TaskRehydrationError, match="Failed to rehydrate"):
-            TrainedModel.from_registry(
-                model.id, registry=_registry(server), instance_id=iid
-            )
+            TrainedModel.from_registry(model.id, registry=registry, instance_id=iid)
+        # Fresh from the registry, so not read twice: it would come back the same.
+        assert len(server.requests) == 1
         assert not any(isolated_registry_cache.rglob("*.json"))
 
     def test_a_body_that_does_not_match_fails_and_is_not_kept(
@@ -537,10 +575,11 @@ class TestFromRegistryPinned:
         body = _instance_payload(model, iid)
         body["body"]["learning_rate"] = 0.5  # recomputes to another task id
         server = _Server({("GET", f"/api/v2/instances/{iid}"): body})
+        registry = _registry(server)
         with pytest.raises(sd.TaskRehydrationError, match="does not match"):
-            TrainedModel.from_registry(
-                model.id, registry=_registry(server), instance_id=iid
-            )
+            TrainedModel.from_registry(model.id, registry=registry, instance_id=iid)
+        # Fresh from the registry, so not read twice: it would come back the same.
+        assert len(server.requests) == 1
         assert not any(isolated_registry_cache.rglob("*.json"))
 
 
@@ -560,3 +599,21 @@ def test_alias_task_records_the_pinned_instance_body(model):
     )
     assert alias.aliased.body is not None
     assert alias.aliased.body["notes"] == "first run"
+
+
+def test_alias_task_compares_task_ids_as_uuids(model):
+    iid = uuid4()
+    payload = _instance_payload(model, iid)
+    payload["task_id"] = str(model.id).upper()
+    task = _task_payload(str(model.id), [])
+    task["output_uri"] = "memory://model"
+    server = _Server(
+        {
+            ("GET", f"/api/v2/instances/{iid}"): payload,
+            ("GET", f"/api/v2/tasks/{model.id}"): task,
+        }
+    )
+    alias = sd.AliasTask[str].from_registry(
+        model.id, registry=_registry(server), instance_id=iid
+    )
+    assert alias.aliased.id == model.id

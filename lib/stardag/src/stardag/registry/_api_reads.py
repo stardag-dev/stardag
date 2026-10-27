@@ -7,8 +7,11 @@ by the module-size rule; each route is one :class:`Request`, as there.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from uuid import UUID
+
+from stardag._core.task_id import same_task_id
 
 from stardag.exceptions import NotFoundError, is_missing_route_error
 from stardag.registry import _instance_cache
@@ -141,7 +144,11 @@ class APIRegistryReads(HTTPTransport, RegistryReadsABC):
         if partition is None:
             return None, None
         hit = _instance_cache.read(partition, instance_id)
-        if hit is not None and task_id is not None and hit.task_id != str(task_id):
+        if (
+            hit is not None
+            and task_id is not None
+            and not same_task_id(hit.task_id or "", task_id)
+        ):
             # The registry is authoritative for which task an instance
             # belongs to: re-read rather than answer from the copy.
             hit = None
@@ -168,7 +175,10 @@ class APIRegistryReads(HTTPTransport, RegistryReadsABC):
         self, instance_id: UUID | str, *, task_id: str | None = None
     ) -> TaskInstanceInfo:
         iid = UUID(str(instance_id))
-        partition, hit = self._cached_instance(iid, task_id)
+        # Off the event loop: the cache is file I/O, and the first use of
+        # an API-key partition derives its fingerprint (a deliberately slow
+        # KDF).
+        partition, hit = await asyncio.to_thread(self._cached_instance, iid, task_id)
         if hit is not None:
             return hit
         try:
@@ -178,7 +188,7 @@ class APIRegistryReads(HTTPTransport, RegistryReadsABC):
             task = await self.acall(_task_get_req(fallback, _FALLBACK_INSTANCE_LIMIT))
             info = _pick_instance(task, iid)
         if partition is not None:
-            _instance_cache.write(partition, info)
+            await asyncio.to_thread(_instance_cache.write, partition, info)
         return info
 
     # -- builds and plans -------------------------------------------------------

@@ -8,6 +8,7 @@ from uuid import UUID
 from pydantic import BaseModel, SerializationInfo, ValidationInfo, model_validator
 
 from stardag._core.task import LoadedT, Task
+from stardag._core.task_id import same_task_id
 from stardag.target.serialize import get_serializer
 
 if TYPE_CHECKING:
@@ -148,7 +149,7 @@ class AliasTask(Task[LoadedT], Generic[LoadedT]):
         body = info.body
         if instance_id is not None:
             instance = registry.task_instance_get(instance_id, task_id=str(id))
-            if instance.task_id is not None and instance.task_id != str(id):
+            if instance.task_id is not None and not same_task_id(instance.task_id, id):
                 raise ValueError(
                     f"Instance {instance_id} belongs to task {instance.task_id}, "
                     f"not to task {id}."
