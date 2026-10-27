@@ -46,6 +46,15 @@ export const IN_PROCESS =
   "runs in its driver's own process — stop the driver to stop it";
 
 /**
+ * `sync_process` runs the task in a worker of the driver's process pool,
+ * which can outlive a driver that is killed rather than stopped —
+ * `_stop.IN_WORKER_PROCESS`.
+ */
+export const IN_WORKER_PROCESS =
+  "runs in a worker process of its driver's pool — stop the driver, then " +
+  "any worker process that outlives it";
+
+/**
  * Only for a row recording neither an executor nor a metadata `kind`: an
  * SDK since STA-90 names the executor on every claim, so this ambiguity
  * is left to rows an older SDK wrote.
@@ -71,6 +80,7 @@ export function executorOf(execution: Execution): string | null {
 export function notStoppableReason(execution: Execution): string | null {
   const executor = executorOf(execution);
   if (!executor) return NO_EXECUTOR;
+  if (executor === "sync_process") return IN_WORKER_PROCESS;
   if (IN_PROCESS_EXECUTORS.has(executor)) return IN_PROCESS;
   if (executor !== MODAL_EXECUTOR)
     return `stardag cannot stop a '${executor}' execution`;

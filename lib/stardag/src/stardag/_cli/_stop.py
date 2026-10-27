@@ -64,6 +64,12 @@ IN_PROCESS_EXECUTORS = frozenset(
 
 NO_REF_YET = "no call id recorded yet — it was claimed but not yet spawned"
 IN_PROCESS = "runs in its driver's own process — stop the driver to stop it"
+#: ``sync_process`` runs the task in a worker of the driver's process pool,
+#: which can outlive a driver that is killed rather than stopped.
+IN_WORKER_PROCESS = (
+    "runs in a worker process of its driver's pool — stop the driver, then "
+    "any worker process that outlives it"
+)
 NO_EXECUTOR = (
     "no executor recorded (written by an older SDK) — it runs in its "
     "driver's own process, or its spawn has not reported yet; re-run to see "
@@ -87,6 +93,8 @@ def not_stoppable_reason(execution: ExecutionInfo) -> str | None:
     executor = executor_of(execution)
     if not executor:
         return NO_EXECUTOR
+    if executor == "sync_process":
+        return IN_WORKER_PROCESS
     if executor in IN_PROCESS_EXECUTORS:
         return IN_PROCESS
     if executor != MODAL_EXECUTOR:

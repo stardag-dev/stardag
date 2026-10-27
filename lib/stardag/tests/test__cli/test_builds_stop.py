@@ -261,7 +261,10 @@ class TestStoppable:
         assert kinds == _stop.IN_PROCESS_EXECUTORS
         for kind in kinds:
             execution = self._execution(executor=kind, executor_ref="host:123")
-            assert _stop.not_stoppable_reason(execution) == _stop.IN_PROCESS
+            expected = (
+                _stop.IN_WORKER_PROCESS if kind == "sync_process" else _stop.IN_PROCESS
+            )
+            assert _stop.not_stoppable_reason(execution) == expected
 
     def test_no_executor_is_ambiguous_and_blamed_on_an_older_sdk(self):
         assert _stop.not_stoppable_reason(self._execution()) == _stop.NO_EXECUTOR

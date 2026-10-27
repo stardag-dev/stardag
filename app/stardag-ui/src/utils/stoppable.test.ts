@@ -4,6 +4,7 @@ import {
   executorOf,
   executorsIn,
   IN_PROCESS,
+  IN_WORKER_PROCESS,
   IN_PROCESS_EXECUTORS,
   matchesFilters,
   NO_EXECUTOR,
@@ -66,7 +67,7 @@ describe("notStoppableReason", () => {
             executor_metadata: null,
           }),
         ),
-      ).toBe(IN_PROCESS);
+      ).toBe(kind === "sync_process" ? IN_WORKER_PROCESS : IN_PROCESS);
     }
   });
 
