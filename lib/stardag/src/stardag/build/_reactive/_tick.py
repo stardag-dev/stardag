@@ -341,7 +341,10 @@ class _Driver:
         # Spawns admitted per pass under the registry's rate limit.
         self.admission = Admission()
         # Ends the build's dead claim-holders (STA-94/STA-135).
-        self.reconciler = Reconciler()
+        self.reconciler = Reconciler(
+            interval_seconds=config.reconcile_interval_seconds,
+            unspawned_grace_seconds=config.unspawned_grace_seconds,
+        )
 
     def _out_of_time(self) -> bool:
         return (

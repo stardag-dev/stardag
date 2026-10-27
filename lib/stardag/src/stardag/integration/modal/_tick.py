@@ -72,6 +72,10 @@ _TICK_KWARGS_ALLOWED = (
     # Completion checks in flight while a discovery job walks: a property
     # of the target backend this build's tasks write to.
     "max_concurrent_discover",
+    # Reconciliation's pace and its grace for a claim with no executor ref
+    # (STA-94/STA-135): how long a build tolerates a dead claim holder.
+    "reconcile_interval_seconds",
+    "unspawned_grace_seconds",
 )
 
 

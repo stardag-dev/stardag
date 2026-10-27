@@ -23,7 +23,7 @@ running its task:
   (:meth:`~stardag.build.TaskExecutorABC.probe_detached` answers
   ``"returned"`` or ``"raised"``). A finished call reports nothing more.
 * **R2** -- it never recorded an executor ref, it is older than
-  :data:`UNSPAWNED_GRACE_SECONDS`, and the end is *conditional* on there
+  ``TickConfig.unspawned_grace_seconds``, and the end is *conditional* on there
   still being no ref when the registry applies it
   (``only_if_unspawned``, decided under the task row lock the ref record
   also takes). Paired with the worker rule: a Modal worker does not enter
@@ -69,18 +69,6 @@ if typing.TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: How old a claim with no executor ref must be before it is ended as a
-#: spawn that never landed. A live tick records the ref within seconds of
-#: its claim (one spawn call, retried, then the record, under the rate
-#: limit's backoff); this is long enough that only a dead one is still
-#: missing it, and it is a delay, not a safety bound -- the conditional end
-#: is what makes it safe.
-UNSPAWNED_GRACE_SECONDS = 600.0
-
-#: At most this often per tick: each round reads the build's ledger and
-#: probes every running member's call.
-RECONCILE_INTERVAL_SECONDS = 60.0
-
 #: Probes in flight at once (each is one Modal API call).
 _MAX_CONCURRENT_PROBES = 8
 
@@ -89,13 +77,17 @@ class Reconciler:
     """One tick's reconciliation state: when it last ran, and whether the
     registry supports the conditional end."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self, *, interval_seconds: float = 60.0, unspawned_grace_seconds: float = 600.0
+    ) -> None:
+        self.interval_seconds = interval_seconds
+        self.unspawned_grace_seconds = unspawned_grace_seconds
         self._last: float | None = None
         self.supported = True
 
     def due(self, now: float) -> bool:
         return self.supported and (
-            self._last is None or now - self._last >= RECONCILE_INTERVAL_SECONDS
+            self._last is None or now - self._last >= self.interval_seconds
         )
 
     async def run(
@@ -196,7 +188,7 @@ class Reconciler:
         if started is None or lease_lost():
             return False
         age = (datetime.now(timezone.utc) - started).total_seconds()
-        if age < UNSPAWNED_GRACE_SECONDS:
+        if age < self.unspawned_grace_seconds:
             return False
         try:
             await registry.execution_report_stopped_aio(

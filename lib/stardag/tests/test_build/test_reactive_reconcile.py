@@ -226,10 +226,10 @@ class TestSpawnNeverLanded:
 
 
 def test_a_round_is_due_once_per_interval():
-    reconciler = _reconcile.Reconciler()
+    reconciler = _reconcile.Reconciler(interval_seconds=60)
     assert reconciler.due(0.0)
     reconciler._last = 0.0
-    assert not reconciler.due(_reconcile.RECONCILE_INTERVAL_SECONDS - 1)
-    assert reconciler.due(_reconcile.RECONCILE_INTERVAL_SECONDS)
+    assert not reconciler.due(59)
+    assert reconciler.due(60)
     reconciler.supported = False
-    assert not reconciler.due(10 * _reconcile.RECONCILE_INTERVAL_SECONDS)
+    assert not reconciler.due(600)
