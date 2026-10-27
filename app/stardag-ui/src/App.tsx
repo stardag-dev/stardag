@@ -28,6 +28,7 @@ import { BreadcrumbProvider, useBreadcrumb } from "./context/BreadcrumbContext";
 import type React from "react";
 import { ThemeProvider } from "./context/ThemeContext";
 import { EnvironmentProvider, useEnvironment } from "./context/EnvironmentContext";
+import { lastTaskSearchQuery } from "./hooks/useTaskSearchUrl";
 import { viewFromPath } from "./utils/routes";
 
 // Main app layout with sidebar
@@ -180,6 +181,7 @@ interface TaskPageRouteProps extends SidebarStateProps {
   onNavigate: (item: NavItem) => void;
   onOpenTask: (taskId: string) => void;
   onSelectBuild: (buildId: string) => void;
+  onSearchTasks: (query: string) => void;
 }
 
 function TaskPageRoute({
@@ -187,6 +189,7 @@ function TaskPageRoute({
   onNavigate,
   onOpenTask,
   onSelectBuild,
+  onSearchTasks,
   sidebarCollapsed,
   onToggleSidebar,
 }: TaskPageRouteProps) {
@@ -197,7 +200,12 @@ function TaskPageRoute({
       sidebarCollapsed={sidebarCollapsed}
       onToggleSidebar={onToggleSidebar}
     >
-      <TaskPage taskId={taskId} onOpenTask={onOpenTask} onOpenBuild={onSelectBuild} />
+      <TaskPage
+        taskId={taskId}
+        onOpenTask={onOpenTask}
+        onOpenBuild={onSelectBuild}
+        onSearchTasks={onSearchTasks}
+      />
     </MainLayout>
   );
 }
@@ -626,7 +634,8 @@ function Router() {
 
   const navigateTo = useCallback((newPath: string) => {
     window.history.pushState({}, "", newPath);
-    setPath(newPath);
+    // The route is the pathname; a query string belongs to the page.
+    setPath(window.location.pathname);
   }, []);
 
   // Parse path to determine view
@@ -674,12 +683,18 @@ function Router() {
   const handleOpenTask = useCallback(
     (taskId: string) => {
       const basePath = getEnvironmentPath();
+      // Back to the tasks list returns to the search last made there.
       navigateTo(
         taskId
           ? `${basePath}/tasks/${encodeURIComponent(taskId)}`
-          : `${basePath}/tasks`,
+          : `${basePath}/tasks${lastTaskSearchQuery()}`,
       );
     },
+    [navigateTo, getEnvironmentPath],
+  );
+
+  const handleSearchTasks = useCallback(
+    (query: string) => navigateTo(`${getEnvironmentPath()}/tasks${query}`),
     [navigateTo, getEnvironmentPath],
   );
 
@@ -734,6 +749,7 @@ function Router() {
             onNavigate={handleNavigation}
             onOpenTask={handleOpenTask}
             onSelectBuild={handleSelectBuild}
+            onSearchTasks={handleSearchTasks}
             sidebarCollapsed={sidebarCollapsed}
             onToggleSidebar={handleToggleSidebar}
           />

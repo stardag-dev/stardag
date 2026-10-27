@@ -6,19 +6,21 @@ vi.mock("../context/EnvironmentContext", () => ({
   useEnvironment: () => ({ activeEnvironment: { id: "env-1" } }),
 }));
 vi.mock("./TaskDetail", () => ({ TaskDetail: () => null }));
+vi.mock("../api/registry", () => ({
+  fetchTasks: vi.fn(async () => ({ tasks: [], next_cursor: null })),
+}));
 
 import { TaskPage } from "./TaskPage";
 
 describe("TaskPage", () => {
-  it("says task search returns in a later release", () => {
+  it("is the task search without a task id", async () => {
+    window.history.replaceState({}, "", "/tasks");
     render(
       <BreadcrumbProvider>
         <TaskPage taskId={null} onOpenTask={() => {}} />
       </BreadcrumbProvider>,
     );
-    expect(screen.getByLabelText("Task id")).toBeInTheDocument();
-    expect(
-      screen.getByText(/Search over task parameters returns in a later release\./),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Search tasks" })).toBeInTheDocument();
+    expect(await screen.findByText("No tasks yet")).toBeInTheDocument();
   });
 });

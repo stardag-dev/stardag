@@ -259,4 +259,16 @@ describe("TaskDetail", () => {
     expect(await screen.findByText(/No execution recorded/)).toBeInTheDocument();
     expect(screen.queryByText(/Could not read/)).not.toBeInTheDocument();
   });
+
+  it("shows the annotations and the code that references the task", async () => {
+    vi.mocked(fetchTask).mockResolvedValue(
+      makeTask({ tags: ["baseline"], description: "Trained on the sample data" }),
+    );
+    render(<TaskDetail taskId={TASK_ID} environmentId="env-1" />);
+    expect(await screen.findByText("Trained on the sample data")).toBeInTheDocument();
+    expect(screen.getByText("baseline")).toBeInTheDocument();
+    const code = screen.getByLabelText("Code referencing this task");
+    expect(code).toHaveTextContent("from demo import Train");
+    expect(code).toHaveTextContent(`Train.ref("${TASK_ID}", instance_id="i-1")`);
+  });
 });

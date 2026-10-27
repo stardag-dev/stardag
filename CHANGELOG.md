@@ -277,6 +277,19 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   an in-process execution is shown as running in its driver's own process,
   and the "no executor recorded" reason now says it comes from an older
   SDK.
+- **Added: task search and annotation editing** (STA-152). `/tasks` is now
+  a search over `GET /tasks`: free text, a task-id prefix (anything that
+  looks like the start of an id, or `id:<prefix>`), exact name and
+  namespace, tags (all of them; `#tag` in the box, or click a tag) and
+  status, with "Load more" paging. The search lives in the URL, so it can
+  be shared and Back walks through it. Autocomplete suggests names,
+  namespaces and tags already seen in the environment, and recent searches;
+  there is no server suggestion route. The task page shows and edits the
+  task's tags and description in place (validated as the server normalises
+  them, rolled back if a save is refused), and a "Reference in code" box
+  copies `MyTask.ref("<task_id>", instance_id="<instance_id>")` for a
+  chosen instance, with the class's import when the namespace reads as a
+  module path.
 
 ## [0.28.0] — 2026-10-08
 
