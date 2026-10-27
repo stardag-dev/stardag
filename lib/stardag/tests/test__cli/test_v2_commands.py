@@ -221,7 +221,9 @@ class TestDeployments:
 
 
 class TestTasks:
-    def test_annotate_replaces_edits_and_clears(self, fake_registry, running_build):
+    def test_annotate_adds_removes_replaces_and_clears(
+        self, fake_registry, running_build
+    ):
         leaf = str(running_build.leaf.id)
 
         def annotate(*args: str) -> dict:
@@ -229,25 +231,32 @@ class TestTasks:
             assert result.exit_code == 0, result.output
             return json.loads(result.stdout)
 
-        set_ = annotate("--tag", "v2", "--tag", " best ", "-d", "A model.")
-        assert (set_["tags"], set_["description"]) == (["best", "v2"], "A model.")
-        assert "instances" not in set_
-        edited = annotate("--add-tag", "prod", "--remove-tag", "v2")
+        # --tag adds (like --add-tag), it does not replace.
+        added = annotate("--tag", "v2", "--tag", " best ", "-d", "A model.")
+        assert (added["tags"], added["description"]) == (["best", "v2"], "A model.")
+        assert "instances" not in added
+        assert annotate("--tag", "prod")["tags"] == ["best", "prod", "v2"]
+        edited = annotate("--add-tag", "x", "--remove-tag", "v2")
         assert (edited["tags"], edited["description"]) == (
-            ["best", "prod"],
+            ["best", "prod", "x"],
             "A model.",
         )
+        replaced = annotate("--set-tags", "only", "--set-tags", "these")
+        assert replaced["tags"] == ["only", "these"]
         cleared = annotate("--clear-tags", "--description", "")
         assert (cleared["tags"], cleared["description"]) == ([], None)
         (call,) = fake_registry.calls_to("task_annotate")[-1:]
         assert call["tags"] == [] and call["description"] == ""
+        # Only the description: the tags are not sent.
+        annotate("-d", "again")
+        assert fake_registry.calls_to("task_annotate")[-1]["tags"] is ...
 
         shown = json.loads(invoke("tasks", "show", leaf, "--json").stdout)
-        assert shown["tags"] == [] and shown["description"] is None
+        assert shown["tags"] == [] and shown["description"] == "again"
 
     def test_annotate_text_output_escapes_markup(self, fake_registry, running_build):
         leaf = str(running_build.leaf.id)
-        result = invoke("tasks", "annotate", leaf, "--tag", "[bold]x")
+        result = invoke("tasks", "annotate", leaf, "--set-tags", "[bold]x")
         assert result.exit_code == 0, result.output
         assert "[bold]x" in result.stdout
 
@@ -255,9 +264,9 @@ class TestTasks:
         "args",
         [
             (),
-            ("--tag", "a", "--add-tag", "b"),
+            ("--set-tags", "a", "--tag", "b"),
             ("--clear-tags", "--remove-tag", "b"),
-            ("--tag", "a", "--clear-tags"),
+            ("--set-tags", "a", "--clear-tags"),
         ],
     )
     def test_annotate_usage_errors(self, fake_registry, running_build, args):
@@ -266,7 +275,9 @@ class TestTasks:
         assert fake_registry.calls_to("task_annotate") == []
 
     def test_annotate_refusal_is_reported(self, fake_registry, running_build):
-        result = invoke("tasks", "annotate", str(running_build.leaf.id), "--tag", "")
+        result = invoke(
+            "tasks", "annotate", str(running_build.leaf.id), "--set-tags", ""
+        )
         assert result.exit_code == 1, result.output
 
     def test_list_filters(self, fake_registry, running_build):
@@ -281,13 +292,16 @@ class TestTasks:
 
         assert listed("--tag", "best") == sorted([leaf, root])
         assert listed("--tag", "best", "--tag", "prod") == [leaf]
-        assert listed("--q", "tuned") == [leaf]
+        assert listed("--search", "tuned") == [leaf]
+        assert listed("-s", "TUNED") == [leaf]
         assert listed("--id-prefix", leaf[:10]) == [leaf]
         assert listed("--name", "nope") == []
         call = fake_registry.calls_to("task_list")[-1]
         assert call["name"] == "nope" and call["tags"] is None
         text = invoke("tasks", "list", "--tag", "prod")
         assert text.exit_code == 0 and "best, prod" in text.stdout
+        short = invoke("tasks", "list", "--search", "tu")
+        assert short.exit_code == 2 and "at least 3" in short.output
 
     def test_show_task_instances_and_artifacts(self, fake_registry, running_build):
         leaf = str(running_build.leaf.id)

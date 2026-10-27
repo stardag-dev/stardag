@@ -56,7 +56,7 @@ _TASK_FILTER_BOUNDS = {
     "namespace": (0, 255),
     "name": (0, 255),
     "id_prefix": (1, 64),
-    "q": (1, 255),
+    "q": (3, 255),
 }
 
 

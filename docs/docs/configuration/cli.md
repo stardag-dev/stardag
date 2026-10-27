@@ -605,10 +605,10 @@ matches.
     stardag executions list (--build <build-id> [--not-in-current-plan] |
         --task <task-id>) [--include-ended] [--json]
     stardag tasks list [--status S] [--tag T] [--name N] [--namespace NS]
-        [--id-prefix P] [--q TEXT] [--limit N] [--cursor C] [--json]
+        [--id-prefix P] [--search TEXT] [--limit N] [--cursor C] [--json]
     stardag tasks show <task-id> [--include-ended] [--events N] [--json]
-    stardag tasks annotate <task-id> [--tag T] [--add-tag T] [--remove-tag T]
-        [--clear-tags] [--description TEXT] [--json]
+    stardag tasks annotate <task-id> [--tag T] [--remove-tag T]
+        [--set-tags T] [--clear-tags] [--description TEXT] [--json]
     stardag tasks check <task-id> --module MODULE [--json]
     stardag tasks retry <task-id> [--build <build-id>] [--yes] [--json]
     stardag tasks cancel <task-id> [--build <build-id>] [--yes] [--json]
@@ -626,10 +626,10 @@ matches.
     uv run stardag executions list (--build <build-id> [--not-in-current-plan] |
         --task <task-id>) [--include-ended] [--json]
     uv run stardag tasks list [--status S] [--tag T] [--name N] [--namespace NS]
-        [--id-prefix P] [--q TEXT] [--limit N] [--cursor C] [--json]
+        [--id-prefix P] [--search TEXT] [--limit N] [--cursor C] [--json]
     uv run stardag tasks show <task-id> [--include-ended] [--events N] [--json]
-    uv run stardag tasks annotate <task-id> [--tag T] [--add-tag T] [--remove-tag T]
-        [--clear-tags] [--description TEXT] [--json]
+    uv run stardag tasks annotate <task-id> [--tag T] [--remove-tag T]
+        [--set-tags T] [--clear-tags] [--description TEXT] [--json]
     uv run stardag tasks check <task-id> --module MODULE [--json]
     uv run stardag tasks retry <task-id> [--build <build-id>] [--yes] [--json]
     uv run stardag tasks cancel <task-id> [--build <build-id>] [--yes] [--json]
@@ -665,9 +665,9 @@ deployments`.
   `Claim (build)` column names the build holding each claim. Every filter
   given must hold: `--name` and `--namespace` match exactly (`--namespace
 ''` is the root namespace), `--tag` is repeatable and a task must carry
-  all of them, `--id-prefix` matches the start of the task id, and `--q`
-  is a case-insensitive substring of the name, the namespace or the
-  description. Pass the same filters with `--cursor`. A registry that
+  all of them, `--id-prefix` matches the start of the task id, and
+  `--search`/`-s` (at least 3 characters) is a case-insensitive substring
+  of the name, the namespace or the description. Pass the same filters with `--cursor`. A registry that
   predates these filters is refused rather than answered unfiltered.
   v1's `--older-than` is not offered.
 - `tasks show` — one task's global status and the claim's holder (plan and
@@ -680,14 +680,18 @@ deployments`.
   the registry appends and records rather than refuses — is called out
   above the event table, with its detail.
 - `tasks annotate <task-id>` — set the task's tags and description
-  (`PATCH /tasks/{id}`); what is not named is left as it is. `--tag`
-  (repeatable) replaces the tags, `--add-tag`/`--remove-tag` edit them,
+  (`PATCH /tasks/{id}`); what is not named is left as it is. `--tag` (or
+  `--add-tag`, repeatable) adds tags and `--remove-tag` removes them,
+  keeping the others; `--set-tags` (repeatable) replaces them all,
   `--clear-tags` empties them, and `--description ''` clears the
-  description. Annotations describe the completion (the task id, across
-  every instance), are mutable, and are outside every hash, so they never
-  change a task id. The registry trims, deduplicates and sorts tags, and
-  refuses an empty or over-long one (64 characters), or more than 32.
-  Tags are for finding tasks; code refers to a task by its id.
+  description. Adding or removing reads the current tags and sends the
+  edited set, and the registry keeps whichever set arrives last, so an
+  annotation made by someone else in between is overwritten. Annotations
+  describe the completion (the task id, across every instance), are
+  mutable, and are outside every hash, so they never change a task id.
+  The registry trims, deduplicates and sorts tags, and refuses an empty or
+  over-long one (64 characters), or more than 32. Tags are for finding
+  tasks; code refers to a task by its id.
 - `tasks check <task-id> --module <import path>` — rehydrate the task's
   newest instance in this process (importing `--module`, repeatable, to
   resolve its class) and run `complete()` locally, printing the

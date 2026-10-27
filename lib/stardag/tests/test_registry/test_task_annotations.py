@@ -47,6 +47,18 @@ def test_task_annotate_sends_only_what_is_named(kwargs: dict, body: dict):
     assert task.tags == ["best", "v2"] and task.description == "A model."
 
 
+@pytest.mark.parametrize("tags", [None, "single"])
+def test_task_annotate_refuses_an_ambiguous_tags_argument(tags):
+    """``...`` (the default) is "unchanged" and ``[]`` "clear"; ``None`` or a
+    bare string is neither, and is refused before anything is sent."""
+    recorder = _Recorder({("PATCH", "/api/v2/tasks/t1"): TASK})
+    with pytest.raises(TypeError, match=r"\[\] clears"):
+        _registry(recorder).task_annotate("t1", tags=tags)
+    assert recorder.requests == []
+    with pytest.raises(TypeError):
+        InMemoryRegistry().task_annotate("t1", tags=tags)
+
+
 def test_task_annotate_against_a_registry_without_it():
     recorder = _Recorder(
         {
@@ -173,12 +185,13 @@ def test_in_memory_annotate_mirrors_the_server():
     ("filters", "status"),
     [
         ({"q": ""}, 422),
+        ({"q": "ab"}, 422),
         ({"id_prefix": ""}, 422),
         ({"q": "q" * 256}, 422),
         ({"id_prefix": "a" * 65}, 422),
         ({"name": "n" * 256}, 422),
         ({"namespace": "n" * 256}, 422),
-        ({"q": "a\x00"}, 400),
+        ({"q": "ab\x00"}, 400),
         ({"name": "\x00"}, 400),
         ({"tags": [""]}, 400),
     ],
@@ -207,5 +220,6 @@ def test_in_memory_task_list_filters_mirror_the_server():
     assert listed(tags=["best", "prod"]) == {"aa11"}
     assert listed(id_prefix="aa") == {"aa11", "aa22"}
     assert listed(q="TUNED") == {"aa11"}
-    assert listed(q="ml") == {"aa11", "aa22", "bb33"}
-    assert listed(q="ml", tags=["prod"]) == {"aa11"}
+    assert listed(q="ml.") == set()
+    assert listed(q="TRAIN") == {"aa11", "aa22"}
+    assert listed(q="Train", tags=["prod"]) == {"aa11"}

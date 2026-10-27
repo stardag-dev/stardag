@@ -10,16 +10,20 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 - **Added: task annotations and task search** (STA-149).
   `registry.task_annotate(task_id, tags=..., description=...)` sets a
-  task's tags and description (omitted arguments are left unchanged), and
+  task's tags and description: an omitted argument is left unchanged,
+  `tags=[]` clears the tags and `description=None` the description.
   `registry.task_list(...)` takes `namespace`, `name`, `tags` (all of
-  them), `id_prefix` and `q` (case-insensitive substring of name, namespace
-  or description). `TaskInfo` gains `tags` and `description`, empty against
-  an older registry. CLI: `stardag tasks annotate <id>` (`--tag`, `--add-tag`,
-  `--remove-tag`, `--clear-tags`, `--description`), and `stardag tasks
-list` gains `--tag`, `--name`, `--namespace`, `--id-prefix` and `--q`;
-  `tasks show` and `tasks list` show the tags. Needs the matching server: against an older registry,
-  annotating fails with a clear error, and a filtered list is refused
-  rather than answered unfiltered (an unfiltered list works as before).
+  them), `id_prefix` and `q` (at least 3 characters; case-insensitive
+  substring of name, namespace or description). `TaskInfo` gains `tags`
+  and `description`, empty against an older registry. CLI: `stardag tasks
+annotate <id>`, where `--tag` (or `--add-tag`) and `--remove-tag` edit
+  the tags, `--set-tags` replaces them, `--clear-tags` empties them and
+  `--description` sets the description; `stardag tasks list` gains
+  `--tag`, `--name`, `--namespace`, `--id-prefix` and `--search`/`-s`;
+  `tasks show` and `tasks list` show the tags. Needs the matching server:
+  against an older registry, annotating fails with a clear error, and a
+  filtered list is refused rather than answered unfiltered (an unfiltered
+  list works as before).
 - **`FunctionSettings.retries` accepts a `modal.Retries`** as well as a count
   (STA-146). It was always passed through to Modal unchanged; only the type
   said `int`, so setting the retry backoff took a type ignore.
@@ -215,26 +219,29 @@ list` gains `--tag`, `--name`, `--namespace`, `--id-prefix` and `--q`;
 - **Added: task annotations, task search filters and an instance read**
   (STA-149). A task (the completion) gains `tags` and `description`:
   mutable annotations outside every hash and every registration payload,
-  set by `PATCH /tasks/{task_id}` with `{tags?, description?}` (an omitted
-  field is unchanged; tags are trimmed, deduplicated and sorted, at most 32
-  of at most 64 characters; a description of at most 4096). The write
-  counts against the workspace's write rate limit, like any write that
-  does not finish running work. `GET /tasks` filters by `namespace` and
-  `name` (exact), `tag` (repeatable, all of them), `id_prefix` and `q`
-  (case-insensitive substring of name, namespace or description), and task
-  summaries and details carry the annotations. `GET /instances/{id}`
-  returns one instance of the caller's environment: `id`, `task_id`,
-  `deployment_id`, `settings_hash`, `instance_hash`, `body`, `created_at`,
-  `expanded_at`. Migration: two columns (`tags` defaults to empty, so
-  existing tasks read as untagged) and four indexes serving the listing:
-  `(environment_id, status_at, id)` for its order (the unfiltered listing
-  no longer scans the table), a GIN index on `tags`, a `pg_trgm` trigram
-  index for `q` and a `text_pattern_ops` index for `id_prefix`. **Needs the
-  `pg_trgm` extension**, which the migration creates if missing: bundled
-  with the official Postgres images and Debian's `postgresql`, and a
-  trusted extension since Postgres 13, so the database owner can create
-  it. The indexes are built with a plain `CREATE INDEX`, which blocks
-  writes to `task` for a few seconds per half a million rows. Additive in
+  set by `PATCH /tasks/{task_id}` with `{tags?, description?}`. An omitted
+  field is unchanged; `tags` replaces the set, last writer wins (no
+  server-side add/remove). Tags are trimmed, deduplicated and sorted, at
+  most 32 of at most 64 characters; a description is at most 4096. The
+  write counts against the workspace's write rate limit, like any write
+  that does not finish running work. `GET /tasks` filters by `namespace`
+  and `name` (exact), `tag` (repeatable, all of them), `id_prefix` and `q`
+  (3+ characters; case-insensitive substring of name, namespace or
+  description), and task summaries and details carry the annotations.
+  `GET /instances/{id}` returns one instance of the caller's environment:
+  `id`, `task_id`, `deployment_id`, `settings_hash`, `instance_hash`,
+  `body`, `created_at`, `expanded_at`. Migration: two columns (`tags`
+  defaults to empty, so existing tasks read as untagged) and four indexes
+  serving the listing: `(environment_id, status_at, id)` for its order
+  (the unfiltered listing no longer scans the table), a GIN index on
+  `tags`, a `pg_trgm` trigram index for `q` and a `text_pattern_ops`
+  index for `id_prefix`. **Needs the `pg_trgm` extension**, which the
+  migration creates if missing: it ships with the official Postgres images
+  and Debian's `postgresql`, and it is a trusted extension since Postgres
+  13, so the database owner can create it. The columns are added in one
+  short transaction under a 5 s `lock_timeout` (a catalog-only change);
+  the indexes are built `CONCURRENTLY`, so reads and writes to `task`
+  continue while they build, and a failed run can be re-run. Additive in
   both directions of a rolling deploy; downgrade leaves `pg_trgm`
   installed.
 - **Changed: the writes that finish running work get their own rate-limit

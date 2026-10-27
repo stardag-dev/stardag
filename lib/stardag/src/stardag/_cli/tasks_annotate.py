@@ -8,6 +8,7 @@ id. Tags are for finding tasks (``stardag tasks list --tag``); code refers
 to a task by its id.
 """
 
+from types import EllipsisType
 from typing import Optional
 
 import typer
@@ -34,18 +35,21 @@ def _usage(message: str) -> None:
 
 def tasks_annotate(
     task_id: str = _TASK_ID,
-    tag: Optional[list[str]] = typer.Option(
-        None,
-        "--tag",
-        help="Replace the task's tags with these (repeatable).",
-    ),
     add_tag: Optional[list[str]] = typer.Option(
-        None, "--add-tag", help="Add a tag, keeping the others (repeatable)."
+        None,
+        "--add-tag",
+        "--tag",
+        help="Add a tag, keeping the others (repeatable).",
     ),
     remove_tag: Optional[list[str]] = typer.Option(
         None,
         "--remove-tag",
         help="Remove a tag, keeping the others (repeatable).",
+    ),
+    set_tags: Optional[list[str]] = typer.Option(
+        None,
+        "--set-tags",
+        help="Replace all of the task's tags with these (repeatable).",
     ),
     clear_tags: bool = typer.Option(False, "--clear-tags", help="Remove every tag."),
     description: Optional[str] = typer.Option(
@@ -59,37 +63,38 @@ def tasks_annotate(
     json_output: bool = JSON_OPTION,
 ) -> None:
     """Set a task's tags and/or description; what is not named is left as
-    it is. ``--tag`` replaces the set, ``--add-tag``/``--remove-tag`` edit
-    it, ``--clear-tags`` empties it. The registry trims, deduplicates and
-    sorts tags, and refuses an empty or over-long one (64 characters), or
-    more than 32.
+    it is. ``--tag``/``--add-tag`` and ``--remove-tag`` edit the tags,
+    ``--set-tags`` replaces them, ``--clear-tags`` empties them. The
+    registry trims, deduplicates and sorts tags, and refuses an empty or
+    over-long one (64 characters), or more than 32.
 
-    Writes ``PATCH /tasks/{id}``; ``--add-tag``/``--remove-tag`` read
-    ``GET /tasks/{id}`` first and send the edited set, so a concurrent
-    annotation between the two is overwritten.
+    Writes ``PATCH /tasks/{id}``. Adding or removing reads ``GET
+    /tasks/{id}`` first and sends the edited set: the registry replaces the
+    set, last writer wins, so an annotation made by someone else between the
+    two is overwritten.
     """
-    replaces = tag is not None or clear_tags
+    replaces = set_tags is not None or clear_tags
     edits = bool(add_tag or remove_tag)
     if replaces and edits:
         _usage(
-            "--tag/--clear-tags replace the tags; do not combine them with "
-            "--add-tag/--remove-tag"
+            "--set-tags/--clear-tags replace the tags; do not combine them "
+            "with --tag/--add-tag/--remove-tag"
         )
-    if tag is not None and clear_tags:
-        _usage("--tag and --clear-tags contradict each other")
+    if set_tags is not None and clear_tags:
+        _usage("--set-tags and --clear-tags contradict each other")
     if not (replaces or edits or description is not None):
         _usage(
-            "nothing to change: pass --tag, --add-tag, --remove-tag, "
+            "nothing to change: pass --tag, --remove-tag, --set-tags, "
             "--clear-tags or --description"
         )
 
     registry = _resolve_registry(stardag_profile, stardag_env)
     try:
-        tags: list[str] | None = None
+        tags: list[str] | EllipsisType = ...
         if clear_tags:
             tags = []
-        elif tag is not None:
-            tags = list(tag)
+        elif set_tags is not None:
+            tags = list(set_tags)
         elif edits:
             current = registry.task_get(task_id).tags
             removed = {t.strip() for t in remove_tag or []}

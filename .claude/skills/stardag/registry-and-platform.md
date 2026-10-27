@@ -211,9 +211,9 @@ stardag deployments show <deployment-id>
 stardag executions list --build <build-id> [--include-ended] [--not-in-current-plan]
 stardag executions list --task <task-id>
 stardag tasks list [--status running]                 # Claim column names the holding build
-stardag tasks list --tag best --namespace ml --q baseline   # discovery filters (all must hold)
+stardag tasks list --tag best --namespace ml -s baseline    # discovery filters (all must hold)
 stardag tasks show <task-id> [--events N]             # status, claim holder, tags, instances, executions
-stardag tasks annotate <task-id> --add-tag best -d "Tuned baseline"   # tags/description; never re-keys
+stardag tasks annotate <task-id> --tag best -d "Tuned baseline"   # adds a tag; --set-tags replaces; never re-keys
 stardag tasks check <task-id> --module mypkg.tasks    # run complete() locally; writes nothing
 stardag tasks retry <task-id> [--build <build-id>]    # FAILED -> PENDING (refused on COMPLETED)
 stardag tasks cancel <task-id> [--build <build-id>]   # release one claim; stops nothing
