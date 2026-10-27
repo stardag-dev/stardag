@@ -122,6 +122,46 @@ def _refuse_packed_settings_function(
     )
 
 
+def _declared_retries(settings: FunctionSettings) -> int:
+    """How many retries ``settings`` asks Modal for: ``retries`` is an int
+    or a ``modal.Retries``, and unset means none."""
+    retries = settings.get("retries")
+    if retries is None:
+        return 0
+    if isinstance(retries, modal.Retries):
+        return retries.max_retries
+    return retries
+
+
+def _warn_retrying_self_reporting_worker(name: str, settings: FunctionSettings) -> None:
+    """Warn about Modal ``retries`` on a worker whose run function reports
+    its own lifecycle.
+
+    Such a worker records a task that raises as ``FAILED``, which ends its
+    execution, and a Modal retry of that call stops at its start-of-attempt
+    checkpoint without running anything: the retry costs a container start
+    and recovers nothing. A warning rather than a refusal, because
+    ``retries`` still re-runs the attempts that ended with nothing recorded
+    -- an exception before the failure report, a report that never landed,
+    a timeout the task did not catch.
+    """
+    retries = _declared_retries(settings)
+    if retries <= 0:
+        return
+    logger.warning(
+        f"FunctionSettings for {name!r} sets retries={retries}. Its run "
+        "function reports the task lifecycle from the worker, so a task that "
+        "raises is recorded FAILED and a Modal retry of it stops before "
+        "run(): each retry costs a container start and re-runs nothing. "
+        "retries= still re-runs an attempt that ended with nothing recorded "
+        "(an exception before the failure report, a report that never "
+        "landed, a timeout the task did not catch). For a transient error, "
+        "retry inside the task, around the call that fails; after a real "
+        "failure, use `stardag tasks retry` or re-trigger the build. "
+        "Preemptions and crashed workers are recovered without retries=."
+    )
+
+
 def _infer_task_module_patterns(_depth: int = 2) -> tuple[str, ...]:
     """Infer ``task_modules`` from the module that constructs the app.
 
@@ -469,6 +509,8 @@ def _register_functions(
 
     for worker_name, settings in self._worker_settings.items():
         func_name = f"worker_{worker_name}"
+        if worker_reports_lifecycle:
+            _warn_retrying_self_reporting_worker(func_name, settings)
         register(func_name, settings, one_build_per_process=True)(_modal_run)
         function_names.append(func_name)
 
