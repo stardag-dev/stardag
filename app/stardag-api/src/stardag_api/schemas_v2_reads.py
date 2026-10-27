@@ -11,13 +11,19 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from stardag_api.models.enums import (
     AdmittedBy,
     EventType,
     ExclusionReason,
     TaskStatus,
+)
+from stardag_api.services.annotations import (
+    MAX_DESCRIPTION_LENGTH,
+    MAX_TAGS,
+    normalise_description,
+    normalise_tags,
 )
 from stardag_api.schemas_v2 import (
     BuildResponse,
@@ -161,6 +167,10 @@ class TaskSummaryResponse(BaseModel):
     claim_build_id: UUID | None
     #: The current execution (the claim's, while RUNNING).
     execution_id: UUID | None
+    #: Annotations: normalised tags (sorted) and a description. Mutable,
+    #: set by ``PATCH /tasks/{task_id}``, outside every hash.
+    tags: list[str] = Field(default_factory=list)
+    description: str | None = None
 
 
 class TaskResponse(TaskSummaryResponse):
@@ -168,6 +178,64 @@ class TaskResponse(TaskSummaryResponse):
     first."""
 
     instances: list[TaskInstanceResponse]
+
+
+class InstanceResponse(BaseModel):
+    """``GET /instances/{instance_id}``: one instance and the completion it
+    realises. The body is immutable."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    task_id: str
+    deployment_id: UUID
+    settings_hash: UUID
+    instance_hash: str
+    body: dict[str, Any]
+    created_at: datetime
+    expanded_at: datetime | None
+
+
+class TaskAnnotateRequest(BaseModel):
+    """``PATCH /tasks/{task_id}``: the annotations to change. An omitted
+    field is left as it is; ``tags`` replaces the whole set (``[]`` clears
+    it, ``null`` is refused); ``description: null`` or ``""`` clears it.
+    Tags are normalised — trimmed, deduplicated, sorted — and refused (422)
+    if empty, longer than 64 characters, carrying a control character, or
+    more than 32 distinct."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Bounded before normalisation too, so an oversized body is refused
+    # without being walked; duplicates may make up the difference.
+    tags: list[str] | None = Field(default=None, max_length=4 * MAX_TAGS)
+    description: str | None = Field(default=None, max_length=4 * MAX_DESCRIPTION_LENGTH)
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _tags_not_null(cls, value: Any) -> Any:
+        # Runs only for a value that was sent (defaults are not validated).
+        if value is None:
+            raise ValueError("tags may be omitted or a list, not null")
+        return value
+
+    @field_validator("tags")
+    @classmethod
+    def _normalise_tags(cls, value: list[str] | None) -> list[str] | None:
+        return None if value is None else normalise_tags(value)
+
+    @field_validator("description")
+    @classmethod
+    def _normalise_description(cls, value: str | None) -> str | None:
+        return normalise_description(value)
+
+    def changes(self) -> dict[str, Any]:
+        """Only the fields the request named, as columns to set."""
+        return {
+            f: getattr(self, f)
+            for f in ("tags", "description")
+            if f in self.model_fields_set
+        }
 
 
 class TaskListResponse(BaseModel):

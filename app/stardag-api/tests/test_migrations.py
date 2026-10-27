@@ -267,3 +267,92 @@ async def test_v2_migration_needs_no_consent_on_an_empty_v1_schema(
 
     assert await _scalar(v1_schema, "SELECT to_regclass('builds')") is None
     assert await _scalar(v1_schema, "SELECT to_regclass('build')") is not None
+
+
+# --- task.tags / task.description over existing rows (STA-149) ---------------
+
+PRE_ANNOTATIONS = "3c8e1a7d5b42"
+ANNOTATIONS = "7584698b441f"
+ANNOTATIONS_SCHEMA = "annotations_check"
+
+
+async def _in_annotations_schema(engine, sql: str | None = None, *, step=None):
+    """Run ``sql`` (returning its scalar) or an Alembic ``step`` in the
+    scratch schema, in one transaction."""
+    config = get_alembic_config(engine.url.render_as_string(hide_password=False))
+    async with engine.begin() as conn:
+        await conn.execute(text(f"SET LOCAL search_path TO {ANNOTATIONS_SCHEMA}"))
+        if step is not None:
+
+            def run(sync_conn) -> None:
+                config.attributes["connection"] = sync_conn
+                step(config)
+
+            await conn.run_sync(run)
+            return None
+        assert sql is not None
+        return await conn.scalar(text(sql))
+
+
+async def test_task_annotations_migrate_over_existing_rows(migrated_database_url):
+    """Upgrade adds the columns with every existing task untagged and
+    undescribed; downgrade drops them and keeps the rows; upgrade again."""
+    engine = create_async_engine(migrated_database_url)
+    async with engine.begin() as conn:
+        await conn.execute(text(f"DROP SCHEMA IF EXISTS {ANNOTATIONS_SCHEMA} CASCADE"))
+        await conn.execute(text(f"CREATE SCHEMA {ANNOTATIONS_SCHEMA}"))
+    try:
+        await _in_annotations_schema(
+            engine, step=lambda c: command.upgrade(c, PRE_ANNOTATIONS)
+        )
+        for statement in (
+            "INSERT INTO workspaces (id, name, slug, created_at)"
+            " VALUES ('00000000-0000-0000-0000-00000000000a', 'w', 'w', now()) RETURNING 1",
+            "INSERT INTO environments (id, workspace_id, name, slug, created_at)"
+            " VALUES ('00000000-0000-0000-0000-00000000000b',"
+            " '00000000-0000-0000-0000-00000000000a', 'e', 'e', now()) RETURNING 1",
+            "INSERT INTO task (id, environment_id, task_id, task_name, created_at)"
+            " VALUES (gen_random_uuid(), '00000000-0000-0000-0000-00000000000b',"
+            " 't', 'T', now()) RETURNING 1",
+        ):
+            await _in_annotations_schema(engine, statement)
+
+        await _in_annotations_schema(
+            engine, step=lambda c: command.upgrade(c, ANNOTATIONS)
+        )
+        assert await _in_annotations_schema(
+            engine,
+            "SELECT tags = '{}' AND description IS NULL FROM task WHERE task_id = 't'",
+        )
+        assert await _in_annotations_schema(
+            engine,
+            "SELECT count(*) FROM pg_indexes WHERE indexname = 'ix_task_tags'"
+            f" AND schemaname = '{ANNOTATIONS_SCHEMA}'",
+        )
+        await _in_annotations_schema(
+            engine, "UPDATE task SET tags = '{a}', description = 'd' RETURNING 1"
+        )
+
+        await _in_annotations_schema(
+            engine, step=lambda c: command.downgrade(c, PRE_ANNOTATIONS)
+        )
+        assert await _in_annotations_schema(engine, "SELECT count(*) FROM task") == 1
+        assert not await _in_annotations_schema(
+            engine,
+            "SELECT count(*) FROM information_schema.columns"
+            f" WHERE table_schema = '{ANNOTATIONS_SCHEMA}' AND table_name = 'task'"
+            " AND column_name IN ('tags', 'description')",
+        )
+
+        await _in_annotations_schema(
+            engine, step=lambda c: command.upgrade(c, ANNOTATIONS)
+        )
+        assert await _in_annotations_schema(
+            engine, "SELECT tags = '{}' FROM task WHERE task_id = 't'"
+        )
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(f"DROP SCHEMA IF EXISTS {ANNOTATIONS_SCHEMA} CASCADE")
+            )
+        await engine.dispose()

@@ -325,9 +325,11 @@ Replaces v1 `tasks`. Holds no parameters.
 | `claim_plan_id`, SET NULL                                  | the holder; implies the build, and via `plan_member` the instance body that is running. Composite FK `(claim_plan_id, id)` → `plan_member (plan_id, task_pk)`, its primary key, so a claim can only name a plan that holds this task                                                                                                                     |
 | `execution_id`, SET NULL                                   | current execution, minted by the client before the claim (STA-50 rule unchanged); executor details are read from the execution row, not copied. Composite FK `(id, execution_id)` → `execution (task_pk, id)`                                                                                                                                            |
 | `preempted_at`                                             | as v1 (`waiting_for_lock` goes with the lock table)                                                                                                                                                                                                                                                                                                      |
+| `tags`, `description`                                      | annotations of the completion (STA-149): `text[] NOT NULL DEFAULT '{}'` kept normalised (trimmed, deduplicated, sorted), and nullable `text`. Mutable through `PATCH /tasks/{task_id}`, outside every hash and every registration payload; tags are for discovery, never for addressing                                                                  |
 
 Indexes: `(environment_id, status, status_at)`, `(environment_id,
-task_name)`, `(claim_plan_id) WHERE status = 'RUNNING'`.
+task_name)`, `(claim_plan_id) WHERE status = 'RUNNING'`, and a GIN index on
+`tags` for containment (`GET /tasks?tag=`).
 
 Claim arbitration locks this row with `FOR NO KEY UPDATE` (not `FOR
 UPDATE`): every insert into `task_instance`, `plan_member`, `execution` and
