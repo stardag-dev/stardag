@@ -6,6 +6,7 @@ import { differingParameters, parametersOf } from "../utils/instances";
 import { formatAbsoluteTime, formatRelativeTime } from "../utils/time";
 import { ExpandButton } from "./ArtifactViewer";
 import { FullscreenModal } from "./FullscreenModal";
+import { JsonTree } from "./JsonTree";
 import { Modal } from "./Modal";
 import { Tooltip } from "./ui/Tooltip";
 
@@ -91,7 +92,7 @@ export function TaskParameters({
         </div>
       </div>
       {current ? (
-        <ParametersPre instance={current} className="max-h-64" />
+        <ParametersTree instance={current} className="max-h-64" />
       ) : (
         <p className="p-3 text-sm text-gray-500 dark:text-gray-400">
           No instance recorded.
@@ -184,27 +185,35 @@ function FullscreenParameters({
           />
           {instances.length > 1 && <DifferingNote differing={differing} />}
         </div>
-        <div className="min-h-0 flex-1 overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700">
-          <ParametersPre instance={selected} className="h-full" />
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700">
+          <ParametersTree instance={selected} className="min-h-0 flex-1" />
         </div>
       </div>
     </FullscreenModal>
   );
 }
 
-function ParametersPre({
+/**
+ * The instance's parameters as a collapsible, searchable tree. Keyed by
+ * the instance, so switching instances starts the expansion and search
+ * over.
+ */
+function ParametersTree({
   instance,
   className = "",
 }: {
   instance: TaskInstance;
   className?: string;
 }) {
+  const parameters = useMemo(() => parametersOf(instance.body), [instance.body]);
   return (
-    <pre
-      className={`overflow-auto bg-gray-50 p-3 text-sm text-gray-800 dark:bg-gray-900 dark:text-gray-200 ${className}`}
-    >
-      {JSON.stringify(parametersOf(instance.body), null, 2)}
-    </pre>
+    <JsonTree
+      key={instance.id}
+      value={parameters}
+      label="Task parameters"
+      className={className}
+      emptyText="No parameters."
+    />
   );
 }
 
