@@ -98,6 +98,7 @@ def test_an_unregistered_class_prints_no_import(fake_registry):
     assert result.exit_code == 0, result.output
     # The namespace is never read as a module path.
     assert result.stdout.splitlines() == [
+        "# import TrainedModel from its defining module",
         f'TrainedModel.ref("{task_id}", instance_id="{instance_id}")',
     ]
     assert "-m <module>" in result.stderr

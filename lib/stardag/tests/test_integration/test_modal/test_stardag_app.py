@@ -859,11 +859,31 @@ class TestTriggersHydrateTaskRefs:
         registry, leaf, expected = stored
         root = SyncOnlyTask(name="ref-root", deps=(SyncOnlyTask.ref(leaf.id),))
         assert root.id == expected.id
-        with registry_provider.override(registry):
-            getattr(self._make_app(), method)(root)
+        app = self._make_app()
+        if method == "build_trigger":
+            # Hydrates from the registry it creates the build in.
+            with registry_provider.override(registry):
+                app.build_trigger(root)
+        else:
+            # Never from the local default registry: an explicit one only.
+            getattr(app, method)(root, registry=registry)
         sent = modal_function_stub["kwargs"]["tasks"]
         assert is_task_payload(sent)
         assert sent["body"] == expected.instance_body()
+
+    @pytest.mark.parametrize("method", ["build_spawn", "build_remote"])
+    def test_spawn_does_not_hydrate_from_the_local_default_registry(
+        self, method, modal_function_stub, stored
+    ):
+        from stardag._core.task_ref import TaskRefNotHydratedError
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        registry, leaf, _ = stored
+        root = SyncOnlyTask(name="ref-root", deps=(SyncOnlyTask.ref(leaf.id),))
+        with registry_provider.override(registry):
+            with pytest.raises(TaskRefNotHydratedError, match="registry="):
+                getattr(self._make_app(), method)(root)
+        assert "kwargs" not in modal_function_stub
 
 
 # ---------------------------------------------------------------------------

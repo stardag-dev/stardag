@@ -56,6 +56,7 @@ from stardag._core.task_ref import (
     TaskRef,
     TaskRefHydrationError,
     TaskRefNotHydratedError,
+    clear_hydration_memo,
     resolve_refs,
 )
 from stardag._core.validate import LoadValidator
@@ -145,6 +146,7 @@ __all__ = [
     "TaskRefNotHydratedError",
     "TaskSlug",
     "resolve_refs",
+    "clear_hydration_memo",
     "TaskLoads",
     "TaskStruct",
     "target_factory_provider",

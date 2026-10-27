@@ -22,7 +22,11 @@ from uuid import UUID
 import modal
 
 from stardag import BaseTask
-from stardag._core.task_ref import resolve_refs
+from stardag._core.task_ref import (
+    TaskRefNotHydratedError,
+    contains_refs,
+    resolve_refs,
+)
 from stardag.build._registration import new_id
 from stardag.build._settings import resolve_settings, validate_settings
 from stardag.build._task_modules import TaskModulesError
@@ -47,6 +51,34 @@ from stardag.integration.modal._tick import _validate_tick_kwargs
 from stardag.registry import RegistryABC, is_noop_registry, registry_provider
 
 logger = logging.getLogger(__name__)
+
+
+def _hydrate_for_spawn(
+    tasks: typing.Sequence[BaseTask] | BaseTask, registry: RegistryABC | None
+) -> typing.Sequence[BaseTask] | BaseTask:
+    """``build_spawn`` / ``build_remote``'s roots with every ``TaskRef``
+    hydrated from ``registry``.
+
+    The roots cross to the deployed ``build`` function as instance bodies,
+    and a reference has none, so references are hydrated before the
+    spawn. They are not hydrated from the *local default* registry: these
+    methods need no local registry credentials, and the profile that
+    happens to be active here may point at another environment than the
+    deployed app's. A reference without an explicit ``registry`` is
+    refused, with the two ways out.
+    """
+    if not contains_refs(tasks):
+        return tasks
+    if registry is None:
+        raise TaskRefNotHydratedError(
+            "The tasks hold TaskRefs, which must be hydrated before they are "
+            "sent to the deployed app, and build_spawn/build_remote do not "
+            "read the local default registry. Pass registry= (the registry "
+            "the deployed app builds against), or hydrate them first with "
+            "sd.resolve_refs(tasks, registry). build_trigger hydrates from "
+            "the registry it creates the build in."
+        )
+    return resolve_refs(tasks, registry)
 
 
 class BuildTriggerResult(typing.NamedTuple):
@@ -89,14 +121,19 @@ class _Triggering:
         worker_selector: WorkerSelector | None = None,
         *,
         build_kwargs: dict[str, typing.Any] | None = None,
+        registry: RegistryABC | None = None,
     ):
         """Spawn a resident build on the deployed app (non-blocking); the
         build is created inside the ``build`` container.
 
+        Needs no local registry, unless ``tasks`` hold ``TaskRef`` s: those
+        are hydrated here, before the roots are serialized, from
+        ``registry`` (see :func:`_hydrate_for_spawn`).
+
         Returns:
             The Modal ``FunctionCall`` of the spawned build.
         """
-        tasks = resolve_refs(tasks)
+        tasks = _hydrate_for_spawn(tasks, registry)
         build_function = modal.Function.from_name(app_name=self.name, name="build")
         return build_function.spawn(
             tasks=to_task_payloads(tasks),
@@ -111,10 +148,11 @@ class _Triggering:
         worker_selector: WorkerSelector | None = None,
         *,
         build_kwargs: dict[str, typing.Any] | None = None,
+        registry: RegistryABC | None = None,
     ):
         """Run a resident build on the deployed app and wait for its
-        ``BuildSummary``."""
-        tasks = resolve_refs(tasks)
+        ``BuildSummary``. ``registry`` as for :meth:`build_spawn`."""
+        tasks = _hydrate_for_spawn(tasks, registry)
         build_function = modal.Function.from_name(app_name=self.name, name="build")
         return build_function.remote(
             tasks=to_task_payloads(tasks),

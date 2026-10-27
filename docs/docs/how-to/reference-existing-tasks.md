@@ -94,6 +94,21 @@ and the registry's stored body is the record of how it was constructed.
 - **A placeholder, not a proxy.** To read the referenced task's parameters,
   call `.hydrate()` and read them off the result.
 
+## Where a reference fits
+
+A reference is a `Task[LoadedT]`, not an instance of the referenced class.
+So it goes into fields that accept any task loading the right type:
+
+- `sd.TaskLoads[Model]` fields, and lists, tuples and dicts of them
+  (`list[sd.TaskLoads[Model]]`, `dict[str, sd.TaskLoads[Model]]`);
+- `sd.Depends[Model]` parameters of `@sd.task` functions;
+- a build's roots.
+
+A field annotated with the concrete class, `model: TrainedModel`, rejects a
+reference, and the validation error says so. Either annotate the field
+`sd.TaskLoads[Model]` (usually what was meant: the task only loads the
+model), or pass `ref.hydrate()`, the real `TrainedModel`.
+
 ## Pin the instance
 
 A task id may have several instances: constructions of it that agree on
@@ -121,14 +136,19 @@ task. Nothing downstream ever sees a reference:
 - a reference given directly as a root builds the referenced task (usually
   a no-op: it is complete) and is then loadable.
 
-This applies to `sd.build`, `sd.build_aio`, the sequential builds, and the
-Modal triggers (`build_trigger`, `build_spawn`, `build_remote`). To do it
-yourself — say, to inspect the DAG a build will see — call
-`sd.resolve_refs(tasks)`.
+This applies to `sd.build`, `sd.build_aio`, the sequential builds, the
+Prefect build, and the Modal triggers. `build_trigger` hydrates from the
+registry it creates the build in. `build_spawn` and `build_remote` need no
+local registry, so they never fall back to the local default one: given
+references, pass `registry=` (the registry the deployed app builds against),
+or they refuse. To do it yourself — say, to inspect the DAG a build will see
+— call `sd.resolve_refs(tasks)`.
 
-A reference that reaches an instance body without being hydrated (calling
-`.instance_body()` on a task holding one, outside a build) raises
-`sd.TaskRefNotHydratedError`.
+A reference has no body, only its task id, so it serializes into nothing but
+its parent's id. An instance body, a Modal payload, or a plain `model_dump()`
+of a task holding an unhydrated reference raises
+`sd.TaskRefNotHydratedError` rather than producing a dump that could not be
+loaded back.
 
 ## When hydration fails
 
@@ -137,6 +157,10 @@ A reference that reaches an instance body without being hydrated (calling
 - **No registry configured, or the wrong one.** A reference is read from
   the registry and environment the task was registered in; check the
   active profile.
+- **The registry cannot be reached.** An unpinned reference always asks the
+  registry: pin it. A pinned one needs one online read before it is served
+  from the local body cache (and every time, if the cache is turned off
+  with `STARDAG_REGISTRY_CACHE=0`).
 - **Another class.** The stored body is not a `TrainedModel` (or a subclass
   of it): the id belongs to a different task.
 - **The id no longer matches.** The stored body, validated under today's

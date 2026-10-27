@@ -14,7 +14,6 @@ under a scope ``(deployment, settings)``, with the body (design.md, D1/D2).
     stardag tasks exclude <plan-id> <task-id>    # give up on it in one plan
 """
 
-import importlib
 import json
 from datetime import datetime, timezone
 from typing import Optional
@@ -279,48 +278,18 @@ def tasks_list(
 # -----------------------------------------------------------------------------
 
 
-def _class_import(namespace: str, name: str) -> tuple[str, str, bool]:
-    """``(module, class_name, located)`` for a registered task's class.
-
-    Only from the task classes this process has registered (``-m`` imports
-    them). The namespace is never read as a module path: a task's namespace
-    is an identity, not an import location, and the two are best kept
-    unrelated. ``located`` is False when the class is not registered here,
-    and ``module`` is then empty: no import is printed rather than a guess.
-    """
+def _registered_class(namespace: str, name: str) -> type | None:
+    """The task class registered in this process under ``namespace`` and
+    ``name`` (``-m`` imports it), or ``None``. The namespace is never read
+    as a module path: a task's namespace is an identity, not an import
+    location."""
     from stardag._core.base_task import BaseTask
     from stardag.polymorphic import TypeId
 
     try:
-        cls = BaseTask._registry().get_class(TypeId(namespace=namespace, name=name))
+        return BaseTask._registry().get_class(TypeId(namespace=namespace, name=name))
     except KeyError:
-        return "", name, False
-    bound = _name_bound_to(cls)
-    if bound is None:
-        # Registered, but not importable by its own name (a local class):
-        # the best guess is still its module and name.
-        return cls.__module__, cls.__qualname__, False
-    return cls.__module__, bound, True
-
-
-def _name_bound_to(cls: type) -> str | None:
-    """The name ``cls`` is importable under from its module: its qualified
-    name when that resolves to it, else any module attribute bound to it
-    (``@sd.task(name="Renamed") def add_one`` registers ``Renamed`` but
-    binds ``add_one``). ``None`` when neither does."""
-    try:
-        module = importlib.import_module(cls.__module__)
-    except Exception:
         return None
-    target: object = module
-    for part in cls.__qualname__.split("."):
-        target = getattr(target, part, None)
-    if target is cls:
-        return cls.__qualname__
-    for attribute, value in vars(module).items():
-        if value is cls and not attribute.startswith("_"):
-            return attribute
-    return None
 
 
 @app.command("ref")
@@ -376,37 +345,35 @@ def tasks_ref(
         instance_id = str(task.instances[0].id)
     else:
         _fail(StardagError(f"Task {task_id} has no instance to reference."))
-    module_path, class_name, located = _class_import(
-        task.task_namespace, task.task_name
-    )
-    imported_as = class_name.partition(".")[0]
-    import_line = f"from {module_path} import {imported_as}" if module_path else ""
-    ref_line = f'{class_name}.ref("{task.task_id}", instance_id="{instance_id}")'
+    from stardag._core.task_ref import reference_line
+
+    cls = _registered_class(task.task_namespace, task.task_name)
+    if cls is not None:
+        import_line, prefix = reference_line(cls)
+    else:
+        import_line, prefix = None, task.task_name
+    ref_line = f'{prefix}.ref("{task.task_id}", instance_id="{instance_id}")'
     if json_output:
         emit_json(
             {
                 "task_id": task.task_id,
                 "instance_id": instance_id,
-                "module": module_path or None,
-                "class_name": class_name,
-                "module_located": located,
-                "import": import_line or None,
+                "module": cls.__module__ if cls is not None else None,
+                "class_name": prefix,
+                "module_located": cls is not None,
+                "import": import_line,
                 "ref": ref_line,
             }
         )
         return
     if import_line:
         typer.echo(import_line)
+    elif cls is None:
+        typer.echo(f"# import {prefix} from its defining module")
     typer.echo(ref_line)
-    if not module_path:
+    if cls is None:
         error_console.print(
-            "[dim]Note: pass -m <module> (the module defining "
-            f"{class_name}) to also print its import.[/dim]",
-            highlight=False,
-        )
-    elif not located:
-        error_console.print(
-            f"[dim]Note: {class_name} is not importable by name from "
-            f"{module_path}; check the import above.[/dim]",
+            f"[dim]Note: pass -m <module> (the module defining {prefix}) to "
+            "print its import.[/dim]",
             highlight=False,
         )

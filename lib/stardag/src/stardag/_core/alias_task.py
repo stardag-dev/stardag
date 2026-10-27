@@ -16,6 +16,25 @@ if TYPE_CHECKING:
 _run_error_msg = "AliasTask does not implement run(), it can only be used to reference another task's output."
 
 
+_DEPRECATION_WARNED = False
+
+
+def _warn_deprecated(stacklevel: int) -> None:
+    """Warn that ``AliasTask`` is deprecated, once per process, pointing at
+    the caller's code (``stacklevel`` counts from this function)."""
+    global _DEPRECATION_WARNED
+    if _DEPRECATION_WARNED:
+        return
+    _DEPRECATION_WARNED = True
+    warnings.warn(
+        "AliasTask is deprecated: use MyTask.ref(task_id, instance_id=...) "
+        "(see 'stardag tasks ref <task-id>'), which is typed and hydrated from "
+        "the registry at build start.",
+        DeprecationWarning,
+        stacklevel=stacklevel,
+    )
+
+
 class AliasedMetadata(BaseModel):
     """Metadata for an aliased task."""
 
@@ -109,6 +128,7 @@ class AliasTask(Task[LoadedT], Generic[LoadedT]):
         Returns:
             An AliasTask instance referencing the specified task.
         """
+        _warn_deprecated(stacklevel=3)
         if isinstance(id, str):
             id = UUID(id)
 
@@ -143,16 +163,15 @@ class AliasTask(Task[LoadedT], Generic[LoadedT]):
             )
         )
 
-    @model_validator(mode="after")
-    def _warn_deprecated(self) -> "AliasTask[LoadedT]":
-        warnings.warn(
-            "AliasTask is deprecated: use MyTask.ref(task_id, instance_id=...) "
-            "(see 'stardag tasks ref <task-id>'), which is typed and hydrated "
-            "from the registry at build start.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self
+    def __init__(self, **data: Any) -> None:
+        # Warned on construction in user code only (see below: validating
+        # a stored body never reaches this), so a worker never warns.
+        _warn_deprecated(stacklevel=3)
+        super().__init__(**data)
+
+    # Tell pydantic this is not a custom ``__init__``: validation would
+    # otherwise route through it (and warn) for every stored body too.
+    __init__.__pydantic_base_init__ = True  # type: ignore[attr-defined]
 
     @model_validator(mode="after")
     def _validate_specifies_generic_loads_type(self) -> "AliasTask[LoadedT]":

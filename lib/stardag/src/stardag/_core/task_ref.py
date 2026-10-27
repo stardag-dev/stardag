@@ -37,10 +37,18 @@ from functools import cached_property
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, SerializationInfo, field_serializer, field_validator
+import httpx
+from pydantic import (
+    BaseModel,
+    SerializationInfo,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from stardag._core.base_task import BaseTask, LoadableTask, TargetTask, TaskSlug
 from stardag._core.task import LoadedT, Task
+from stardag._core.rehydrate import TaskRehydrationError
 from stardag.base_model import CONTEXT_MODE_KEY
 from stardag.exceptions import StardagError
 from stardag.target import LoadableSaveableFileSystemTarget
@@ -61,10 +69,14 @@ class TaskRefNotHydratedError(StardagError):
     """
 
 
-class TaskRefHydrationError(StardagError):
-    """A :class:`TaskRef` could not be hydrated: the registry has no such
-    task or instance, the stored body is of another class, or it no longer
-    recomputes to the referenced task id."""
+class TaskRefHydrationError(TaskRehydrationError):
+    """A :class:`TaskRef` could not be hydrated: no registry is configured
+    or it cannot be reached, it has no such task or instance, the stored
+    body is of another class, a class in it is not imported, or it no
+    longer recomputes to the referenced task id.
+
+    A :class:`~stardag.TaskRehydrationError`, so code handling failed
+    rehydration in general handles this too."""
 
 
 def unhydrated_ref_error(task: BaseTask) -> TaskRefNotHydratedError:
@@ -76,11 +88,11 @@ def unhydrated_ref_error(task: BaseTask) -> TaskRefNotHydratedError:
         else f"{type(task).__name__} {task.id} holds a TaskRef that"
     )
     return TaskRefNotHydratedError(
-        f"{where} reached an instance body unhydrated. A registry stores "
-        "real task bodies only, so builds replace every reference with its "
-        "hydrated task before registering anything. Pass the task to "
-        "sd.build, or resolve it first: stardag.resolve_refs(task) "
-        "(or .hydrate() on the reference)."
+        f"{where} cannot be serialized unhydrated: a reference has no body "
+        "(only its task id). The registry stores real task bodies only, so "
+        "builds replace every reference with its hydrated task before "
+        "registering anything. Pass the task to sd.build, or resolve it "
+        "first: sd.resolve_refs(task) (or .hydrate() on the reference)."
     )
 
 
@@ -113,6 +125,23 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
     task_class: type
     task_id: UUID
     instance_id: UUID | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_the_former_task_ref(cls, data: Any) -> Any:
+        """``stardag.TaskRef`` was a ``name``/``version``/``id`` dataclass
+        before it became this; say so rather than "field required"."""
+        if (
+            isinstance(data, Mapping)
+            and "task_class" not in data
+            and ("name" in data or "id" in data)
+        ):
+            raise TypeError(
+                "stardag.TaskRef is now the typed task reference "
+                "(MyTask.ref(task_id, instance_id=...)); the former "
+                "name/version/id dataclass is stardag.TaskSlug."
+            )
+        return data
 
     @field_validator("task_class")
     @classmethod
@@ -172,12 +201,22 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
         return {"id": str(self.task_id)}
 
     def _serialize_extra(self, data: Any, info: SerializationInfo) -> Any:
+        """Only hash mode (a parent's task id) dumps a reference: to
+        ``{"id": task_id}``, via ``_hash_mode_finalize``.
+
+        Every other dump is refused, the plain ``model_dump()`` /
+        ``model_dump_json()`` of a task holding one included. A reference
+        has no body, and a dump of one could not be loaded back: there is
+        no stored form of a reference, by design (the registry stores real
+        bodies only). Refusing here rather than emitting a dump that cannot
+        round-trip keeps one rule for every serialization: hydrate first.
+        ``canonical_instance_body_json`` refuses the registry mode before
+        this is reached, unwrapped; raised here, pydantic wraps the error in
+        a ``PydanticSerializationError`` carrying its message.
+        """
         mode = info.context.get(CONTEXT_MODE_KEY) if info.context else None
-        if mode == "registry":
-            # A backstop: ``canonical_instance_body_json`` refuses first,
-            # with this error unwrapped (pydantic wraps one raised here).
+        if mode != "hash":
             raise unhydrated_ref_error(self)
-        # Hash mode: ``_hash_mode_finalize`` replaces the dump with the id.
         return data
 
     def __reduce__(self) -> tuple[Any, ...]:
@@ -188,6 +227,21 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
 
     def __str__(self) -> str:
         return repr(self)
+
+    if not TYPE_CHECKING:
+        # Runtime only: a type checker must keep rejecting
+        # ``ref.learning_rate``, which is the point.
+
+        def __getattr__(self, name: str) -> Any:
+            try:
+                return super().__getattr__(name)
+            except AttributeError:
+                if name.startswith("_"):
+                    raise
+                raise AttributeError(
+                    f"{self!r} has no attribute {name!r}: a task reference is "
+                    "a placeholder; call .hydrate() to read its parameters."
+                ) from None
 
     def __repr__(self) -> str:
         pinned = f", instance_id={str(self.instance_id)!r}" if self.instance_id else ""
@@ -213,11 +267,11 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
             registry: Default: the configured registry.
 
         Raises:
-            TaskRefHydrationError: No registry is configured, the registry
-                holds no such task or instance, or the body is of another
-                class or no longer recomputes to the task id.
-            TaskRehydrationError: A task class in the body (nested ones
-                included) is not imported.
+            TaskRefHydrationError: No registry is configured or it cannot be
+                reached, it holds no such task or instance, a task class in
+                the body (nested ones included) is not imported, or the body
+                is of another class or no longer recomputes to the task id.
+                A subclass of :class:`~stardag.TaskRehydrationError`.
         """
         from stardag.registry import is_noop_registry, registry_provider
 
@@ -273,6 +327,10 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
             ) from e
         except TaskRehydrationError as e:
             raise TaskRefHydrationError(f"Cannot hydrate {self!r}: {e}") from e
+        except httpx.TransportError as e:
+            # Raised once the client's own retries are spent: offline, or
+            # the registry unreachable.
+            raise TaskRefHydrationError(self._offline_message(e)) from e
         if not isinstance(task, self.task_class):
             raise TaskRefHydrationError(
                 f"Cannot hydrate {self!r}: the registry's body is a "
@@ -285,6 +343,32 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
                 f"{task.id}."
             )
         return task
+
+    def _offline_message(self, error: Exception) -> str:
+        reached = (
+            f"Cannot hydrate {self!r}: the registry could not be reached "
+            f"({type(error).__name__}: {error})."
+        )
+        if self.instance_id is None:
+            return (
+                f"{reached} An unpinned reference always asks the registry; "
+                "pin it with instance_id= ('stardag tasks ref <task-id>' prints "
+                "one) and it is served from the local body cache after one "
+                "online read."
+            )
+        from stardag.registry import _instance_cache
+
+        if not _instance_cache.cache_enabled():
+            return (
+                f"{reached} The local body cache is turned off "
+                "(STARDAG_REGISTRY_CACHE=0), so a pinned reference reads the "
+                "registry in every new process."
+            )
+        return (
+            f"{reached} Instance {self.instance_id} is not in the local body "
+            "cache yet: one online read is needed, after which it hydrates "
+            "offline."
+        )
 
     # -- delegation -----------------------------------------------------------
 
@@ -506,3 +590,57 @@ def _resolve(value: Any, registry: Any, memo: dict[int, Any]) -> Any:
             result = items
     memo[key] = result
     return result
+
+
+# -----------------------------------------------------------------------------
+# The reference line
+# -----------------------------------------------------------------------------
+
+
+def reference_line(task_class: type) -> tuple[str | None, str]:
+    """``(import line or None, expression prefix)`` for code referencing a
+    task of ``task_class``: ``f"{prefix}.ref(...)"`` after the import.
+
+    Read off the live class, so it is what the user's code would write:
+
+    - the name the class is bound to in its module, which for a renamed
+      ``@sd.task(name="Renamed") def add_one`` is ``add_one``;
+    - a nested class through its outermost one (``from m import Outer``,
+      ``Outer.Inner``);
+    - no import for a class defined in ``__main__`` or one not importable by
+      name from its module (a local class): just its name.
+
+    Shared by ``stardag tasks ref`` and other snippet printers, so they
+    agree on the line.
+    """
+    module = task_class.__module__
+    if module == "__main__" or "<locals>" in task_class.__qualname__:
+        return None, _bound_name(task_class, module) or task_class.__name__
+    bound = _bound_name(task_class, module)
+    if bound is None:
+        return None, task_class.__name__
+    return f"from {module} import {bound.partition('.')[0]}", bound
+
+
+def _bound_name(task_class: type, module_name: str) -> str | None:
+    """The name ``task_class`` is reachable under from its module: its
+    qualified name when that resolves to it, else a public module
+    attribute bound to it. ``None`` when neither does."""
+    import importlib
+    import sys
+
+    module = sys.modules.get(module_name)
+    if module is None:
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            return None
+    target: object = module
+    for part in task_class.__qualname__.split("."):
+        target = getattr(target, part, None)
+    if target is task_class:
+        return task_class.__qualname__
+    for attribute, value in vars(module).items():
+        if value is task_class and not attribute.startswith("_"):
+            return attribute
+    return None

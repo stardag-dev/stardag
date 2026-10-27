@@ -20,6 +20,12 @@ Auto-generated API documentation from source code.
         - Depends
         - TaskLoads
         - TaskRef
+        - TaskSlug
+        - resolve_refs
+        - clear_hydration_memo
+        - task_from_body
+        - TaskRefHydrationError
+        - TaskRefNotHydratedError
         - TaskStruct
         - build
         - build_aio

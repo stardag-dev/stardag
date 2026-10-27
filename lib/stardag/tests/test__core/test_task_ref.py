@@ -15,6 +15,7 @@ from typing import Annotated
 from unittest.mock import Mock
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 
 import stardag as sd
@@ -22,6 +23,7 @@ from stardag._core.task_ref import (
     TaskRef,
     clear_hydration_memo,
     contains_refs,
+    reference_line,
     resolve_refs,
 )
 from stardag.base_model import CONTEXT_MODE_KEY
@@ -61,6 +63,17 @@ class Report(sd.Task[str]):
 
     def run(self):
         self._save("report")
+
+
+class Outer:
+    class NestedModel(sd.Task[str]):
+        def run(self):
+            self._save("nested")
+
+
+@sd.task(name="RefLineRenamedTask")
+def bound_under_another_name(x: int) -> int:
+    return x
 
 
 class OtherModel(sd.Task[str]):
@@ -379,14 +392,122 @@ class TestResolveRefs:
 
 
 class TestDeprecations:
-    def test_alias_task_warns(self, model):
-        with pytest.warns(DeprecationWarning, match="Task.ref|MyTask.ref"):
-            sd.AliasTask[str](
-                aliased=sd.AliasedMetadata(id=model.id, uri="in-memory://x")
+    def test_alias_task_warns_once_at_the_callers_line(self, model, monkeypatch):
+        from stardag._core import alias_task
+
+        monkeypatch.setattr(alias_task, "_DEPRECATION_WARNED", False)
+        aliased = sd.AliasedMetadata(
+            id=model.id, uri="in-memory://x", body=model.instance_body()
+        )
+        with pytest.warns(DeprecationWarning, match="MyTask.ref") as record:
+            alias = sd.AliasTask[str](aliased=aliased)
+            sd.AliasTask[str](aliased=aliased)
+        assert len(record) == 1
+        assert record[0].filename == __file__
+        # Validating a stored body (what a worker does) never warns.
+        monkeypatch.setattr(alias_task, "_DEPRECATION_WARNED", False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            from pydantic import TypeAdapter
+
+            rebuilt = TypeAdapter(sd.SubClass[sd.BaseTask]).validate_python(
+                alias.model_dump()
             )
+            assert rebuilt.id == alias.id
 
     def test_task_ref_from_task_returns_a_task_slug(self, model):
         with pytest.warns(DeprecationWarning, match="TaskSlug"):
             slug = sd.TaskRef.from_task(model)
         assert slug == sd.TaskSlug.from_task(model)
         assert slug.slug.endswith(str(model.id)[:8])
+
+
+class TestReferenceLine:
+    def test_a_module_level_class(self):
+        assert reference_line(TrainedModel) == (
+            f"from {__name__} import TrainedModel",
+            "TrainedModel",
+        )
+
+    def test_a_nested_class_through_its_outermost(self):
+        assert reference_line(Outer.NestedModel) == (
+            f"from {__name__} import Outer",
+            "Outer.NestedModel",
+        )
+
+    def test_a_renamed_function_task_by_its_bound_name(self):
+        assert reference_line(bound_under_another_name) == (
+            f"from {__name__} import bound_under_another_name",
+            "bound_under_another_name",
+        )
+
+    def test_no_import_for_main_or_local_classes(self, monkeypatch):
+        class LocalModel(sd.Task[str], namespace_override="ref-line-local"):
+            def run(self):
+                self._save("local")
+
+        assert reference_line(LocalModel) == (None, "LocalModel")
+        monkeypatch.setattr(LocalModel, "__module__", "__main__")
+        assert reference_line(LocalModel)[0] is None
+
+
+class TestErrorsAndHints:
+    def test_a_plain_dump_of_a_parent_holding_a_ref_is_refused(self, model):
+        from pydantic_core import PydanticSerializationError
+
+        parent = Evaluate(model=TrainedModel.ref(model.id))
+        for dump in (parent.model_dump, parent.model_dump_json):
+            with pytest.raises(PydanticSerializationError, match="unhydrated"):
+                dump()
+        with pytest.raises(PydanticSerializationError, match="resolve_refs"):
+            TrainedModel.ref(model.id).model_dump()
+
+    def test_reading_a_parameter_says_to_hydrate(self, model):
+        with pytest.raises(AttributeError, match=r"call \.hydrate\(\)"):
+            TrainedModel.ref(model.id).learning_rate  # type: ignore[attr-defined]
+
+    def test_the_former_task_ref_constructor_points_to_task_slug(self, model):
+        with pytest.raises(TypeError, match="stardag.TaskSlug"):
+            sd.TaskRef(name="X", version="1", id=model.id)  # type: ignore[call-arg]
+
+    def test_a_concrete_class_field_hints_at_task_loads(self, model):
+        from pydantic import ValidationError
+
+        class StrictParent(sd.Task[str]):
+            model: TrainedModel
+
+            def run(self):
+                self._save("x")
+
+        with pytest.raises(ValidationError, match=r"sd\.TaskLoads\[\.\.\.\]"):
+            StrictParent(model=TrainedModel.ref(model.id))  # type: ignore[arg-type]
+        assert StrictParent(model=model).model == model
+
+    def test_hydration_errors_are_rehydration_errors(self):
+        assert issubclass(sd.TaskRefHydrationError, sd.TaskRehydrationError)
+
+
+class _Offline(InMemoryRegistry):
+    def task_get(self, task_id):
+        raise httpx.ConnectError("connection refused")
+
+    def task_instance_get(self, instance_id, *, task_id=None):
+        raise httpx.ConnectError("connection refused")
+
+
+class TestOffline:
+    def test_unpinned_says_pin_it(self, model):
+        with pytest.raises(sd.TaskRefHydrationError, match="pin it with instance_id="):
+            TrainedModel.ref(model.id).hydrate(_Offline())
+
+    def test_pinned_not_cached_says_one_online_read(self, model):
+        with pytest.raises(sd.TaskRefHydrationError, match="one online read"):
+            TrainedModel.ref(model.id, instance_id=uuid4()).hydrate(_Offline())
+
+    def test_pinned_with_the_cache_off_says_so(self, model):
+        from stardag.config import config_provider
+
+        config = config_provider.get().model_copy(update={"registry_cache": False})
+        with config_provider.override(config):
+            with pytest.raises(sd.TaskRefHydrationError, match="cache is turned off"):
+                TrainedModel.ref(model.id, instance_id=uuid4()).hydrate(_Offline())

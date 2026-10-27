@@ -25,6 +25,7 @@ from prefect import task as prefect_task
 from prefect.artifacts import create_markdown_artifact
 from prefect.futures import PrefectConcurrentFuture
 
+from stardag._core.task_ref import resolve_refs_aio
 from stardag import (
     BaseTask,
     TaskSlug,
@@ -231,9 +232,10 @@ class _PrefectTaskRunWrapper:
         built)."""
         execution_id = self.execution_ids.pop(task.id, None)
         await self._stop_renewal(task)
-        walk = await walk_aio(deps)
+        walk = await walk_aio(deps, registry=self.session.registry)
+        # ``walk.roots``: the yielded tasks with any reference hydrated.
         await self.session.send_yield(
-            task, execution_id, yield_batches(walk, deps, suspend=True)
+            task, execution_id, yield_batches(walk, walk.roots, suspend=True)
         )
 
 
@@ -298,7 +300,10 @@ async def build_aio(
     session = ResidentSession(
         registry if registry is not None else registry_provider.get()
     )
-    walk = await walk_aio(task_list)
+    # Every reference in the DAG becomes its hydrated task first: the
+    # registry and the Prefect tasks see real tasks only.
+    task_list = await resolve_refs_aio(task_list, session.registry)
+    walk = await walk_aio(task_list, registry=session.registry)
     await session.open(
         task_list,
         app_name=task_executor.deployment_app_name() if task_executor else None,

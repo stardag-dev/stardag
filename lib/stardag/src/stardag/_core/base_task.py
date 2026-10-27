@@ -27,7 +27,14 @@ if TYPE_CHECKING:
 from pickle import loads as pickle_loads
 from uuid import UUID
 
-from pydantic import ConfigDict, Field, SerializationInfo, model_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    ModelWrapValidatorHandler,
+    SerializationInfo,
+    ValidationError,
+    model_validator,
+)
 from typing_extensions import TypeAlias, Union
 
 from stardag._core.target_base import TargetType
@@ -164,6 +171,25 @@ def _check_implements_run(cls: type["BaseTask"]) -> None:
     _RUN_CHECKED_CLASSES.add(cls)
 
 
+def _fields_given_a_task_ref(data: Any) -> list[str]:
+    """The keys of ``data`` holding a ``TaskRef``, directly or in a list,
+    tuple, set or dict (one level deep)."""
+    if not isinstance(data, collections_abc.Mapping):
+        return []
+    from stardag._core.task_ref import TaskRef
+
+    def holds_ref(value: Any) -> bool:
+        if isinstance(value, TaskRef):
+            return True
+        if isinstance(value, collections_abc.Mapping):
+            return any(isinstance(v, TaskRef) for v in value.values())
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return any(isinstance(v, TaskRef) for v in value)
+        return False
+
+    return [str(key) for key, value in data.items() if holds_ref(value)]
+
+
 # Classes that passed `_check_implements_run`. Weak, so that this cache is
 # never what keeps a task class alive.
 _RUN_CHECKED_CLASSES: "weakref.WeakSet[type[BaseTask]]" = weakref.WeakSet()
@@ -224,6 +250,37 @@ class BaseTask(
         if isinstance(data, dict) and "version" not in data:
             return {**data, "version": cls.__version__}
         return data
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _hint_task_ref_in_a_concrete_field(
+        cls, data: Any, handler: ModelWrapValidatorHandler[Any]
+    ) -> Any:
+        """When validation fails on a field given a ``TaskRef``, say why.
+
+        A reference is a ``Task[LoadedT]``, accepted by an
+        ``sd.TaskLoads[LoadedT]`` field (and lists / dicts of them), but not
+        by a field annotated with a concrete task class: it is not an
+        instance of that class. Only the failure path does any work.
+        """
+        try:
+            return handler(data)
+        except ValidationError as e:
+            fields = _fields_given_a_task_ref(data)
+            if not fields:
+                raise
+            listed = ", ".join(repr(f) for f in fields)
+            causes = "; ".join(
+                f"{'.'.join(str(p) for p in err['loc']) or '(model)'}: {err['msg']}"
+                for err in e.errors()
+            )
+            raise ValueError(
+                f"{causes}. Field(s) {listed} of {cls.__name__} were given a "
+                "TaskRef. A reference is accepted by sd.TaskLoads[...] fields "
+                "(and lists / dicts of them), not by a field annotated with a "
+                "concrete task class: annotate the field sd.TaskLoads[...], or "
+                "pass ref.hydrate()."
+            ) from e
 
     @model_validator(mode="before")
     @classmethod

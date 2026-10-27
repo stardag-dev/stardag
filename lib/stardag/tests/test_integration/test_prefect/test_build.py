@@ -71,3 +71,55 @@ async def test_local_prefect_executions_record_their_mode(default_in_memory_fs_t
     sync = await wrapper._executor_details(SyncOnlyTask(name="s"))
     asyn = await wrapper._executor_details(AsyncOnlyTask(name="a"))
     assert (sync.executor, asyn.executor) == ("sync_thread", "async_main_loop")
+
+
+@pytest.mark.skipif(not prefect_available, reason="Prefect is not installed")
+async def test_task_refs_are_hydrated_before_the_walk(default_in_memory_fs_target):
+    """A ``TaskRef`` among the roots' dependencies is replaced by its
+    hydrated task: the registry stores the real body, and the root builds."""
+    from uuid import uuid4
+
+    import stardag as sd
+    from stardag._core.task_ref import clear_hydration_memo
+    from stardag.testing import InMemoryRegistry
+    from stardag.testing._registry_state import InstanceRow, TaskRow
+    from stardag.utils.testing.helper_tasks import AsyncOnlyTask
+
+    clear_hydration_memo()
+    registry = InMemoryRegistry()
+    leaf = AsyncOnlyTask(name="prefect-ref-leaf")
+    await leaf.run_aio()
+    registry.tasks[str(leaf.id)] = TaskRow(
+        task_id=str(leaf.id),
+        task_namespace=leaf.get_namespace(),
+        task_name=leaf.get_name(),
+        version=leaf.version,
+        output_uri=leaf.target().uri,
+    )
+    instance_id = uuid4()
+    registry.instances[instance_id] = InstanceRow(
+        id=instance_id,
+        deployment_id=uuid4(),
+        settings_hash="s",
+        instance_hash=str(leaf.instance_hash),
+        task_id=str(leaf.id),
+        body=leaf.instance_body(),
+    )
+    root = AsyncOnlyTask(
+        name="prefect-ref-root", deps=(AsyncOnlyTask.ref(leaf.id, instance_id),)
+    )
+    expected = AsyncOnlyTask(name="prefect-ref-root", deps=(leaf,))
+    assert root.id == expected.id
+
+    @flow  # type: ignore
+    async def build_with_ref():
+        futures = await build_aio(root, registry=registry)  # type: ignore
+        for future in futures.values():
+            future.wait()
+
+    await build_with_ref()
+    assert expected.complete()
+    bodies = [row.body for row in registry.instances.values()]
+    assert expected.instance_body() in bodies
+    assert not any("task_class" in str(b) for b in bodies)
+    assert isinstance(root, sd.Task)
