@@ -1,7 +1,7 @@
 ---
 name: stardag
 description: >
-  Stardag SDK usage guide (0.27 / registry v2). Use when writing code that imports stardag,
+  Stardag SDK usage guide (registry v2 line, SDK 0.28+). Use when writing code that imports stardag,
   defining tasks/DAGs, choosing significant vs non-significant parameters, passing build
   settings, configuring builds, working with targets/serialization, deploying to Modal, or
   interacting with the Stardag Registry API/UI/CLI. Covers the full SDK surface: task
@@ -17,9 +17,10 @@ Tasks are Pydantic models with deterministic output paths based on parameter has
 
 **Always `import stardag as sd`** — this is the standard convention. Python 3.11 or newer.
 
-This guide describes the **v2 line** (SDK `0.27`, registry server `0.6`). Anything you remember
-about `significance=`, `hash_exclude=`, `build_config`, `build_config_scope`, scope keys or
-global locks is v1 and gone — see [registry-and-platform.md](registry-and-platform.md#upgrading-from-v1).
+This guide describes the **v2 line** (SDK `0.28` and `main` after it, registry server `0.7`).
+Anything you remember about `significance=`, `hash_exclude=`, `build_config`,
+`build_config_scope`, scope keys or global locks is v1 and gone — see
+[registry-and-platform.md](registry-and-platform.md#upgrading-from-v1).
 
 ## Quick Reference
 
@@ -155,6 +156,8 @@ from stardag.artifact import MarkdownArtifact, JSONArtifact
 from stardag.testing import test_harness, InMemoryRegistry
 
 # Exceptions
+# (a task class with neither run() nor run_aio() raises TaskImplementationError when it is
+#  first constructed, not when it is defined: an abstract intermediate class is fine)
 sd.StardagError, sd.APIError, sd.AuthenticationError, sd.AuthorizationError
 sd.InstanceConflictError           # Two constructions of one task id in one build
 sd.UnstableSerializationError      # A field whose dump is not a fixed point

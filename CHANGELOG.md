@@ -14,12 +14,15 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `registry.task_list(...)` takes `namespace`, `name`, `tags` (all of
   them), `id_prefix` and `q` (case-insensitive substring of name, namespace
   or description). `TaskInfo` gains `tags` and `description`, empty against
-  an older registry. CLI: `stardag tasks annotate <id> --tag/--add-tag/
---remove-tag/--clear-tags/--description`, and `stardag tasks list --tag
---name --namespace --id-prefix --q`; `tasks show` and `tasks list` show
-  the tags. Needs the matching server: against an older registry,
+  an older registry. CLI: `stardag tasks annotate <id>` (`--tag`, `--add-tag`,
+  `--remove-tag`, `--clear-tags`, `--description`), and `stardag tasks
+list` gains `--tag`, `--name`, `--namespace`, `--id-prefix` and `--q`;
+  `tasks show` and `tasks list` show the tags. Needs the matching server: against an older registry,
   annotating fails with a clear error, and a filtered list is refused
   rather than answered unfiltered (an unfiltered list works as before).
+- **`FunctionSettings.retries` accepts a `modal.Retries`** as well as a count
+  (STA-146). It was always passed through to Modal unchanged; only the type
+  said `int`, so setting the retry backoff took a type ignore.
 - **Fixed: a detached claim could record no executor** (STA-90). The
   claiming start of a detached execution (a reactive tick's spawn, or a
   resident build's Modal-routed task) carried only the best-effort executor
@@ -196,6 +199,16 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   unspawned claims to their TTL. New executor hooks:
   `TaskExecutorABC.reconciles()` and `probe_detached()`, implemented for
   Modal. The tick summary counts `reconciled`.
+
+- **Docs: the bundled agent skill (`.claude/skills/stardag/`) is brought up
+  to date** (STA-153). It had not changed since 0.27.0, so it was missing
+  everything since: tasks sent to Modal as instance bodies, the reactive
+  pre-flight, reconciliation and the worker rule, `reports_lifecycle`,
+  worker timeouts and claim TTLs, the new `TickConfig` defaults and knobs,
+  `builds tick` / `builds stalled`, the CLI's own wake-ups, transport and
+  rate-limit retries, the per-workspace rate limit, and the second-signal
+  checkpoint recipe. Its README now records the commit it was last synced
+  at.
 
 ### Server
 

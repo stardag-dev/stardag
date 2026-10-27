@@ -42,6 +42,11 @@ def registry_live_limit_keys(task: sd.BaseTask) -> list[str]:
 # declares it must not drift.
 ALT_WORKER = "alt"
 
+# The reconcile app's worker with Modal ``retries`` set (see
+# ``reconcile_app``). Only that app declares it, and only a task that asks
+# for it routes there.
+RETRYING_WORKER = "retrying"
+
 
 def registry_live_worker(task: sd.BaseTask) -> str:
     """The worker a task asked for, or the default.

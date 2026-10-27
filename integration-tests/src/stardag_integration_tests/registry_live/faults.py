@@ -1,5 +1,6 @@
-"""The reconcile app's faults: a tick that dies between claim and spawn, and
-a worker whose end report never arrives.
+"""The reconcile app's faults: a tick that dies between claim and spawn, a
+worker whose end report never arrives, and a failed attempt whose failure
+report never arrives.
 
 Installed by ``install_reconcile_faults``, the ``container_setup`` of
 ``reconcile_app`` and of no other app. Container setup is the one hook that
@@ -8,7 +9,8 @@ reaches the *tick* as well as the workers (a tick container has no
 the SDK's own sequence -- after the claim, before the spawn; after the run,
 in place of the report -- where no public seam exists. So each wraps one
 SDK method at class level, and acts only for its own task class from
-``tasks``; every other task in the container goes through untouched.
+``tasks`` or ``reconcile_tasks``; every other task in the container goes
+through untouched.
 
 **Each fault records itself, durably, before it strikes**, as an artifact
 on its task naming the execution it struck. That is the scenario's
@@ -30,6 +32,7 @@ import sys
 import typing
 from uuid import UUID
 
+from .reconcile_tasks import FailsOnceUnreported
 from .tasks import (
     TICK_DEATH_ARTIFACT_NAME,
     UNREPORTED_END_ARTIFACT_NAME,
@@ -93,7 +96,7 @@ def _die_unless_died_before(task: typing.Any, execution_id: UUID) -> None:
 
 
 def install_reconcile_faults() -> None:
-    """Wrap the two SDK methods the faults live in. Idempotent."""
+    """Wrap the three SDK methods the faults live in. Idempotent."""
     from stardag.artifact import JSONArtifact
     from stardag.integration.modal._executor import ModalTaskExecutor
     from stardag.integration.modal._reporter import _WorkerLifecycleReporter
@@ -103,6 +106,7 @@ def install_reconcile_faults() -> None:
 
     original_submit = ModalTaskExecutor.submit_detached
     original_completed = _WorkerLifecycleReporter.completed
+    original_failed = _WorkerLifecycleReporter.failed
 
     async def submit_detached(self, task, *, execution_id):
         # The tick has claimed ``task`` as ``execution_id`` and not yet
@@ -135,6 +139,21 @@ def install_reconcile_faults() -> None:
             "ran and returns without reporting its end"
         )
 
+    def failed(self, exception: BaseException) -> None:
+        # The attempt raised; its failure report is what goes missing, so
+        # the ledger keeps the execution running while Modal retries the
+        # call (STA-146). The task records its own attempts.
+        if not isinstance(self.task, FailsOnceUnreported):
+            return original_failed(self, exception)
+        _say(
+            f"FailsOnceUnreported {self._task_id}: execution "
+            f"{self.execution_id} raised {exception!r}; its failure goes "
+            "unreported"
+        )
+        # A lost report still wakes the scheduler, as ``failed`` does.
+        self._guard(self._wake_scheduler, "wake")
+
     setattr(submit_detached, _INSTALLED, True)
     ModalTaskExecutor.submit_detached = submit_detached  # type: ignore[method-assign]
     _WorkerLifecycleReporter.completed = completed  # type: ignore[method-assign]
+    _WorkerLifecycleReporter.failed = failed  # type: ignore[method-assign]
