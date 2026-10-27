@@ -707,6 +707,8 @@ async def _tick_body(
     acquired = False
     outage = False
     try:
+        # The whole lease, acquire included: an outage met acquiring it is
+        # the same outage as one met driving the build.
         async with lease:
             if not lease.acquired:
                 summary.outcome = "lease_held"
@@ -722,11 +724,10 @@ async def _tick_body(
                     "cannot hand off on the way out or wake other builds. "
                     "Reported once per process."
                 )
-            try:
-                await driver.drive(lease)
-            except Exception as e:
-                outage = _is_registry_outage(e)
-                raise
+            await driver.drive(lease)
+    except Exception as e:
+        outage = _is_registry_outage(e)
+        raise
     finally:
         # A lease lost to unanswered renewals, not to another tick, is the
         # same outage seen from the lease's side.

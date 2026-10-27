@@ -134,6 +134,27 @@ async def test_an_outage_exit_spawns_nothing(default_in_memory_fs_target: Target
     assert registry.builds[build_id].needs_tick
 
 
+async def test_an_outage_acquiring_the_lease_is_flagged(
+    default_in_memory_fs_target: Target,
+):
+    """Copilot on #506: the acquire is a registry call too."""
+    task = SyncOnlyTask(name=f"t-{new_id()}")
+
+    class AcquireFails(InMemoryRegistry):
+        def scheduler_lease_acquire(self, build_id, **kwargs):
+            raise _outage()
+
+    registry = AcquireFails()
+    build_id, _ = await _plan(registry, [task])
+    with pytest.raises(APIError):
+        await tick(
+            registry, build_id, FakeDetachedExecutor(registry=registry), ONE_PASS
+        )
+    assert {"build_id": build_id, "can_spawn": False} in registry.calls_to(
+        "build_notify"
+    )
+
+
 async def test_a_lease_lapsed_on_unanswered_renewals_is_flagged(
     default_in_memory_fs_target: Target, monkeypatch
 ):
