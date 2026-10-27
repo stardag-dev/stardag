@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
 import time
 import typing
 
@@ -25,6 +26,7 @@ from stardag.cancellation import (
 )
 from stardag.exceptions import ExecutionCancelled
 from stardag.integration.modal._logging import _setup_logging
+from stardag.integration.modal._metadata import STARDAG_REACTIVE_ENV
 from stardag.integration.modal._protocols import RunFunction
 from stardag.integration.modal._reporter import _WorkerLifecycleReporter
 from stardag.utils.env import temp_env_vars
@@ -39,6 +41,12 @@ from stardag.integration.modal._interruptions import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _is_reactive() -> bool:
+    """Whether this worker was spawned by a reactive scheduler tick (read
+    inside the env-overrides context)."""
+    return os.environ.get(STARDAG_REACTIVE_ENV) == "1"
 
 
 def _checkpoint_at_yield() -> None:
@@ -81,6 +89,11 @@ class Runner(RunFunction):
             ...
         )
     """
+
+    #: This run function keeps the worker rule of reconciliation (see
+    #: ``RunFunction``, "The worker rule"; enforced in ``__call__`` and
+    #: ``_reporter._require_ref_recorded``).
+    keeps_worker_rule = True
 
     def __init__(self, *, report_lifecycle: bool = True):
         """Initialize the runner.
@@ -172,6 +185,16 @@ class Runner(RunFunction):
                             "Worker lifecycle reporter creation failed; "
                             "running without lifecycle reporting."
                         )
+                if reporter is None and _is_reactive():
+                    # The worker rule (``_reporter._require_ref_recorded``):
+                    # a reactive tick may end an execution whose ref never
+                    # reached the ledger and re-drive the task, so a worker
+                    # that cannot report its start must not run it.
+                    raise ExecutionCancelled(
+                        "This reactive execution cannot report its start "
+                        "(no lifecycle reporter), so it does not run the "
+                        "task; the scheduler re-drives it."
+                    )
                 if reporter is not None:
                     reporter.started()
                     # Checkpoint one: is this execution still the one the

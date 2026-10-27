@@ -23,6 +23,8 @@ from stardag.build import (
     TaskExecutorABC,
     get_current_build_context,
 )
+from stardag.build._base import DetachedState
+from stardag.exceptions import ExecutionCancelled
 from stardag.build._claims import claim_ttl_seconds
 from stardag.build._deployment import STARDAG_DEPLOYMENT_ID_ENV
 from stardag.integration.modal._metadata import (
@@ -109,6 +111,7 @@ class ModalTaskExecutor(TaskExecutorABC):
         reactive: bool = False,
         modal_workspace: str | None = None,
         worker_timeouts: dict[str, int] | None = None,
+        worker_keeps_worker_rule: bool = False,
     ):
         """Initialize Modal executor.
 
@@ -128,6 +131,11 @@ class ModalTaskExecutor(TaskExecutorABC):
                 :class:`RunFunction`), so it only needs passing when you
                 construct the executor yourself against an app whose run
                 function does not report.
+            worker_keeps_worker_rule: Whether the deployed workers' run
+                function keeps the worker rule (``RunFunction``, "The worker
+                rule"; true for :class:`Runner`). A reconciling tick ends a
+                claim whose spawn never recorded a ref only when it does.
+                The deployed ``tick`` sets it from the app's run function.
             modal_workspace: Explicit Modal workspace name for the executor
                 metadata recorded with task starts (UI deep links). Default:
                 resolved once from the configured Modal token, best-effort.
@@ -158,6 +166,7 @@ class ModalTaskExecutor(TaskExecutorABC):
                 "ModalTaskExecutor(worker_timeouts={worker_name: seconds})."
             )
         self.worker_reports_lifecycle = worker_reports_lifecycle
+        self.worker_keeps_worker_rule = worker_keeps_worker_rule
         # Reactive scheduling: forward the app name + reactive flag so
         # workers wake the scheduler tick. That is the whole reactive
         # protocol — a worker that does not report cannot record its end or
@@ -528,6 +537,78 @@ class ModalTaskExecutor(TaskExecutorABC):
         makes for its neighbours.
         """
         spawn_tick(build_id, app_name)
+
+    def reconciles(self, executor: str) -> bool:
+        """Modal calls: probed with ``get(timeout=0)``."""
+        return executor == MODAL_EXECUTOR_NAME
+
+    def reconciles_unspawned(self, executor: str) -> bool:
+        """Only when the workers keep the worker rule
+        (``worker_keeps_worker_rule``)."""
+        return self.reconciles(executor) and self.worker_keeps_worker_rule
+
+    async def probe_detached(self, executor: str, ref: str) -> DetachedState:
+        """A non-blocking poll of the call's output (``get(timeout=0)``),
+        classified *positively* -- only an answer that can only come from a
+        finished call is reported as one (see the base method):
+
+        * no output yet (``TimeoutError``) is ``"running"``: still running,
+          queued, or waiting on a preemption's restart;
+        * a returned value is ``"returned"``;
+        * the backend's internal failure and an exception Modal re-raised
+          from the container -- recognisable by the remote traceback it
+          attaches (``__line_cache__``), ``SystemExit`` and the task's own
+          ``TimeoutError`` included -- are ``"raised"``;
+        * the backend's time limit and a cancellation are ``"unknown"``:
+          Modal exposes them while the container may still be running its
+          interruption handler, so they do not prove the worker is done;
+        * everything else is ``"unknown"``: an expired output, and any
+          error that could be the client's own (a network or auth error is
+          indistinguishable by type from a task's exception without that
+          marker, so it never counts as the task's).
+        """
+        if executor != MODAL_EXECUTOR_NAME:
+            return "unknown"
+        from modal.exception import (
+            FunctionTimeoutError,
+            InternalFailure,
+            OutputExpiredError,
+            RemoteError,
+        )
+
+        try:
+            await modal.FunctionCall.from_id(ref).get.aio(timeout=0)
+        except TimeoutError as e:
+            # Unmarked: the poll found no output. Marked: the task's own
+            # TimeoutError, re-raised from the container -- it finished.
+            return "raised" if hasattr(e, "__line_cache__") else "running"
+        except (OutputExpiredError, FunctionTimeoutError, RemoteError):
+            # A time limit or a cancellation is visible here while the
+            # container may still be in its interruption handler, about to
+            # report (an interruption, if the task asked to resume): not
+            # proof the worker is done. Its own report, or the claim's
+            # TTL, decides.
+            return "unknown"
+        except InternalFailure:
+            return "raised"
+        except ExecutionCancelled:
+            # The worker stopped before ``run()`` (its execution was not
+            # wanted, or its ref could not be recorded) and re-raised to
+            # keep the call from reading as a success. It ran nothing: a
+            # finished call with nothing written, which reconciliation
+            # re-drives rather than charging the task a failed attempt.
+            return "returned"
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            # This tick being cancelled or interrupted, not the call.
+            raise
+        except BaseException as e:
+            # Including a remote ``SystemExit``, which Modal re-raises here
+            # and which must not take the tick down with it.
+            if hasattr(e, "__line_cache__"):
+                return "raised"
+            logger.debug(f"Probing Modal call {ref!r} failed: {e!r}")
+            return "unknown"
+        return "returned"
 
     async def cancel_detached(self, task: BaseTask, executor: str, ref: str) -> None:
         """Cancel a spawned function call by its recorded id."""

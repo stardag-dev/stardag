@@ -1,0 +1,395 @@
+"""Reconciliation (STA-94, STA-135): a tick ends its build's dead claim
+holders -- a call that finished without reporting (R1), a spawn that never
+landed (R2) -- and leaves everything it cannot positively call dead to the
+claim's TTL. See ``stardag.build._reactive._reconcile`` for the invariant."""
+
+from __future__ import annotations
+
+import typing
+from datetime import timedelta
+from uuid import UUID
+
+import pytest
+
+from stardag import auto_namespace
+from stardag.build import TickConfig
+from stardag.build._reactive import _reconcile
+from stardag.build._registration import new_id
+from stardag.target import InMemoryFileTarget
+from stardag.testing import InMemoryRegistry
+from stardag.testing._registry_state import refuse
+from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+from tests.test_build.fakes import FAKE_EXECUTOR, FakeDetachedExecutor
+from tests.test_build.test_reactive_tick import _plan, _tick
+
+auto_namespace(__name__)
+
+Target = typing.Type[InMemoryFileTarget]
+
+ONE_PASS = TickConfig(linger_seconds=0, poll_interval_seconds=0.01)
+
+
+async def _dead_claim(
+    registry: InMemoryRegistry,
+    build_id: UUID,
+    task: SyncOnlyTask,
+    *,
+    ref: str | None,
+    executor: str = FAKE_EXECUTOR,
+    age_seconds: float = 0,
+) -> UUID:
+    """A claim a dead tick or worker left behind: granted, with or without
+    a recorded ref, and nothing running it."""
+    frontier = registry.build_get_frontier(build_id)
+    assert frontier.plan_id is not None
+    execution_id = new_id()
+    registry.member_start(
+        frontier.plan_id,
+        str(task.id),
+        execution_id=execution_id,
+        claim=True,
+        claim_ttl_seconds=3600,
+        executor=executor,
+        executor_ref=ref,
+    )
+    row = registry.executions[execution_id]
+    row.started_at = row.started_at - timedelta(seconds=age_seconds)
+    return execution_id
+
+
+def _stops(registry: InMemoryRegistry) -> list[dict]:
+    return registry.calls_to("execution_report_stopped")
+
+
+class TestFinishedWithoutReporting:
+    """R1: the executor positively says the call finished."""
+
+    async def test_a_returned_call_whose_target_is_complete_is_completed(
+        self, default_in_memory_fs_target: Target
+    ):
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"done-{new_id()}")
+        build_id, _ = await _plan(registry, [task])
+        dead = await _dead_claim(registry, build_id, task, ref="fc-done")
+        task.run()  # its worker wrote the output, then lost the report
+        executor = FakeDetachedExecutor(registry=registry, workers=True)
+        executor.probes["fc-done"] = "returned"
+        summary = await _tick(registry, build_id, executor, ONE_PASS)
+        (complete,) = registry.calls_to("member_complete", task_id=str(task.id))
+        assert complete["execution_id"] == dead
+        assert summary.reconciled == 1
+        assert executor.spawns == []  # nothing ran it again
+        assert registry.builds[build_id].status == "completed"
+
+    async def test_a_returned_call_whose_target_is_missing_is_re_driven(
+        self, default_in_memory_fs_target: Target
+    ):
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"empty-{new_id()}")
+        build_id, _ = await _plan(registry, [task])
+        dead = await _dead_claim(registry, build_id, task, ref="fc-empty")
+        executor = FakeDetachedExecutor(registry=registry, workers=True)
+        executor.probes["fc-empty"] = "returned"
+        summary = await _tick(registry, build_id, executor, ONE_PASS)
+        (stop,) = _stops(registry)
+        assert (stop["execution_id"], stop["outcome"]) == (dead, "lost")
+        assert not stop["only_if_unspawned"]
+        assert summary.reconciled == 1
+        # Re-driven: a fresh claim, a fresh spawn.
+        assert [t for t, _, _ in executor.spawns] == [task.id]
+        assert executor.spawns[0][1] != dead
+
+    async def test_a_raised_call_is_failed_against_the_retry_budget(
+        self, default_in_memory_fs_target: Target
+    ):
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"raised-{new_id()}")
+        build_id, _ = await _plan(registry, [task])
+        dead = await _dead_claim(registry, build_id, task, ref="fc-raised")
+        executor = FakeDetachedExecutor(registry=registry, workers=True)
+        executor.probes["fc-raised"] = "raised"
+        await _tick(registry, build_id, executor, ONE_PASS)
+        (fail,) = registry.calls_to("member_fail", task_id=str(task.id))
+        assert fail["execution_id"] == dead
+        assert "ended without reporting" in fail["error_message"]
+
+    async def test_a_member_past_its_execution_budget_is_left_to_its_ttl(
+        self, default_in_memory_fs_target: Target
+    ):
+        """Re-driving makes the member CANCELLED, which the takeover's budget
+        check does not gate; past the budget the claim is left to lapse, and
+        the takeover fails it (Copilot on #508)."""
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"spent-{new_id()}")
+        build_id, _ = await _plan(registry, [task])
+        await _dead_claim(registry, build_id, task, ref=None, age_seconds=3600)
+        executor = FakeDetachedExecutor(registry=registry, workers=True)
+        config = TickConfig(
+            linger_seconds=0, poll_interval_seconds=0.01, max_executions=1
+        )
+        summary = await _tick(registry, build_id, executor, config)
+        assert summary.reconciled == 0 and _stops(registry) == []
+
+    async def test_a_probe_that_raises_anything_does_not_take_the_tick_down(
+        self, default_in_memory_fs_target: Target
+    ):
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"exits-{new_id()}")
+        build_id, _ = await _plan(registry, [task])
+        await _dead_claim(registry, build_id, task, ref="fc-exits")
+
+        class Exits(FakeDetachedExecutor):
+            async def probe_detached(self, executor, ref):  # type: ignore[override]
+                raise SystemExit(1)
+
+        executor = Exits(registry=registry, workers=True)
+        summary = await _tick(registry, build_id, executor, ONE_PASS)
+        assert summary.reconciled == 0
+
+    @pytest.mark.parametrize("state", ["running", "unknown"])
+    async def test_a_call_not_positively_finished_is_left_alone(
+        self, state: str, default_in_memory_fs_target: Target
+    ):
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"alive-{new_id()}")
+        build_id, _ = await _plan(registry, [task])
+        await _dead_claim(registry, build_id, task, ref="fc-alive", age_seconds=7200)
+        executor = FakeDetachedExecutor(registry=registry, workers=True)
+        executor.probes["fc-alive"] = state
+        summary = await _tick(registry, build_id, executor, ONE_PASS)
+        assert summary.reconciled == 0
+        assert _stops(registry) == []
+        assert not registry.called("member_fail", task_id=str(task.id))
+        assert executor.spawns == []
+
+    async def test_an_executor_that_does_not_reconcile_is_left_alone(
+        self, default_in_memory_fs_target: Target
+    ):
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"other-{new_id()}")
+        build_id, _ = await _plan(registry, [task])
+        await _dead_claim(
+            registry, build_id, task, ref=None, executor="elsewhere", age_seconds=7200
+        )
+        executor = FakeDetachedExecutor(registry=registry, workers=True)
+        summary = await _tick(registry, build_id, executor, ONE_PASS)
+        assert summary.reconciled == 0 and _stops(registry) == []
+
+
+class TestSpawnNeverLanded:
+    """R2: no ref recorded, past the grace, and ended only on that
+    condition."""
+
+    async def test_an_old_claim_with_no_ref_is_ended_conditionally_and_re_driven(
+        self, default_in_memory_fs_target: Target
+    ):
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"lost-{new_id()}")
+        build_id, _ = await _plan(registry, [task])
+        dead = await _dead_claim(registry, build_id, task, ref=None, age_seconds=3600)
+        executor = FakeDetachedExecutor(registry=registry, workers=True)
+        summary = await _tick(registry, build_id, executor, ONE_PASS)
+        (stop,) = _stops(registry)
+        assert stop["execution_id"] == dead
+        assert (stop["outcome"], stop["only_if_unspawned"]) == ("lost", True)
+        assert summary.reconciled == 1
+        # Re-driven: a fresh claim, a fresh spawn.
+        assert [t for t, _, _ in executor.spawns] == [task.id]
+        assert executor.spawns[0][1] != dead
+
+    async def test_a_young_claim_with_no_ref_is_left_alone(
+        self, default_in_memory_fs_target: Target
+    ):
+        """A live tick may be between its claim and its spawn."""
+        registry = InMemoryRegistry()
+        task = SyncOnlyTask(name=f"young-{new_id()}")
+        build_id, _ = await _plan(registry, [task])
+        await _dead_claim(registry, build_id, task, ref=None, age_seconds=30)
+        executor = FakeDetachedExecutor(registry=registry, workers=True)
+        summary = await _tick(registry, build_id, executor, ONE_PASS)
+        assert summary.reconciled == 0 and _stops(registry) == []
+
+    async def test_a_ref_recorded_before_the_end_lands_wins(
+        self, default_in_memory_fs_target: Target
+    ):
+        """The container landed after all, between the ledger read and the
+        end: the registry refuses the end and nothing is re-driven."""
+
+        class RefLandsFirst(InMemoryRegistry):
+            def execution_report_stopped(self, execution_id, **kwargs):
+                self.executions[execution_id].executor_ref = "fc-late"
+                return super().execution_report_stopped(execution_id, **kwargs)
+
+        registry = RefLandsFirst()
+        task = SyncOnlyTask(name=f"late-{new_id()}")
+        build_id, _ = await _plan(registry, [task])
+        dead = await _dead_claim(registry, build_id, task, ref=None, age_seconds=3600)
+        executor = FakeDetachedExecutor(registry=registry, workers=True)
+        summary = await _tick(registry, build_id, executor, ONE_PASS)
+        assert summary.reconciled == 0
+        assert registry.executions[dead].ended_at is None
+        assert executor.spawns == []
+
+    async def test_a_registry_without_the_conditional_end_turns_it_off(
+        self, default_in_memory_fs_target: Target
+    ):
+        """An older registry refuses the field (422): never the
+        unconditional end instead."""
+
+        class OldRegistry(InMemoryRegistry):
+            refused = 0
+
+            def execution_report_stopped(self, execution_id, **kwargs):
+                if kwargs.get("only_if_unspawned"):
+                    type(self).refused += 1
+                    raise refuse("invalid_request", status=422)
+                return super().execution_report_stopped(execution_id, **kwargs)
+
+        registry = OldRegistry()
+        task = SyncOnlyTask(name=f"old-{new_id()}")
+        build_id, _ = await _plan(registry, [task])
+        dead = await _dead_claim(registry, build_id, task, ref=None, age_seconds=3600)
+        executor = FakeDetachedExecutor(registry=registry, workers=True)
+        summary = await _tick(registry, build_id, executor, ONE_PASS)
+        assert summary.reconciled == 0
+        assert registry.executions[dead].ended_at is None
+        assert OldRegistry.refused == 1
+        assert _stops(registry) == []  # never the unconditional end
+
+
+def test_a_round_is_due_once_per_interval():
+    reconciler = _reconcile.Reconciler(interval_seconds=60)
+    assert reconciler.due(0.0)
+    reconciler._last = 0.0
+    assert not reconciler.due(59)
+    assert reconciler.due(60)
+    reconciler.supported = False
+    assert not reconciler.due(600)
+
+
+async def test_every_holder_is_reached_across_rounds(
+    default_in_memory_fs_target: Target, monkeypatch
+):
+    """A bounded round does not keep re-examining the same prefix: a dead
+    holder behind calls that stay running is still reached (Copilot on
+    #508)."""
+    from stardag.build._reactive import _reconcile as reconcile_module
+
+    monkeypatch.setattr(reconcile_module, "_MAX_HOLDERS_PER_ROUND", 1)
+    registry = InMemoryRegistry()
+    alive = SyncOnlyTask(name=f"alive-{new_id()}")
+    dead = SyncOnlyTask(name=f"dead-{new_id()}")
+    build_id, _ = await _plan(registry, [alive, dead])
+    await _dead_claim(registry, build_id, alive, ref="fc-alive")
+    dead_execution = await _dead_claim(registry, build_id, dead, ref="fc-dead")
+    executor = FakeDetachedExecutor(registry=registry)
+    executor.probes["fc-alive"] = "running"
+    executor.probes["fc-dead"] = "raised"
+    from stardag.build._reactive._config import TickSummary
+
+    reconciler = reconcile_module.Reconciler()
+    for _ in range(40):
+        frontier = registry.build_get_frontier(build_id)
+        await reconciler.run(
+            frontier,
+            registry=registry,
+            task_executor=executor,
+            summary=TickSummary(outcome="x"),
+            lease_lost=lambda: False,
+        )
+        if registry.called("member_fail", task_id=str(dead.id)):
+            break
+    (fail,) = registry.calls_to("member_fail", task_id=str(dead.id))
+    assert fail["execution_id"] == dead_execution
+
+
+async def test_an_unspawned_claim_under_a_superseded_plan_is_left_alone(
+    default_in_memory_fs_target: Target,
+):
+    """Its spawning deployment may not have kept the worker rule (Copilot
+    on #508): R2 applies only under the build's active plan."""
+    registry = InMemoryRegistry()
+    task = SyncOnlyTask(name=f"old-plan-{new_id()}")
+    build_id, _ = await _plan(registry, [task])
+    await _dead_claim(registry, build_id, task, ref=None, age_seconds=3600)
+    executor = FakeDetachedExecutor(registry=registry)
+    from stardag.build._reactive._config import TickSummary
+
+    # The build has since moved to another plan: the claim's plan is no
+    # longer the active one (its ledger row still reads normally).
+    frontier = registry.build_get_frontier(build_id).model_copy(
+        update={"plan_id": new_id()}
+    )
+    acted = await _reconcile.Reconciler().run(
+        frontier,
+        registry=registry,
+        task_executor=executor,
+        summary=TickSummary(outcome="x"),
+        lease_lost=lambda: False,
+    )
+    assert not acted and _stops(registry) == []
+
+
+def test_a_routed_executor_needs_every_route_to_keep_the_rule():
+    from stardag.build._base import RoutedTaskExecutor
+
+    class Keeps(FakeDetachedExecutor):
+        pass
+
+    class DoesNot(FakeDetachedExecutor):
+        def reconciles_unspawned(self, executor: str) -> bool:
+            return False
+
+    class NoProbe(FakeDetachedExecutor):
+        """Spawns on the same backend but does not opt into probing."""
+
+        def reconciles(self, executor: str) -> bool:
+            return False
+
+        def reconciles_unspawned(self, executor: str) -> bool:
+            return False
+
+    both = RoutedTaskExecutor({"a": Keeps(), "b": Keeps()}, router=lambda t: "a")
+    mixed = RoutedTaskExecutor({"a": Keeps(), "b": DoesNot()}, router=lambda t: "a")
+    sibling = RoutedTaskExecutor({"a": Keeps(), "b": NoProbe()}, router=lambda t: "a")
+    assert both.reconciles_unspawned(FAKE_EXECUTOR)
+    assert not mixed.reconciles_unspawned(FAKE_EXECUTOR)
+    assert not sibling.reconciles_unspawned(FAKE_EXECUTOR)
+
+
+async def test_a_completion_is_reported_even_at_the_execution_budget(
+    default_in_memory_fs_target: Target,
+):
+    """The budget gates only re-drives: a returned call whose target is
+    complete is completed at the cap too (Copilot on #508)."""
+    registry = InMemoryRegistry()
+    task = SyncOnlyTask(name=f"at-cap-{new_id()}")
+    build_id, _ = await _plan(registry, [task])
+    dead = await _dead_claim(registry, build_id, task, ref="fc-cap")
+    task.run()
+    executor = FakeDetachedExecutor(registry=registry)
+    executor.probes["fc-cap"] = "returned"
+    config = TickConfig(linger_seconds=0, poll_interval_seconds=0.01, max_executions=1)
+    await _tick(registry, build_id, executor, config)
+    (complete,) = registry.calls_to("member_complete", task_id=str(task.id))
+    assert complete["execution_id"] == dead
+
+
+async def test_a_completion_check_starts_a_fresh_observation(
+    default_in_memory_fs_target: Target, monkeypatch
+):
+    from stardag.build._reactive import _reconcile as reconcile_module
+
+    observed: list[bool] = []
+    monkeypatch.setattr(
+        reconcile_module, "begin_observation", lambda: observed.append(True)
+    )
+    registry = InMemoryRegistry()
+    task = SyncOnlyTask(name=f"fresh-{new_id()}")
+    build_id, _ = await _plan(registry, [task])
+    await _dead_claim(registry, build_id, task, ref="fc-fresh")
+    executor = FakeDetachedExecutor(registry=registry)
+    executor.probes["fc-fresh"] = "returned"
+    await _tick(registry, build_id, executor, ONE_PASS)
+    assert observed

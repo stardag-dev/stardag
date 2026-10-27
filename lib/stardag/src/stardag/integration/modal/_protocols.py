@@ -125,6 +125,14 @@ class RunFunction(typing.Protocol):
     function, since no resident engine is there to report:
     ``build_trigger(reactive=True)`` refuses an app whose run function does
     not report.
+
+    **The worker rule.** A reactive tick may end a claim whose spawn never
+    recorded an executor ref, and re-drive its task; that is safe only if a
+    worker whose start went unrecorded does not run the task without its
+    ref on the ledger. ``Runner`` keeps that rule and says so with
+    ``keeps_worker_rule = True``. A custom run function should declare it
+    only if it delegates to a ``Runner``; without it, such claims are left
+    to their TTL.
     """
 
     def __call__(self, task: BaseTask) -> None | TaskStruct: ...
@@ -140,6 +148,19 @@ class _RunFunctionWithEnv(typing.Protocol):
     def __call__(
         self, task: BaseTask, *, env_overrides: dict[str, str] | None = None
     ) -> None | TaskStruct: ...
+
+
+def _run_function_keeps_worker_rule(run_function: typing.Any) -> bool:
+    """Whether ``run_function`` keeps the worker rule of reconciliation:
+    a reactive execution whose start went unrecorded does not run its task
+    unless its own ref is on the ledger (``Runner`` does, see
+    ``_reporter._require_ref_recorded``). Declared by a ``keeps_worker_rule``
+    attribute, true on ``Runner``; a custom run function that delegates to
+    a ``Runner`` may declare it too. Without it, a reactive tick does not
+    end claims whose spawn never recorded a ref (STA-94/STA-135)."""
+    return bool(getattr(run_function, "keeps_worker_rule", False)) and bool(
+        getattr(run_function, "report_lifecycle", True)
+    )
 
 
 def _run_function_reports_lifecycle(run_function: typing.Any) -> bool:

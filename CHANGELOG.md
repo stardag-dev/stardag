@@ -149,6 +149,41 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   which the process was rate-limited, a pass admits half as many, growing
   back by an eighth of the cap per clean pass. The default
   `max_concurrent_actions` drops from 50 to 16.
+- **Added: a reactive tick ends its build's dead claim holders and re-drives
+  their tasks** (STA-94, STA-135). An execution holding a live claim could
+  be dead, either because its call finished without reporting its end (a
+  lost report, a killed container) or because its spawn never landed (the
+  claiming tick died between claim and spawn). Either way it held the task
+  for the claim's TTL, the executor timeout plus 15 minutes. At most once
+  a minute, a tick now reads its build's ledger and probes each running
+  member's call:
+
+  - **returned:** the completion is reported if the target is complete;
+    otherwise the execution is ended `lost` and the task re-run;
+  - **raised:** the failure is reported, counting against the retry
+    budget;
+  - **no executor ref after 10 minutes:** the execution is ended `lost`,
+    on the condition, checked by the registry, that no ref was recorded
+    meanwhile. This applies only when the app's run function keeps the
+    worker rule below: `Runner` does, and a custom run function that
+    delegates to one may declare `keeps_worker_rule = True`.
+
+  Anything else is left alone: a call still running or restarting, a
+  backend time limit or cancellation (the worker may still be reporting
+  its interruption), a probe that cannot tell, an executor without a probe,
+  and a member that has spent its execution budget (its claim lapses and
+  the takeover fails it). A round examines a random sample of at most 32
+  holders, so every holder is eventually reached. **Behaviour
+  change:** a Modal worker whose start report gets no answer now reads the
+  ledger and does not run the task unless its own ref is recorded there.
+  It reports nothing and the tick re-drives the task, so a container that
+  landed late can never run alongside its replacement. The same holds for
+  a reactive worker that cannot create its lifecycle reporter, and for one
+  whose call id is not readable inside its container. The conditional end
+  needs a registry that supports it; against an older one the tick leaves
+  unspawned claims to their TTL. New executor hooks:
+  `TaskExecutorABC.reconciles()` and `probe_detached()`, implemented for
+  Modal. The tick summary counts `reconciled`.
 
 ### Server
 
@@ -169,6 +204,14 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   the registry. `0` refuses the workspace's new work; a CHECK keeps the
   value at 0 or above; no API route reads or writes it. One additive
   migration. The AWS CDK template's default goes from 300 to 1200.
+- **Added: a conditional operator end of an execution** (STA-94).
+  `POST /executions/{id}/stopped` accepts `only_if_unspawned`. The end,
+  and the claim's release, apply only while the execution has recorded no
+  executor ref; otherwise it is refused with 409 `execution_spawned` and
+  nothing is written. The check runs under the task row lock that the ref
+  record also takes. A server without this field refuses it with 422
+  rather than ignoring it.
+
 - **Fixed: a wake-up could be lost to a tick's clear of the flag**
   (STA-122). A tick clears its build's flag (`DELETE /builds/{id}/notify`)
   right before it reads the frontier. A task transition that flagged the

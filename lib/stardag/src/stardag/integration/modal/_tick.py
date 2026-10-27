@@ -72,6 +72,10 @@ _TICK_KWARGS_ALLOWED = (
     # Completion checks in flight while a discovery job walks: a property
     # of the target backend this build's tasks write to.
     "max_concurrent_discover",
+    # Reconciliation's pace and its grace for a claim with no executor ref
+    # (STA-94/STA-135): how long a build tolerates a dead claim holder.
+    "reconcile_interval_seconds",
+    "unspawned_grace_seconds",
 )
 
 
@@ -277,6 +281,10 @@ class _TickDeployment:
     tick_timeout_seconds: float | None
     task_modules: tuple[str, ...]
     task_module_patterns: tuple[str, ...]
+    # Whether the app's run function keeps the worker rule (see
+    # ``_protocols._run_function_keeps_worker_rule``): without it the tick
+    # does not end claims whose spawn never recorded a ref.
+    worker_keeps_worker_rule: bool = False
 
 
 async def _run_deployed_tick_aio(
@@ -360,6 +368,7 @@ async def _run_deployed_tick_aio(
         modal_workspace=deployment.modal_workspace,
         worker_timeouts=deployment.worker_timeouts,
         worker_reports_lifecycle=deployment.worker_reports_lifecycle,
+        worker_keeps_worker_rule=deployment.worker_keeps_worker_rule,
     )
     own = own_deployment_id()
     rollover_details: dict[str, typing.Any] = {}

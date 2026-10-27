@@ -291,10 +291,17 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
         return [r for r in rows if not (not_in_current_plan and r.in_current_plan)]
 
     def execution_report_stopped(
-        self, execution_id: UUID, *, outcome: StopOutcome = "stopped"
+        self,
+        execution_id: UUID,
+        *,
+        outcome: StopOutcome = "stopped",
+        only_if_unspawned: bool = False,
     ) -> TransitionResult:
         self._record(
-            "execution_report_stopped", execution_id=execution_id, outcome=outcome
+            "execution_report_stopped",
+            execution_id=execution_id,
+            outcome=outcome,
+            only_if_unspawned=only_if_unspawned,
         )
         if outcome not in ("stopped", "lost"):
             raise refuse("invalid_request", f"outcome {outcome!r}", status=422)
@@ -302,6 +309,10 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
         if execution is None:
             raise refuse("unknown_execution", status=404)
         task = self.task(execution.task_id)
+        if execution.ended_at is not None:
+            return _outcome(task)
+        if only_if_unspawned and execution.executor_ref is not None:
+            raise refuse("execution_spawned", execution_id=str(execution_id))
         if execution.ended_at is None:
             execution.ended_at = self.now()
             execution.outcome = outcome

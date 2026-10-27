@@ -28,6 +28,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from stardag.registry._base_ledger import RegistryLedgerABC
 from stardag.registry._base_reads import RegistryReadsABC, _missing
 from stardag.registry._models import (
     BuildFrontier,
@@ -37,7 +38,6 @@ from stardag.registry._models import (
     DeploymentInfo,
     DeploymentKind,
     ExclusionResult,
-    ExecutionInfo,
     FrontierMember,
     MembersResult,
     PlanInfo,
@@ -46,7 +46,6 @@ from stardag.registry._models import (
     ResumeResult,
     SchedulerLeaseResult,
     SettingsInfo,
-    StopOutcome,
     TaskArtifactInfo,
     TaskInfo,
     TransitionResult,
@@ -59,7 +58,7 @@ if TYPE_CHECKING:
     from stardag.artifact import Artifact
 
 
-class RegistryABC(RegistryReadsABC):
+class RegistryABC(RegistryLedgerABC, RegistryReadsABC):
     """The v2 registry client interface. See the module docstring. The
     inspecting reads (a plan, paged lists, a task's executions and events,
     a deployment) are in :class:`~stardag.registry._base_reads.RegistryReadsABC`."""
@@ -466,30 +465,6 @@ class RegistryABC(RegistryReadsABC):
         return self.claim_renew(
             task_id, execution_id=execution_id, claim_ttl_seconds=claim_ttl_seconds
         )
-
-    def build_list_executions(
-        self,
-        build_id: UUID,
-        *,
-        not_in_current_plan: bool = False,
-        include_ended: bool = False,
-    ) -> list[ExecutionInfo]:
-        """``GET /builds/{id}/executions``: the build's executions with no end
-        reported (``builds stop``, a worker's cancellation checkpoint);
-        ``not_in_current_plan`` keeps the orphans; ``include_ended`` lists
-        the whole ledger (every execution granted, ended or not)."""
-        raise _missing(self, "build_list_executions")
-
-    def execution_report_stopped(
-        self, execution_id: UUID, *, outcome: StopOutcome = "stopped"
-    ) -> TransitionResult:
-        """``POST /executions/{id}/stopped``: an operator ends an execution —
-        ``stopped`` (its call was cancelled) or ``lost`` (it could not be,
-        and no report of it will ever be applied). If it is the task's
-        current execution with its claim unreleased, the claim is released
-        ``cancelled`` and the task is CANCELLED (a revocation is not a
-        result)."""
-        raise _missing(self, "execution_report_stopped")
 
     # -- tasks ------------------------------------------------------------------
 

@@ -134,15 +134,19 @@ class TestCheckpointOne:
     def test_an_unrelated_start_failure_is_not_a_cancellation(
         self, default_in_memory_fs_target
     ):
-        """A registry that is down carries no information about whether
-        this execution is wanted, so it must not stop the task."""
+        """A start report that got no answer carries no information about
+        whether this execution is wanted, so it does not stop the task --
+        once the ledger shows the container's ref (the spawning tick
+        records it too). Without it, the worker rule applies: see
+        ``test_runner_lifecycle.TestTheWorkerRule``."""
         planned = plan_and_claim(make_range(limit=3))
+        execution = planned.registry.executions[planned.execution_id]
+        execution.executor_ref = modal.current_function_call_id()
 
         def down(*args, **kwargs):
             raise ConnectionError("registry down")
 
         planned.registry.member_start = down  # type: ignore[method-assign]
-        planned.registry.build_list_executions = down  # type: ignore[method-assign]
 
         assert _run(planned) is None
         assert planned.task.complete()

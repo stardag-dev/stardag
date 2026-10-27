@@ -15,10 +15,11 @@ import pytest
 from httpx import AsyncClient
 
 from stardag_api.config import limits_settings
+from stardag_api.models.enums import ExecutionOutcome
 from stardag_api.limits import _rate_limiter
 from stardag_api.services import builds, executions, registration
 from stardag_api.services.registration_chunk import register_items
-from stardag_api.services.errors import TooManyRequests
+from stardag_api.services.errors import Conflict, TooManyRequests
 from stardag_api.services.transitions import (
     Transition,
     member_task_pk,
@@ -102,6 +103,74 @@ async def test_a_stopped_execution_is_ended_and_its_claim_released(h: Harness):
     async with h.sf() as s:
         await builds.delete_build(s, ENV, build)
     assert await h.count("build") == 0
+
+
+async def _stopped_unspawned(h: Harness, execution_id):
+    async with h.sf() as s:
+        return await executions.report_stopped(
+            s,
+            ENV,
+            execution_id,
+            outcome=ExecutionOutcome.LOST,
+            only_if_unspawned=True,
+        )
+
+
+async def test_an_unspawned_stop_ends_a_claim_that_recorded_no_ref(h: Harness):
+    """A reconciling tick's end of a claim whose spawn never reported
+    (STA-94): applied while no executor ref is recorded, the claim released
+    and the task CANCELLED, so the next claiming start re-drives it."""
+    t = item("T")
+    build, plan = await h.planned([t], [t])
+    execution = await h.start(plan.id, t)
+    stopped = await _stopped_unspawned(h, execution)
+    assert stopped.applied and stopped.status == "cancelled"
+    ledger = await h.execution(execution)
+    assert (ledger["outcome"], ledger["claim_outcome"]) == ("lost", "cancelled")
+    assert await _unended(h, build) == []
+
+
+async def test_an_unspawned_stop_is_refused_once_the_ref_is_recorded(h: Harness):
+    """The spawn reported after all: its worker may be running the task,
+    so the conditional end is refused and nothing is written."""
+    t = item("T")
+    build, plan = await h.planned([t], [t])
+    execution = await h.start(plan.id, t)
+    await h.transition(
+        plan.id, t, Transition.start(execution, claim=False, executor_ref="fc-1")
+    )
+    with pytest.raises(Conflict) as refused:
+        await _stopped_unspawned(h, execution)
+    assert refused.value.code == "execution_spawned"
+    assert (await h.execution(execution))["ended_at"] is None
+    assert (await h.task(t))["status"] == "running"
+    assert [e.id for e in await _unended(h, build)] == [execution]
+
+
+async def test_an_unspawned_stop_racing_the_ref_record_sees_it(h: Harness):
+    """Both take the task row lock: a ref record holding it (uncommitted)
+    when the conditional stop arrives is seen once it commits, so the stop
+    is refused -- never an end for an execution whose worker reported."""
+    t = item("T")
+    _, plan = await h.planned([t], [t])
+    execution = await h.start(plan.id, t)
+    async with h.sf() as held:
+        task_pk = await member_task_pk(held, ENV, plan.id, t.task_id)
+        await transition_task(
+            held,
+            ENV,
+            task_pk=task_pk,
+            plan_id=plan.id,
+            transition=Transition.start(execution, claim=False, executor_ref="fc-1"),
+            now=utcnow(),
+        )
+        stopping = asyncio.create_task(_stopped_unspawned(h, execution))
+        assert await h.blocked_or_done(stopping)
+        await held.commit()
+    with pytest.raises(Conflict) as refused:
+        await stopping
+    assert refused.value.code == "execution_spawned"
+    assert (await h.task(t))["status"] == "running"
 
 
 async def test_stopping_an_execution_whose_claim_moved_leaves_the_task(
@@ -464,3 +533,16 @@ async def test_a_negative_override_is_refused_by_the_database(h: Harness):
         with pytest.raises(IntegrityError):
             await s.execute(update(Workspace).values(max_write_requests_per_minute=-1))
             await s.commit()
+
+
+async def test_an_unspawned_stop_over_http(client: AsyncClient, h: Harness):
+    t, u = item("T"), item("U")
+    _, plan = await h.planned([t, u], [t, u])
+    unspawned = await h.start(plan.id, t)
+    spawned = await h.start(plan.id, u, executor_ref="fc-2")
+    body = {"outcome": "lost", "only_if_unspawned": True}
+    ok = await client.post(f"/api/v2/executions/{unspawned}/stopped", json=body)
+    assert ok.status_code == 200 and ok.json()["status"] == "cancelled"
+    refused = await client.post(f"/api/v2/executions/{spawned}/stopped", json=body)
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["code"] == "execution_spawned"

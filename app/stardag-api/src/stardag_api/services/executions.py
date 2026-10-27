@@ -161,12 +161,16 @@ async def report_stopped(
     execution_id: UUID,
     *,
     outcome: ExecutionOutcome = ExecutionOutcome.STOPPED,
+    only_if_unspawned: bool = False,
 ) -> TransitionOutcome:
     """Record an operator end of the execution — ``stopped`` (the CLI
     stopped it) or ``lost`` (it cannot be stopped; the operator gives up on
     it) — through ``transition_task()``: the ledger end, and — if it still
     holds the task's claim — the claim's release (the task CANCELLED).
     Idempotent: an ended execution is left as it ended.
+    ``only_if_unspawned``: refused (409 ``execution_spawned``) when the
+    execution has recorded an executor ref by the time the task row is
+    locked -- a reconciling tick's end of a claim whose spawn never landed.
 
     Only the execution's task and plan keys — which never change — are read
     before ``transition_task()`` locks the task row; the execution itself
@@ -192,6 +196,8 @@ async def report_stopped(
             environment_id,
             task_pk=keys.task_pk,
             plan_id=keys.plan_id,
-            transition=Transition.stop(execution_id, outcome),
+            transition=Transition.stop(
+                execution_id, outcome, only_if_unspawned=only_if_unspawned
+            ),
             now=utc_now(),
         )

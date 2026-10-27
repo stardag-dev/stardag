@@ -437,12 +437,14 @@ def _scenario_apps() -> list[tuple[str, str]]:
     """
     from .dag_app import APP_NAME as DAG_APP
     from .lapse_app import APP_NAME as LAPSE_APP
+    from .reconcile_app import APP_NAME as RECONCILE_APP
     from .watchdog_app import APP_NAME as WATCHDOG_APP
 
     return [
         (f"{__package__}.dag_app", DAG_APP),
         (f"{__package__}.watchdog_app", WATCHDOG_APP),
         (f"{__package__}.lapse_app", LAPSE_APP),
+        (f"{__package__}.reconcile_app", RECONCILE_APP),
     ]
 
 

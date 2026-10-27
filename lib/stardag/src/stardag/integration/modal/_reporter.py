@@ -95,6 +95,19 @@ def _positive_int(raw: str | None, name: str) -> int | None:
     return value
 
 
+def _in_modal_container() -> bool:
+    """Whether this process is a Modal container (not a local run)."""
+    try:
+        return not modal.is_local()
+    except Exception:
+        return False
+
+
+# How ``started()``'s report ended, when it got an answer at all.
+_APPLIED = object()
+_REFUSED = object()
+
+
 class _WorkerLifecycleReporter:
     """See the module docstring. All reporting except the yield is
     best-effort: a registry hiccup must never fail a task whose work
@@ -231,7 +244,7 @@ class _WorkerLifecycleReporter:
         claim that moved on is this worker's cheapest cancellation
         checkpoint."""
 
-        def _do() -> None:
+        def _do() -> object:
             try:
                 self.registry.member_start(
                     self.plan_id,
@@ -249,8 +262,65 @@ class _WorkerLifecycleReporter:
                 self.cancellation.note_cancelled(
                     f"the registry refused its start: {e.code}"
                 )
+                return _REFUSED
+            return _APPLIED
 
-        self._guard(_do, "start")
+        answer = self._guard(_do, "start")
+        if answer is _REFUSED:
+            return
+        if answer is _APPLIED and (
+            self._executor_ref() is not None or not _in_modal_container()
+        ):
+            return
+        # Unanswered -- or applied without a ref, which in a container means
+        # the call id was not readable here (a run function on a thread
+        # without the call's context): the ledger decides.
+        self._require_ref_recorded()
+
+    def _require_ref_recorded(self) -> None:
+        """The worker rule of reconciliation (STA-94/STA-135): **no
+        ``run()`` until the ledger records this container's ref.**
+
+        A reconciling tick ends an execution that never recorded a ref --
+        conditionally, under the same lock as the ref record -- on the
+        reading that its spawn never landed. That reading is only true if a
+        container that *did* land cannot run the task without its ref on
+        the ledger. So when the start report got no answer (an outage, a
+        rate limit outlasting the retries), the ledger is read: this
+        container's ref there (the spawning tick records it too) and the
+        task runs; otherwise it stops at checkpoint one, before ``run()``,
+        and its claim is left to the tick's reconciliation or its TTL. A
+        delayed run, never a duplicate one."""
+        ref = self._executor_ref()
+        if ref is None:
+            if not _in_modal_container():
+                # Not a Modal container (a local run, a test): no call to
+                # reconcile by.
+                return
+            self.cancellation.note_cancelled(
+                "this container's call id is not readable, so its ref cannot "
+                "be on the ledger and it may not run the task"
+            )
+            return
+        try:
+            ledger = self.registry.build_list_executions(self.build_id)
+        except Exception as e:
+            self.cancellation.note_cancelled(
+                f"its start was not recorded and the ledger could not be read ({e})"
+            )
+            return
+        execution = next((x for x in ledger if x.id == self.execution_id), None)
+        if (
+            execution is not None
+            and execution.executor_ref == ref
+            and execution.still_wanted
+        ):
+            return
+        self.cancellation.note_cancelled(
+            "its start was not recorded, and the ledger does not name this "
+            "container, so it may not run the task (a reconciling tick may "
+            "re-drive it)"
+        )
 
     def completed(self) -> None:
         self._guard(

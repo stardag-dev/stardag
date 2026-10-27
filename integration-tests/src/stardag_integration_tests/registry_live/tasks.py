@@ -619,6 +619,48 @@ class DiesOnce(sd.Task[list[int]]):
         self._save(self.requires().load())
 
 
+# The artifacts the reconcile app's faults record themselves in (see
+# ``faults``): the execution each fault struck, before or instead of the
+# report that fault suppresses.
+TICK_DEATH_ARTIFACT_NAME = "registry-live-tick-death"
+UNREPORTED_END_ARTIFACT_NAME = "registry-live-unreported-end"
+
+
+class SpawnDiesWithTheTick(sd.Task[list[int]]):
+    """A task whose first spawn kills the tick that claimed it.
+
+    Nothing in the body: the fault is in the *tick*, installed by the
+    reconcile app's container setup (``faults``). The first time a tick
+    claims this task and goes to spawn it, the tick's container exits hard
+    between the claim and the spawn -- the claim is taken and real, no
+    executor ref is ever recorded, and nothing will run it. Every later
+    spawn goes through. A leaf on purpose, so the build's first pass claims
+    it and nothing else is in flight when the tick dies.
+    """
+
+    salt: str
+
+    def run(self):
+        self._save([0])
+
+
+class EndGoesUnreported(sd.Task[list[int]]):
+    """A task whose worker runs it and never reports the end.
+
+    The body writes the output like any other; the fault is in the
+    *worker's reporter*, installed by the reconcile app's container setup
+    (``faults``): its completion report for this task is replaced by an
+    artifact naming the execution, so the call returns and the ledger keeps
+    the execution running -- a lost end report. A leaf, like
+    ``SpawnDiesWithTheTick``.
+    """
+
+    salt: str
+
+    def run(self):
+        self._save([0])
+
+
 class RolloverRoot(sd.Task[list[int]]):
     """A root whose identity a new deployment can change (S20).
 

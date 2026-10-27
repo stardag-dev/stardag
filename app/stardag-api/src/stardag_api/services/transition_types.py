@@ -82,6 +82,11 @@ class Transition:
     #: Why a claim is released (the build transition that released it), or
     #: why a member is skipped.
     reason: str | None = None
+    #: An operator end applied only while the execution has recorded no
+    #: executor ref (STA-94/STA-135): a reconciling tick ending a claim
+    #: whose spawn never reported, decided under the task row lock that the
+    #: ref record also takes, so the two cannot interleave.
+    only_if_unspawned: bool = False
 
     @classmethod
     def start(
@@ -151,10 +156,17 @@ class Transition:
         cls,
         execution_id: UUID,
         outcome: ExecutionOutcome = ExecutionOutcome.STOPPED,
+        *,
+        only_if_unspawned: bool = False,
     ) -> Transition:
         if outcome not in OPERATOR_END_OUTCOMES:
             raise ValueError(f"not an operator end: {outcome}")
-        return cls(TransitionKind.STOP, execution_id=execution_id, outcome=outcome)
+        return cls(
+            TransitionKind.STOP,
+            execution_id=execution_id,
+            outcome=outcome,
+            only_if_unspawned=only_if_unspawned,
+        )
 
     @classmethod
     def release(cls, reason: str) -> Transition:

@@ -42,6 +42,7 @@ from stardag.integration.modal._reporter import report_unreadable_task
 from stardag.integration.modal._protocols import (
     _callable_accepts_env_overrides,
     _callable_accepts_keyword,
+    _run_function_keeps_worker_rule,
     _run_function_reports_lifecycle,
     _RunFunctionWithEnv,
 )
@@ -491,6 +492,7 @@ def _register_functions(
         ),
         task_modules=tuple(task_modules),
         task_module_patterns=task_module_patterns,
+        worker_keeps_worker_rule=_run_function_keeps_worker_rule(self._run_function),
     )
 
     # ``async def`` on purpose, and load-bearing. Modal serves

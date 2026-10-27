@@ -22,6 +22,7 @@ from stardag.build import (
     get_current_build_context,
 )
 from stardag.build._registration import send_yield_aio, walk_aio, yield_batches
+from stardag.exceptions import APIError, ExecutionCancelled, execution_not_wanted
 from stardag.registry import RegistryABC
 
 FAKE_EXECUTOR = "fake"
@@ -69,6 +70,8 @@ class FakeDetachedExecutor(TaskExecutorABC):
         self.cancelled: list[UUID] = []
         self.background: list[asyncio.Task] = []
         self.ticks_spawned: list[tuple[UUID, str]] = []
+        # What ``probe_detached`` answers, by ref (default ``"unknown"``).
+        self.probes: dict[str, str] = {}
 
     # -- executor surface ------------------------------------------------------------
 
@@ -147,8 +150,16 @@ class FakeDetachedExecutor(TaskExecutorABC):
                 claim=False,
                 executor_ref=ref,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            # The Modal runner's start rules: a refused start (the execution
+            # is over) runs nothing, and an unanswered one runs only once
+            # the ledger names this worker's ref (the worker rule that makes
+            # reconciliation safe, ``_reporter._require_ref_recorded``).
+            if not self._may_run_after_unrecorded_start(e, execution_id, plan_id, ref):
+                return TaskExecutionError(
+                    exception=ExecutionCancelled(f"start not recorded: {e}"),
+                    traceback=str(e),
+                )
         try:
             result = _drive(task)
         except Exception as e:
@@ -175,6 +186,22 @@ class FakeDetachedExecutor(TaskExecutorABC):
         self._wake(plan_id)
         return result
 
+    def _may_run_after_unrecorded_start(
+        self, error: Exception, execution_id: UUID, plan_id: UUID, ref: str
+    ) -> bool:
+        if isinstance(error, APIError) and execution_not_wanted(error):
+            return False
+        registry = self.registry
+        plans = getattr(registry, "plans", None)
+        if registry is None or plans is None or plan_id not in plans:
+            return False
+        try:
+            ledger = registry.build_list_executions(plans[plan_id].build_id)
+        except Exception:
+            return False
+        own = next((x for x in ledger if x.id == execution_id), None)
+        return own is not None and own.executor_ref == ref and own.still_wanted
+
     def _wake(self, plan_id: UUID) -> None:
         registry = self.registry
         plans = getattr(registry, "plans", None)
@@ -183,6 +210,16 @@ class FakeDetachedExecutor(TaskExecutorABC):
 
     async def cancel(self, task: BaseTask) -> None:
         self.cancelled.append(task.id)
+
+    def reconciles(self, executor: str) -> bool:
+        return executor == FAKE_EXECUTOR
+
+    def reconciles_unspawned(self, executor: str) -> bool:
+        # Its self-reporting worker keeps the start rules (``_worker``).
+        return executor == FAKE_EXECUTOR
+
+    async def probe_detached(self, executor: str, ref: str):  # type: ignore[override]
+        return self.probes.get(ref, "unknown")
 
     async def cancel_detached(self, task: BaseTask, executor: str, ref: str) -> None:
         self.cancel_detached_calls.append((task.id, executor, ref))
