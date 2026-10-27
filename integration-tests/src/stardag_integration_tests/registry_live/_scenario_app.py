@@ -32,6 +32,7 @@ image is identical, so Modal reuses its layers.
 from __future__ import annotations
 
 import sys
+import typing
 
 import modal
 
@@ -108,16 +109,24 @@ MAX_LINGER_SECONDS = TICK_TIMEOUT_SECONDS - 60
 # clock-sized sleeps; with gates they must not rely on that. Modal's minimum.
 ROLLOVER_SCALEDOWN_SECONDS = 2
 
+# Every worker function's Modal timeout. Named so a scenario can derive the
+# claim TTL of a detached execution from it (the timeout plus the SDK's
+# grace, ``stardag.build._claims``) rather than restate it.
+WORKER_TIMEOUT_SECONDS = 600
+
 
 def build_scenario_app(
     app_name: str,
     *,
     app_image: modal.Image | None = None,
     scaledown_window: int | None = None,
+    container_setup: typing.Callable[[], None] | None = None,
 ) -> sd_modal.StardagApp:
     """A scenario app under ``app_name``. Identical but for the name (and, for
     the rollover app, an image with a variant baked in and a short
-    ``scaledown_window``, see ``ROLLOVER_SCALEDOWN_SECONDS``)."""
+    ``scaledown_window``, see ``ROLLOVER_SCALEDOWN_SECONDS``; for the
+    reconcile app, a ``container_setup`` that installs its faults, see
+    ``reconcile_app``)."""
     chosen = image if app_image is None else app_image
 
     def settings(timeout: int) -> sd_modal.FunctionSettings:
@@ -131,7 +140,7 @@ def build_scenario_app(
         app_name,
         builder_settings=settings(900),
         worker_settings={
-            "default": settings(600),
+            "default": settings(WORKER_TIMEOUT_SECONDS),
             # A second worker so one scenario can stop *some* of a build's
             # executions and watch the rest finish. Identical settings: what
             # it exists to be is a different Modal function, because that is
@@ -139,7 +148,7 @@ def build_scenario_app(
             # name recorded in the execution metadata). Costs a deploy-time
             # function registration and nothing at run time -- no task
             # routes here unless it asks.
-            ALT_WORKER: settings(600),
+            ALT_WORKER: settings(WORKER_TIMEOUT_SECONDS),
         },
         worker_selector=registry_live_worker,
         tick_settings=settings(TICK_TIMEOUT_SECONDS),
@@ -162,4 +171,5 @@ def build_scenario_app(
         # declaring the modules is the whole contract (STA-69).
         task_modules=["stardag_integration_tests.registry_live.tasks"],
         limit_key_selector=registry_live_limit_keys,
+        container_setup=container_setup,
     )

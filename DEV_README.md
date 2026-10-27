@@ -201,18 +201,20 @@ spawns the next tick when no scheduler is live.
 `integration-tests/tests_registry_live/` covers it, by deploying a registry
 for the run. What the scenarios there assert:
 
-| Scenario                    | The question it answers                                                                 |
-| --------------------------- | --------------------------------------------------------------------------------------- |
-| `test_reactive_e2e`         | With nothing resident anywhere, does a worker spawn the next tick?                      |
-| `test_claim_race`           | Two builds want one task; does the registry let exactly one run it?                     |
-| `test_cross_build_wake`     | A blocker finishes in one build — is a different, dormant build woken?                  |
-| `test_wake_storm`           | Several dormant builds flagged at once — is each woken _once_, not once per notifier?   |
-| `test_limit_slot_wake`      | A concurrency slot frees — is the build queued on it woken, though it shares no task?   |
-| `test_suspended_blocker`    | A task suspended on dynamic children holds no claim. Is it waited on rather than reset? |
-| `test_failed_blocker`       | A shared task _failed_. Is that left alone as a result, rather than reset?              |
-| `test_watchdog_sweep`       | Does one sweep spawn a tick per build and return in seconds?                            |
-| `test_wide_fan_out`         | A layer wider than one pass may spawn — throttle, or stall?                             |
-| `test_scheduler_lease_live` | Does the lease serialize on real Postgres, and lapse on the real clock?                 |
+| Scenario                         | The question it answers                                                                               |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `test_reactive_e2e`              | With nothing resident anywhere, does a worker spawn the next tick?                                    |
+| `test_claim_race`                | Two builds want one task; does the registry let exactly one run it?                                   |
+| `test_cross_build_wake`          | A blocker finishes in one build — is a different, dormant build woken?                                |
+| `test_wake_storm`                | Several dormant builds flagged at once — is each woken _once_, not once per notifier?                 |
+| `test_limit_slot_wake`           | A concurrency slot frees — is the build queued on it woken, though it shares no task?                 |
+| `test_suspended_blocker`         | A task suspended on dynamic children holds no claim. Is it waited on rather than reset?               |
+| `test_failed_blocker`            | A shared task _failed_. Is that left alone as a result, rather than reset?                            |
+| `test_watchdog_sweep`            | Does one sweep spawn a tick per build and return in seconds?                                          |
+| `test_wide_fan_out`              | A layer wider than one pass may spawn — throttle, or stall?                                           |
+| `test_scheduler_lease_live`      | Does the lease serialize on real Postgres, and lapse on the real clock?                               |
+| `test_reconcile_unspawned_claim` | A tick dies between claim and spawn — is the claim ended `lost` and re-driven, long before its TTL?   |
+| `test_reconcile_unreported_end`  | A worker's call returns without reporting its end — is it completed under that execution, not re-run? |
 
 The v2 design's scenario checklist (`docs/design/registry-v2/design.md`)
 names a test tier per scenario; the `live` rows each have a module named
@@ -252,7 +254,12 @@ S21's recovery is a watchdog sweep, which must reach that scenario's
 builds and no one else's. S37 needs no fourth
 app: it already deploys its own per-scenario rollover app
 (`registry-live-s37-late-record`), and its watchdog sweep runs against
-that one, isolating it the same way without a separate deploy.
+that one, isolating it the same way without a separate deploy. A fourth,
+`registry-live-reconcile`, owns the reconciliation scenarios: its
+`container_setup` installs their faults (`registry_live/faults.py`: a tick
+that dies between a claim and its spawn, a worker whose end report is
+withheld, each for one task class only), and their recovery, like S21's,
+may be a watchdog sweep.
 
 **The rollover scenarios deploy an app each**, several times, under several
 code ids (`_rollover.ROLLOVER_APP_NAMES`): a deploy moves every running
