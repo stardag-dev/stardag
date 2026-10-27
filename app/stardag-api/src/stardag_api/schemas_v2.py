@@ -565,6 +565,11 @@ class StoppedRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     outcome: Literal["stopped", "lost"] = "stopped"
+    # Applied only while the execution has recorded no executor ref
+    # (409 ``execution_spawned`` otherwise). An older server refuses the
+    # unknown field (422) rather than ignoring it, so a caller relying on
+    # the condition never gets the unconditional end instead.
+    only_if_unspawned: bool = False
 
 
 # ---------------------------------------------------------------------------

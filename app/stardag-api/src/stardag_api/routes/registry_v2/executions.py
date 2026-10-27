@@ -27,7 +27,11 @@ async def report_stopped(
     execution_id: UUID, db: Db, auth: Auth, body: StoppedRequest | None = None
 ):
     """The CLI reports an execution it stopped, or gave up on (``lost``)."""
-    outcome = ExecutionOutcome((body or StoppedRequest()).outcome)
+    request = body or StoppedRequest()
     return await executions.report_stopped(
-        db, auth.environment_id, execution_id, outcome=outcome
+        db,
+        auth.environment_id,
+        execution_id,
+        outcome=ExecutionOutcome(request.outcome),
+        only_if_unspawned=request.only_if_unspawned,
     )

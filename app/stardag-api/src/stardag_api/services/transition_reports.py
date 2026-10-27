@@ -230,6 +230,16 @@ class ReportSteps(StepBase):
         execution = await self.named_execution(EventType.TASK_CANCELLED, eid)
         if execution.ended_at is not None:
             return self.outcome(applied=False)
+        if self.transition.only_if_unspawned and execution.executor_ref is not None:
+            # The spawn reported after all: its worker may be running the
+            # task, so ending it here could only make a duplicate. Refused,
+            # trace-free -- the caller re-reads and leaves it to its claim.
+            raise Conflict(
+                "execution_spawned",
+                "the execution has recorded an executor ref; it is not ended",
+                execution_id=str(eid),
+                executor_ref=execution.executor_ref,
+            )
         outcome = self.transition.outcome or ExecutionOutcome.STOPPED
         execution.ended_at = self.now
         execution.outcome = outcome
