@@ -282,28 +282,19 @@ def tasks_list(
 def _class_import(namespace: str, name: str) -> tuple[str, str, bool]:
     """``(module, class_name, located)`` for a registered task's class.
 
-    Found among the task classes this process has registered (``-m``
-    imports them), else by importing the namespace as a module (the
-    ``sd.auto_namespace(__name__)`` convention). ``located`` is False when
-    neither finds it: the namespace is then only a guess at the module.
+    Only from the task classes this process has registered (``-m`` imports
+    them). The namespace is never read as a module path: a task's namespace
+    is an identity, not an import location, and the two are best kept
+    unrelated. ``located`` is False when the class is not registered here,
+    and ``module`` is then empty: no import is printed rather than a guess.
     """
     from stardag._core.base_task import BaseTask
     from stardag.polymorphic import TypeId
 
-    type_id = TypeId(namespace=namespace, name=name)
-    registry = BaseTask._registry()
     try:
-        cls = registry.get_class(type_id)
+        cls = BaseTask._registry().get_class(TypeId(namespace=namespace, name=name))
     except KeyError:
-        cls = None
-        if namespace:
-            try:
-                importlib.import_module(namespace)
-                cls = registry.get_class(type_id)
-            except Exception:
-                cls = None
-    if cls is None:
-        return namespace, name, False
+        return "", name, False
     bound = _name_bound_to(cls)
     if bound is None:
         # Registered, but not importable by its own name (a local class):
@@ -345,17 +336,17 @@ def tasks_ref(
         [],
         "--module",
         "-m",
-        help="Import path of a module defining the task's class, to print its "
-        "exact import (repeatable; patterns like 'pkg.tasks.*' are expanded). "
-        "Default: the task's namespace, imported as a module.",
+        help="Import path of a module defining the task's class, to also print "
+        "its import (repeatable; patterns like 'pkg.tasks.*' are expanded). "
+        "Without it only the ref(...) line is printed.",
     ),
     stardag_profile: Optional[str] = _PROFILE_OPTION,
     stardag_env: Optional[str] = _ENV_OPTION,
     json_output: bool = JSON_OPTION,
 ) -> None:
-    """Print the code referencing a registered task: the import of its
-    class and a ``Task.ref(...)`` call, always pinned to an instance (the
-    newest unless ``--instance`` names one).
+    """Print the code referencing a registered task: a ``Task.ref(...)``
+    call, always pinned to an instance (the newest unless ``--instance``
+    names one), preceded by the class's import when ``-m`` loads it.
 
     Paste it where code should keep pointing at this exact task instead of
     re-composing it. Reads ``GET /tasks/{id}``. Writes nothing.
@@ -407,13 +398,15 @@ def tasks_ref(
     if import_line:
         typer.echo(import_line)
     typer.echo(ref_line)
-    if not located:
-        error_hint = (
-            f"Note: {task.task_namespace}.{task.task_name} was not found by "
-            "importing its namespace; the import above is a guess. Pass "
-            "-m <module> to print the exact one."
-            if task.task_namespace
-            else f"Note: {task.task_name} has no namespace, so its module is "
-            "unknown; pass -m <module> to print the import."
+    if not module_path:
+        error_console.print(
+            "[dim]Note: pass -m <module> (the module defining "
+            f"{class_name}) to also print its import.[/dim]",
+            highlight=False,
         )
-        error_console.print(f"[dim]{error_hint}[/dim]", highlight=False)
+    elif not located:
+        error_console.print(
+            f"[dim]Note: {class_name} is not importable by name from "
+            f"{module_path}; check the import above.[/dim]",
+            highlight=False,
+        )

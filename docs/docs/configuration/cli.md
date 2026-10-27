@@ -680,12 +680,11 @@ deployments`.
   The command accepts `--report`, but only to refuse it: it exits 1 with
   a message saying to trigger a build instead, because there is no route
   for a bare observation outside a build's discovery.
-- `tasks ref <task-id>` — print the code that references the task: the
-  import of its class and a `Task.ref(...)` call, pinned to an instance
-  (`--instance`, default the task's newest). The class's module is found
-  by importing the task's namespace; pass `--module` (repeatable) when the
-  namespace is not the module, or a note on stderr says the printed import
-  is a guess. Writes nothing. See
+- `tasks ref <task-id>` — print the code that references the task: a
+  `Task.ref(...)` call, pinned to an instance (`--instance`, default the
+  task's newest). Pass `--module` (repeatable), the module defining the
+  class, to also print its import; the namespace is never read as an
+  import path. Writes nothing. See
   [Reference Existing Tasks](../how-to/reference-existing-tasks.md).
 - `tasks retry` — reset a failed (or otherwise ended) task to `PENDING`
   under the build's active plan, so its next tick or driver runs it

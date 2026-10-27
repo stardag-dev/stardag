@@ -76,7 +76,7 @@ def test_an_unknown_task_is_refused(fake_registry):
     assert result.exit_code == 1
 
 
-def test_an_unimportable_class_prints_a_guess_and_says_so(fake_registry):
+def test_an_unregistered_class_prints_no_import(fake_registry):
     task_id = str(uuid4())
     fake_registry.tasks[task_id] = TaskRow(
         task_id=task_id,
@@ -96,11 +96,11 @@ def test_an_unimportable_class_prints_a_guess_and_says_so(fake_registry):
     )
     result = invoke("tasks", "ref", task_id)
     assert result.exit_code == 0, result.output
+    # The namespace is never read as a module path.
     assert result.stdout.splitlines() == [
-        "from some_project.models import TrainedModel",
         f'TrainedModel.ref("{task_id}", instance_id="{instance_id}")',
     ]
-    assert "is a guess" in result.stderr
+    assert "-m <module>" in result.stderr
 
 
 def test_a_renamed_function_task_prints_the_name_it_is_bound_to(fake_registry):

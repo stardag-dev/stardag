@@ -56,8 +56,8 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   or a Modal payload unhydrated raises `sd.TaskRefNotHydratedError`;
   hydration failures raise `sd.TaskRefHydrationError`.
 - **New: `stardag tasks ref <task-id> [--instance <id>]`** (STA-148)
-  prints the import of a registered task's class and a `ref(...)` call,
-  pinned to an instance (the newest by default).
+  prints a `ref(...)` call for a registered task, pinned to an instance
+  (the newest by default), and the class's import when `--module` loads it.
 - **Changed: `from_registry` validates a body into the class it names**
   (STA-148). A body of an unrelated class is refused by name rather than as
   a task id mismatch, `Base.from_registry(...)` returns the concrete

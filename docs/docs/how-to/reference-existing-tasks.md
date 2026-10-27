@@ -49,9 +49,13 @@ stardag tasks ref 6f1c2c62-1f5c-5a0e-9b8e-3a4f0e1d2c3b
 ```
 
 ```{.python notest}
-from my_project.models import TrainedModel
 TrainedModel.ref("6f1c2c62-1f5c-5a0e-9b8e-3a4f0e1d2c3b", instance_id="0193b0c4-...")
 ```
+
+The task's namespace is an identity, not an import path, so the CLI does not
+guess the import from it. Pass `-m my_project.models` (the module defining the
+class) to have it print the import line as well. The task detail page in the
+registry UI has the same `ref(...)` line behind a copy button.
 
 Use it wherever the task would go:
 
