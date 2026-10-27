@@ -93,13 +93,15 @@ class RegistryABC(RegistryLedgerABC, RegistryReadsABC):
         executor_metadata: dict[str, Any] | None = None,
         plan_only: bool = False,
     ) -> BuildInfo:
+        # The keyword only when set: a subclass implementing the signature
+        # from before plan-only builds keeps working for ordinary ones.
         return self.build_create(
             root_task_ids=root_task_ids,
             build_id=build_id,
             name=name,
             description=description,
             executor_metadata=executor_metadata,
-            plan_only=plan_only,
+            **({"plan_only": True} if plan_only else {}),
         )
 
     def build_get(self, build_id: UUID) -> BuildInfo:

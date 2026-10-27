@@ -74,8 +74,11 @@ class ExclusionMixin(RegistryState):
 
     def build_skip_blocked(self, build_id: UUID) -> list[str]:
         self._record("build_skip_blocked", build_id=build_id)
-        if self.builds[build_id].status in ("cancelled", "completed"):
-            return []  # nothing failed: no failure to propagate
+        build = self.builds[build_id]
+        if build.plan_only or build.status in ("cancelled", "completed"):
+            # Nothing failed: no failure to propagate. A plan-only build ran
+            # nothing, in any status, and SKIPPED is a global task status.
+            return []
         plan = self.active_plan(build_id)
         members = self.members.get(plan.id, {}) if plan is not None else {}
         skipped: list[str] = []

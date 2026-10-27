@@ -273,6 +273,10 @@ async def register_aio(
         from my_project.models import TrainedModel
         TrainedModel.ref("<task_id>", instance_id="<instance_id>")
 
+    ``Task.ref`` is the task-reference API (STA-145), released together
+    with this; the printed line is the stable handle either way, since the
+    task id and instance id it pins are what the registry recorded.
+
     Args:
         tasks: The root task(s).
         tags: Not available yet: tags on each root's completion.

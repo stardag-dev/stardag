@@ -131,6 +131,19 @@ class TestPlanOnlyBuild:
                 resume_build_id=build_id,
             )
 
+    async def test_skip_blocked_is_a_no_op_on_it(
+        self, default_in_memory_fs_target: Target
+    ):
+        """A plan-only build sharing an upstream another build failed leaves
+        its pending root as it is: SKIPPED is a global task status."""
+        registry = InMemoryRegistry()
+        leaf, _, root = _chain()
+        summary = await build_aio([root], registry=registry, plan_only=True)
+        assert summary.build_id is not None
+        registry.task(str(leaf.id)).status = "failed"
+        assert registry.build_skip_blocked(summary.build_id) == []
+        assert registry.status_of(root.id) == "pending"
+
     async def test_needs_a_registry(self, noop_registry, default_in_memory_fs_target):
         _, _, root = _chain()
         with pytest.raises(RuntimeError, match="needs a registry"):
@@ -176,6 +189,36 @@ class TestPlanOnlyBuild:
         with pytest.raises(PlanOnlyUnsupportedError, match="upgrade"):
             await build_aio([root], registry=registry, plan_only=True)
         assert registry.builds == {}
+
+
+class TestBuildCreateAdapter:
+    async def test_an_older_subclass_signature_still_creates_ordinary_builds(
+        self, default_in_memory_fs_target: Target
+    ):
+        """A registry double implementing ``build_create`` without
+        ``plan_only`` keeps working for ordinary builds: the async adapter
+        forwards the keyword only when it is set."""
+
+        class Older(InMemoryRegistry):
+            def build_create(  # type: ignore[override]
+                self,
+                *,
+                root_task_ids,
+                build_id=None,
+                name=None,
+                description=None,
+                executor_metadata=None,
+            ):
+                return super().build_create(
+                    root_task_ids=root_task_ids,
+                    build_id=build_id,
+                    name=name,
+                    description=description,
+                    executor_metadata=executor_metadata,
+                )
+
+        info = await Older().build_create_aio(root_task_ids=["t"])
+        assert info.status == "running"
 
 
 class TestCreateRequest:
