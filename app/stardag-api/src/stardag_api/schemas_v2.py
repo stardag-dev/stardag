@@ -130,6 +130,10 @@ class BuildCreate(BaseModel):
         min_length=1
     )
     executor_metadata: dict[str, Any] | None = None
+    #: Register the roots and their static closure, and run nothing: the
+    #: build is created PENDING (never RUNNING) and ends REGISTERED through
+    #: ``POST /builds/{id}/registered``.
+    plan_only: bool = False
 
 
 class BuildResponse(BaseModel):
@@ -152,6 +156,8 @@ class BuildResponse(BaseModel):
     #: Why the build is FAILED (its last ``BUILD_FAILED``'s message); None
     #: for any other status.
     error_message: str | None
+    #: Registers and runs nothing (``BuildCreate.plan_only``).
+    plan_only: bool = False
 
 
 class BuildCompleteRequest(BaseModel):

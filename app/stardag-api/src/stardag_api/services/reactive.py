@@ -23,7 +23,7 @@ from stardag_api.models import Build, BuildTickSummary
 from stardag_api.models.base import generate_uuid7, utc_now
 from stardag_api.services.builds import get_build
 from stardag_api.services.errors import BadRequest
-from stardag_api.services.registration import lock_build
+from stardag_api.services.registration import lock_build, refuse_plan_only
 from stardag_api.services.tx import retry_on_deadlock, transaction
 
 #: Size caps (compact-JSON bytes): both are echoed on hot reads.
@@ -56,6 +56,7 @@ async def set_reactive_meta(
         )
     async with transaction(session):
         build = await lock_build(session, environment_id, build_id)
+        refuse_plan_only(build, "be reactively scheduled")
         build.reactive_app_name = app_name
         if tick_kwargs is not None:
             build.reactive_tick_kwargs = dict(tick_kwargs)
