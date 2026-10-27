@@ -44,15 +44,15 @@ by the rule above. The lease bounds wasted work, nothing more.
 ``retries`` set is retried by Modal under the same call, so R1 relies on
 ``get(timeout=0)`` answering only the call's *final* outcome: a failed
 attempt's output exposed while the next attempt runs would read
-``"raised"`` and end an execution whose retry is running. The client
-cannot show this (for a spawned call, retries are the server's), so the
+``"raised"`` and end an execution whose retry is running. The client cannot
+show this (for a spawned call, retries are the server's), so the
 registry-live scenario ``test_reconcile_retried_attempt`` does: a first
 attempt that raises with its failure report lost, probed through Modal's
 retry delay and while the retry runs, reads ``"running"`` throughout, and
 the retry completes under the one execution (STA-146). It runs with the
-tier, so a change in Modal's behaviour surfaces there. It only matters
-when the failure report is lost: a reported failure ends the execution
-itself.
+tier, so a change in Modal's behaviour surfaces the next time the tier
+runs. It only matters when the failure report is lost: a reported failure
+ends the execution itself.
 
 **A residual risk, stated rather than assumed away.** R2 trusts the
 worker-rule capability of the tick's own deployment, but a tick resolves

@@ -18,18 +18,22 @@ failure report withheld by the app's ``faults`` -- the report a rate limit
 outlasting its retries would lose, and the only reason a failed attempt's
 execution is still running on the ledger at all: a *reported* failure ends
 the execution itself, releasing its claim, and Modal's retry then finds its
-execution over at its start report. Its retry, under the same call and execution, holds on a gate.
+execution over at its start report. Its retry, under the same call and
+execution, holds on a gate.
 
 **From the failure on,** the scenario probes the call itself, with the
 very method a tick uses, and requires ``"running"`` on every read: through
 the gap before Modal's retry (the app stretches Modal's retry delay to 20s
-so that gap can be probed at all), and while the retry holds. On every read
-it also requires the ledger to show that one execution, unended, with no
-second one. Meanwhile the tick that spawned the task lingers with a
-``reconcile_interval_seconds`` of 5, probing the same call on its own; the
-gate is held for several of its rounds. Then the gate opens, and the retry
-must complete the build under the execution it started with -- no failure
-recorded against it and no replacement execution, ever.
+so that gap can be probed at all, and several reads must land well after
+the attempt has raised), and while the retry holds. On every read it also
+requires the ledger to show that one execution, unended, with no second
+one. The tick that spawned the task is meanwhile lingering with a
+``reconcile_interval_seconds`` of 5, so it normally probes the same call on
+its own; but its summary records no probe count, so the scenario's own
+probes are the evidence, and the tick's part is only that it reconciled
+nothing. Then the gate opens, and the retry must complete the build under
+the execution it started with -- no failure recorded against it and no
+replacement execution, ever.
 
 The alternatives this rules out: a failed attempt read as the call's end
 (``"raised"`` mid-retry), a reconciled failure ending a running execution,
@@ -81,6 +85,10 @@ RETRY_TIMEOUT_SECONDS = 180
 # app's retry delay (``reconcile_app.RETRY_DELAY_SECONDS``) and this
 # interval, several land in it even when the failure is noticed late.
 MIN_GAP_PROBES = 3
+# A gap read counts towards that only this long after the first attempt
+# recorded itself: it records itself *before* raising, so the earliest
+# reads may still find it running.
+GAP_PROBE_AFTER_SECONDS = 5.0
 # How long the retry is held while the call is probed: several of the
 # lingering tick's reconcile rounds, and at least this many probes of the
 # scenario's own.
@@ -152,7 +160,12 @@ def test_a_retried_attempt_is_not_reconciled_as_failed(
 
     # Probe the call, and read the ledger, from the failure on: through the
     # gap before Modal's retry, and for as long as the retry holds.
+    from stardag_integration_tests.registry_live.reconcile_app import (
+        RETRY_DELAY_SECONDS,
+    )
+
     gap_reads: list[str] = []
+    late_gap_reads = 0
     retry_reads: list[str] = []
     retry_seen_at: float | None = None
     failed_at = time.monotonic()
@@ -179,12 +192,15 @@ def test_a_retried_attempt_is_not_reconciled_as_failed(
         reads = gap_reads if retry_seen_at is None else retry_reads
         state = _probe(executor_ref)
         reads.append(state)
+        if retry_seen_at is None and now - failed_at >= GAP_PROBE_AFTER_SECONDS:
+            late_gap_reads += 1
         phase = "before its retry" if retry_seen_at is None else "into its retry"
         assert state == "running", (
             f"Probe of call {executor_ref!r}, {now - failed_at:.0f}s after its "
             f"first attempt failed ({phase}), read {state!r}; a call Modal is "
             f"retrying must read 'running' (gap reads {gap_reads}, retry "
-            f"reads {retry_reads}). A reconciling tick would act on this.\n"
+            f"reads {retry_reads}). A reconciling tick would act on this -- "
+            "unless the retry itself failed, which its container log shows.\n"
             f"{describe(build_id)}\n{_ledger_text()}"
         )
         rows = executions_of(deployment, leaf.id, build_id)
@@ -193,13 +209,21 @@ def test_a_retried_attempt_is_not_reconciled_as_failed(
             f"and must not be ended.\n{describe(build_id)}\n{_ledger_text()}"
         )
         time.sleep(PROBE_INTERVAL_SECONDS)
-    assert len(gap_reads) >= MIN_GAP_PROBES, (
-        f"Only {len(gap_reads)} probe(s) landed between the failed attempt and "
-        f"its retry; the scenario needs {MIN_GAP_PROBES} to say anything about "
-        "that gap."
+    assert retry_seen_at is not None
+    assert retry_seen_at - failed_at >= RETRY_DELAY_SECONDS / 2, (
+        f"The retry started {retry_seen_at - failed_at:.0f}s after the failure, "
+        f"against Modal's {RETRY_DELAY_SECONDS:.0f}s retry delay: this was "
+        "not the gap the scenario means to probe."
+    )
+    assert late_gap_reads >= MIN_GAP_PROBES, (
+        f"Only {late_gap_reads} probe(s) landed between the failed attempt and "
+        f"its retry, {GAP_PROBE_AFTER_SECONDS:.0f}s or more after the failure; "
+        f"the scenario needs {MIN_GAP_PROBES} to say anything about that gap."
     )
     print(
         f"[harness] build {build_id}: {len(gap_reads)} probes before the retry "
+        f"({late_gap_reads} of them {GAP_PROBE_AFTER_SECONDS:.0f}s+ after the "
+        "failure) "
         f"and {len(retry_reads)} during it, all 'running'"
     )
 
@@ -224,9 +248,8 @@ def test_a_retried_attempt_is_not_reconciled_as_failed(
     assert only["executor_ref"] == executor_ref, ledger_text
     assert _probe(executor_ref) == "returned"
 
-    # Diagnostic only (the trail may be short its last tick): whether a
-    # reconciling tick was alive across the hold, and that none reported
-    # reconciling anything.
+    # The trail may be short its last tick, so this can miss a
+    # reconciliation; the ledger above cannot.
     summaries = tick_summaries(build_id)
     reconciled = sum(int(s.get("reconciled") or 0) for s in summaries)
     print(

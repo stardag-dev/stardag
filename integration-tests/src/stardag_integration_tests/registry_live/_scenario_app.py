@@ -139,9 +139,7 @@ def build_scenario_app(
         )
 
     def retrying(retries: int | modal.Retries) -> sd_modal.FunctionSettings:
-        # Passed through to Modal, which takes a ``modal.Retries`` as well as
-        # the count ``FunctionSettings`` declares.
-        return {**settings(WORKER_TIMEOUT_SECONDS), "retries": retries}  # type: ignore[typeddict-item]
+        return {**settings(WORKER_TIMEOUT_SECONDS), "retries": retries}
 
     return sd_modal.StardagApp(
         app_name,

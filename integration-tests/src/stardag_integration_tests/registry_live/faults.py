@@ -149,6 +149,8 @@ def install_reconcile_faults() -> None:
             f"{self.execution_id} raised {exception!r}; its failure goes "
             "unreported"
         )
+        # A lost report still wakes the scheduler, as ``failed`` does.
+        self._guard(self._wake_scheduler, "wake")
 
     setattr(submit_detached, _INSTALLED, True)
     ModalTaskExecutor.submit_detached = submit_detached  # type: ignore[method-assign]
