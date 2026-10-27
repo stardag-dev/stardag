@@ -1,5 +1,7 @@
 import pytest
 
+import stardag as sd
+
 try:
     from prefect import flow
 
@@ -123,3 +125,76 @@ async def test_task_refs_are_hydrated_before_the_walk(default_in_memory_fs_targe
     assert expected.instance_body() in bodies
     assert not any("task_class" in str(b) for b in bodies)
     assert isinstance(root, sd.Task)
+
+
+class _RefInRequires(sd.Task[str]):
+    """Builds its upstream reference inside ``requires()``."""
+
+    leaf_id: str
+
+    def requires(self):
+        from stardag.utils.testing.helper_tasks import AsyncOnlyTask
+
+        return AsyncOnlyTask.ref(self.leaf_id)
+
+    async def run_aio(self):
+        self._save("needs-ref done")
+
+
+class _YieldsRef(sd.Task[str]):
+    """Yields a reference as a dynamic dependency."""
+
+    leaf_id: str
+
+    def run(self):  # type: ignore[override]
+        from stardag.utils.testing.helper_tasks import AsyncOnlyTask
+
+        yield AsyncOnlyTask.ref(self.leaf_id)
+        self._save("yields-ref done")
+
+
+@pytest.mark.skipif(not prefect_available, reason="Prefect is not installed")
+@pytest.mark.parametrize("root_class", [_RefInRequires, _YieldsRef])
+async def test_refs_from_requires_and_yields_use_the_builds_registry(
+    root_class, default_in_memory_fs_target
+):
+    """With no configured registry, a reference built in ``requires()`` or
+    yielded from ``run()`` must be hydrated from the build's registry."""
+    from uuid import uuid4
+
+    from stardag._core.task_ref import clear_hydration_memo
+    from stardag.testing import InMemoryRegistry
+    from stardag.testing._registry_state import InstanceRow, TaskRow
+    from stardag.utils.testing.helper_tasks import AsyncOnlyTask
+
+    clear_hydration_memo()
+    registry = InMemoryRegistry()
+    leaf = AsyncOnlyTask(name=f"prefect-ref-leaf-{root_class.__name__}")
+    await leaf.run_aio()
+    registry.tasks[str(leaf.id)] = TaskRow(
+        task_id=str(leaf.id),
+        task_namespace=leaf.get_namespace(),
+        task_name=leaf.get_name(),
+        version=leaf.version,
+        output_uri=leaf.target().uri,
+    )
+    instance_id = uuid4()
+    registry.instances[instance_id] = InstanceRow(
+        id=instance_id,
+        deployment_id=uuid4(),
+        settings_hash="s",
+        instance_hash=str(leaf.instance_hash),
+        task_id=str(leaf.id),
+        body=leaf.instance_body(),
+    )
+    root = root_class(leaf_id=str(leaf.id))
+
+    @flow  # type: ignore
+    async def build_it():
+        futures = await build_aio(root, registry=registry)  # type: ignore
+        for future in futures.values():
+            future.wait()
+
+    await build_it()
+    assert root.complete()
+    clear_hydration_memo()

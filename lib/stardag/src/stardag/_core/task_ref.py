@@ -28,6 +28,7 @@ A reference is a **driver-side placeholder**:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import threading
 import typing
 import warnings
@@ -77,6 +78,13 @@ class TaskRefHydrationError(TaskRehydrationError):
 
     A :class:`~stardag.TaskRehydrationError`, so code handling failed
     rehydration in general handles this too."""
+
+
+class TaskRefRegistryUnavailableError(TaskRefHydrationError):
+    """Hydration failed because the registry could not be reached or
+    answered with an outage (5xx, 429), after the client's own retries: a
+    transient condition, not a verdict on the reference. A reactive tick
+    retries it rather than excluding the task that built the reference."""
 
 
 def unhydrated_ref_error(task: BaseTask) -> TaskRefNotHydratedError:
@@ -284,16 +292,20 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
             )
         key = (self.task_class, self.task_id, self.instance_id)
         memo = _memo_for(registry)
-        if memo is not None:
+        if memo is None:
+            return typing.cast(TaskT, self._read(registry))
+        # One read per registry and key, however many threads hydrate the
+        # same reference at once (a build's walk resolves in parallel):
+        # every caller gets the same task object, so an unpinned reference
+        # cannot hydrate to two different bodies within one process.
+        with _key_lock(registry, key):
             with _MEMO_LOCK:
                 cached = memo.get(key)
-            if cached is not None:
-                return typing.cast(TaskT, cached)
-        task = self._read(registry)
-        if memo is not None:
-            with _MEMO_LOCK:
-                memo.setdefault(key, task)
-        return typing.cast(TaskT, task)
+            if cached is None:
+                cached = self._read(registry)
+                with _MEMO_LOCK:
+                    cached = memo.setdefault(key, cached)
+        return typing.cast(TaskT, cached)
 
     async def hydrate_aio(self, registry: RegistryABC | None = None) -> TaskT:
         """:meth:`hydrate`, off the event loop (in a worker thread)."""
@@ -301,7 +313,7 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
 
     def _read(self, registry: RegistryABC) -> BaseTask:
         from stardag._core.rehydrate import TaskRehydrationError, load_from_registry
-        from stardag.exceptions import NotFoundError
+        from stardag.exceptions import APIError, NotFoundError
 
         try:
             # Not ``from_registry``: that is the explicit, trusted path, and a
@@ -330,7 +342,15 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
         except httpx.TransportError as e:
             # Raised once the client's own retries are spent: offline, or
             # the registry unreachable.
-            raise TaskRefHydrationError(self._offline_message(e)) from e
+            raise TaskRefRegistryUnavailableError(self._offline_message(e)) from e
+        except APIError as e:
+            if e.status_code is not None and (
+                e.status_code >= 500 or e.status_code == 429
+            ):
+                raise TaskRefRegistryUnavailableError(
+                    f"Cannot hydrate {self!r}: the registry is unavailable ({e})."
+                ) from e
+            raise
         if not isinstance(task, self.task_class):
             raise TaskRefHydrationError(
                 f"Cannot hydrate {self!r}: the registry's body is a "
@@ -473,6 +493,16 @@ def _memo_for(registry: Any) -> dict[tuple[Any, UUID, UUID | None], BaseTask] | 
             return None
 
 
+_KEY_LOCKS: weakref.WeakKeyDictionary[Any, dict[Any, threading.Lock]]
+_KEY_LOCKS = weakref.WeakKeyDictionary()
+
+
+def _key_lock(registry: Any, key: Any) -> threading.Lock:
+    with _MEMO_LOCK:
+        locks = _KEY_LOCKS.setdefault(registry, {})
+        return locks.setdefault(key, threading.Lock())
+
+
 def clear_hydration_memo() -> None:
     """Forget every hydrated reference (tests, or a long-lived process that
     wants an unpinned reference to read the newest instance again)."""
@@ -506,6 +536,11 @@ def _contains(value: Any, seen: set[int]) -> bool:
     seen.add(key)
     if isinstance(value, BaseModel):
         return fields_contain_refs(value, seen)
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return any(
+            _contains(getattr(value, f.name, None), seen)
+            for f in dataclasses.fields(value)
+        )
     if isinstance(value, Mapping):
         return any(_contains(v, seen) for v in value.values())
     if isinstance(value, (list, tuple, set, frozenset)):
@@ -533,10 +568,14 @@ def resolve_refs(value: _Struct, registry: RegistryABC | None = None) -> _Struct
     task: the roots of a build, or any structure of tasks.
 
     References are found in nested task fields too, at any depth, and in
-    lists, tuples, sets and dicts of tasks. A task holding one is rebuilt
-    (``model_copy``) with the hydrated task in its place; since a
-    reference's id is the referenced task id, every id is unchanged.
-    Anything without a reference is returned as the same object.
+    lists, tuples, sets, mappings and dataclasses holding tasks, as well as
+    inside a hydrated task (a field defaulting to a reference). A holder is
+    rebuilt with the hydrated task in its place (``model_copy`` for a model,
+    ``dataclasses.replace`` for a dataclass, its own type for a container);
+    since a reference's id is the referenced task id, every id is
+    unchanged. Anything without a reference is returned as the same object.
+    A set in which two references hydrate to one task is refused, since
+    collapsing them would change the set.
 
     Args:
         value: A task, or a list / tuple / dict of them.
@@ -567,7 +606,9 @@ def _resolve(value: Any, registry: Any, memo: dict[int, Any]) -> Any:
         return memo[key]
     result = value
     if isinstance(value, TaskRef):
-        result = value.hydrate(registry)
+        # The hydrated task may itself hold references: a field added since
+        # its body was stored, defaulting to one.
+        result = _resolve(value.hydrate(registry), registry, memo)
     elif isinstance(value, BaseModel):
         if contains_refs(value):
             updates = {}
@@ -580,16 +621,56 @@ def _resolve(value: Any, registry: Any, memo: dict[int, Any]) -> Any:
                     updates[name] = replaced
             if updates:
                 result = value.model_copy(update=updates)
-    elif type(value) in (list, tuple, set, frozenset):
+    elif dataclasses.is_dataclass(value) and not isinstance(value, type):
+        if contains_refs(value):
+            changes = {}
+            for f in dataclasses.fields(value):
+                current = getattr(value, f.name, None)
+                replaced = _resolve(current, registry, memo)
+                if replaced is not current:
+                    if not f.init:
+                        raise TaskRefNotHydratedError(
+                            f"{type(value).__qualname__}.{f.name} holds a "
+                            "TaskRef but is not an init field, so it cannot be "
+                            "replaced by the hydrated task. Hydrate it yourself."
+                        )
+                    changes[f.name] = replaced
+            if changes:
+                result = dataclasses.replace(value, **changes)
+    elif isinstance(value, (list, tuple, set, frozenset)):
         items = [_resolve(v, registry, memo) for v in value]
         if any(new is not old for new, old in zip(items, value)):
-            result = type(value)(items)
-    elif type(value) is dict:
+            result = _rebuilt(value, items)
+            if isinstance(value, (set, frozenset)) and len(result) != len(value):
+                raise TaskRefHydrationError(
+                    "Hydrating the references in a set made two of its members "
+                    "equal (e.g. a pinned and an unpinned reference to one "
+                    "task), which would silently change the set, and so the "
+                    "task holding it. Put each task in the set once."
+                )
+    elif isinstance(value, Mapping):
         items = {k: _resolve(v, registry, memo) for k, v in value.items()}
         if any(items[k] is not v for k, v in value.items()):
-            result = items
+            result = _rebuilt(value, items)
     memo[key] = result
     return result
+
+
+def _rebuilt(original: Any, items: Any) -> Any:
+    """``items`` as a container of ``original``'s type (a ``list``,
+    ``OrderedDict``, ``MappingProxyType``, ...), or refused when that type
+    cannot be built from them."""
+    kind = type(original)
+    if kind in (list, tuple, set, frozenset, dict):
+        return kind(items)
+    try:
+        return kind(items)
+    except Exception as e:
+        raise TaskRefNotHydratedError(
+            f"A {kind.__qualname__} holding a TaskRef cannot be rebuilt with "
+            f"the hydrated task ({e}). Hydrate the reference yourself "
+            "(.hydrate()) before putting it there."
+        ) from e
 
 
 # -----------------------------------------------------------------------------

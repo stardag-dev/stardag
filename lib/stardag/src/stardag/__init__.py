@@ -56,6 +56,7 @@ from stardag._core.task_ref import (
     TaskRef,
     TaskRefHydrationError,
     TaskRefNotHydratedError,
+    TaskRefRegistryUnavailableError,
     clear_hydration_memo,
     resolve_refs,
 )
@@ -144,6 +145,7 @@ __all__ = [
     "TaskRef",
     "TaskRefHydrationError",
     "TaskRefNotHydratedError",
+    "TaskRefRegistryUnavailableError",
     "TaskSlug",
     "resolve_refs",
     "clear_hydration_memo",

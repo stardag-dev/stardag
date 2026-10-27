@@ -26,6 +26,7 @@ Auto-generated API documentation from source code.
         - task_from_body
         - TaskRefHydrationError
         - TaskRefNotHydratedError
+        - TaskRefRegistryUnavailableError
         - TaskStruct
         - build
         - build_aio

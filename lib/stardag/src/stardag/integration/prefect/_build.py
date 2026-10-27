@@ -452,6 +452,11 @@ async def _build_dag_recursive(
 
     Returns None if the task cannot be scheduled yet due to upstream dynamic deps.
     """
+    # A reference (a root, or one a ``requires()`` builds) is scheduled as
+    # its hydrated task, read from the build's registry.
+    registry = run_wrapper.session.registry
+    task = await resolve_refs_aio(task, registry)
+
     # Cycle detection
     if task.id in visited:
         raise ValueError("Cyclic dependencies detected")
@@ -502,13 +507,17 @@ async def _build_dag_recursive(
                     if hasattr(result, "__next__"):
                         gen: Generator[TaskStruct, None, None] = result  # type: ignore[assignment]
                         requires = next(gen)
-                        deps = flatten_task_struct(requires)
+                        deps = await resolve_refs_aio(
+                            flatten_task_struct(requires), registry
+                        )
                         completed = [dep.complete() for dep in deps]
                         logger.debug(f"Initial deps: {deps}, completed: {completed}")
                         while all(completed):
                             logger.debug("All deps complete")
                             requires = next(gen)
-                            deps = flatten_task_struct(requires)
+                            deps = await resolve_refs_aio(
+                                flatten_task_struct(requires), registry
+                            )
                             completed = [dep.complete() for dep in deps]
                             logger.debug(f"Deps: {deps}, completed: {completed}")
 
@@ -519,7 +528,9 @@ async def _build_dag_recursive(
                         # Return deps directly - task execution is already done
                         # Cast for type checker - we've verified it's not a generator
                         task_struct: TaskStruct = result  # type: ignore[assignment]
-                        deps = flatten_task_struct(task_struct)
+                        deps = await resolve_refs_aio(
+                            flatten_task_struct(task_struct), registry
+                        )
                         logger.debug(f"Cross-process deps: {deps}")
                         await run_wrapper.suspended(task, deps)
                         return task.id, deps

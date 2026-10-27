@@ -345,21 +345,6 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
         instances.reverse()
         return self._task_summary(task, instances=instances)
 
-    def task_instance_get(
-        self, instance_id: UUID | str, *, task_id: str | None = None
-    ) -> TaskInstanceInfo:
-        row = self.instances.get(UUID(str(instance_id)))
-        if row is None:
-            raise refuse("unknown_instance", f"no instance {instance_id}", status=404)
-        return TaskInstanceInfo(
-            id=row.id,
-            task_id=row.task_id,
-            deployment_id=row.deployment_id,
-            settings_hash=row.settings_hash,
-            instance_hash=row.instance_hash,
-            body=row.body,
-        )
-
     def task_list_artifacts(self, task_id: str) -> list[TaskArtifactInfo]:
         self.task(task_id)
         return [

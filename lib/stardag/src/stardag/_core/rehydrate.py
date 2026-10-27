@@ -372,8 +372,18 @@ def load_from_registry(
             raise TaskRehydrationError(
                 f"The registry holds no instance body for task {task_id}."
             )
-        task = _validate_for(cls, info.body, allow_aliased=allow_aliased)
-        if task.id != task_id:
+        try:
+            task = _validate_for(cls, info.body, allow_aliased=allow_aliased)
+            rehydrated_id = task.id
+        except TaskRehydrationError:
+            raise
+        except Exception as e:
+            # As on the pinned path: one error family for a body that does
+            # not validate (a field since made required, say).
+            raise TaskRehydrationError(
+                f"Failed to rehydrate the newest instance of task {task_id}: {e}"
+            ) from e
+        if rehydrated_id != task_id:
             raise _id_mismatch(task, task_id)
         return task
 

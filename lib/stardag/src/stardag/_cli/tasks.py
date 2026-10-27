@@ -43,6 +43,7 @@ from stardag._cli.tasks_actions import (
     tasks_exclude,
     tasks_retry,
 )
+from stardag._core.task_id import same_task_id
 from stardag.exceptions import StardagError
 from stardag._cli.executions import render_executions
 from stardag.registry import EventInfo, TaskArtifactInfo, TaskInfo
@@ -330,7 +331,9 @@ def tasks_ref(
             # Read the instance itself: ``task_get`` serves only the newest
             # few, so an older one is not necessarily among them.
             pinned = registry.task_instance_get(instance, task_id=task.task_id)
-            if pinned.task_id is not None and pinned.task_id != task.task_id:
+            if pinned.task_id is not None and not same_task_id(
+                pinned.task_id, task.task_id
+            ):
                 raise StardagError(
                     f"Instance {instance} belongs to task {pinned.task_id}, "
                     f"not to task {task.task_id}."

@@ -76,6 +76,19 @@ def bound_under_another_name(x: int) -> int:
     return x
 
 
+_DEFAULT_MODEL = TrainedModel(data=Dataset(size=9))
+
+
+class WithRefDefault(sd.Task[str]):
+    size: int
+    extra: Annotated[sd.TaskLoads[str], sd.StardagField(significant=False)] = (
+        TrainedModel.ref(_DEFAULT_MODEL.id)
+    )
+
+    def run(self):
+        self._save("x")
+
+
 class OtherModel(sd.Task[str]):
     seed: int
 
@@ -511,3 +524,116 @@ class TestOffline:
         with config_provider.override(config):
             with pytest.raises(sd.TaskRefHydrationError, match="cache is turned off"):
                 TrainedModel.ref(model.id, instance_id=uuid4()).hydrate(_Offline())
+
+
+class TestReviewRoundTwo:
+    def test_concurrent_hydration_reads_once_and_shares_the_task(self, model):
+        import threading
+        import time
+
+        registry = InMemoryRegistry()
+        _store(registry, model)
+        reads: list[str] = []
+        task_get = registry.task_get
+
+        def slow_task_get(task_id: str):
+            reads.append(task_id)
+            time.sleep(0.05)
+            return task_get(task_id)
+
+        registry.task_get = slow_task_get  # type: ignore[method-assign]
+        results: list[object] = []
+        threads = [
+            threading.Thread(
+                target=lambda: results.append(
+                    TrainedModel.ref(model.id).hydrate(registry)
+                )
+            )
+            for _ in range(4)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert reads == [str(model.id)]
+        assert len({id(r) for r in results}) == 1
+
+    def test_an_outage_is_a_registry_unavailable_error(self, model):
+        from stardag._core.task_ref import TaskRefRegistryUnavailableError
+        from stardag.exceptions import APIError
+
+        class Gateway(InMemoryRegistry):
+            def task_get(self, task_id):
+                raise APIError("bad gateway", status_code=503)
+
+        for registry in (_Offline(), Gateway()):
+            with pytest.raises(TaskRefRegistryUnavailableError):
+                TrainedModel.ref(model.id).hydrate(registry)
+
+    def test_an_unpinned_body_that_does_not_validate_is_a_rehydration_error(
+        self, model
+    ):
+        registry = InMemoryRegistry()
+        instance_id = _store(registry, model)
+        del registry.instances[instance_id].body["data"]
+        with pytest.raises(sd.TaskRefHydrationError, match="Failed to rehydrate"):
+            TrainedModel.ref(model.id).hydrate(registry)
+        with pytest.raises(sd.TaskRehydrationError):
+            TrainedModel.from_registry(model.id, registry)
+
+    def test_a_ref_equal_to_a_task_compat_default_drops_out_of_the_hash(self):
+        baseline = Dataset(size=1)
+
+        class WithDefaultData(sd.Task[str]):
+            data: Annotated[
+                sd.TaskLoads[list[int]], sd.StardagField(compat_default=baseline)
+            ] = baseline
+
+            def run(self):
+                self._save("x")
+
+        real = WithDefaultData(data=baseline)
+        via_ref = WithDefaultData(data=Dataset.ref(baseline.id))
+        assert via_ref.id == real.id == WithDefaultData().id
+
+    def test_refs_in_dataclasses_and_other_mappings_are_resolved(self, model):
+        import dataclasses
+        from collections import OrderedDict
+
+        @dataclasses.dataclass(frozen=True)
+        class Holder:
+            model: object
+
+        registry = InMemoryRegistry()
+        _store(registry, model)
+        ref = TrainedModel.ref(model.id)
+        holder, ordered = resolve_refs(
+            [Holder(model=ref), OrderedDict(m=ref)], registry
+        )
+        assert type(holder) is Holder and holder.model == model
+        assert type(ordered) is OrderedDict and ordered["m"] == model
+        assert contains_refs(Holder(model=ref))
+
+    def test_a_hydrated_task_holding_a_ref_is_resolved_too(self, model):
+        registry = InMemoryRegistry()
+        _store(registry, _DEFAULT_MODEL)
+        stored = WithRefDefault(size=1, extra=_DEFAULT_MODEL)
+        instance_id = _store(registry, stored)
+        # The stored body predates ``extra``: hydration takes its default,
+        # a reference, which must be hydrated in turn.
+        del registry.instances[instance_id].body["extra"]
+        resolved = resolve_refs(WithRefDefault.ref(stored.id), registry)
+        assert type(resolved) is WithRefDefault
+        assert resolved.extra == _DEFAULT_MODEL
+        assert not contains_refs(resolved)
+
+    def test_a_set_whose_refs_collapse_is_refused(self, model):
+        registry = InMemoryRegistry()
+        instance_id = _store(registry, model)
+        both = {
+            TrainedModel.ref(model.id),  # pyright: ignore[reportUnhashable]
+            TrainedModel.ref(model.id, instance_id),  # pyright: ignore[reportUnhashable]
+        }
+        assert len(both) == 2
+        with pytest.raises(sd.TaskRefHydrationError, match="set"):
+            resolve_refs(both, registry)

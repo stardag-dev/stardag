@@ -61,7 +61,9 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   payload or a plain `model_dump()` of a task holding one raises
   (`sd.TaskRefNotHydratedError`). Hydration failures, including an
   unreachable registry, raise `sd.TaskRefHydrationError`, a
-  `TaskRehydrationError`.
+  `TaskRehydrationError`; an outage (unreachable, 5xx, 429) is the subclass
+  `sd.TaskRefRegistryUnavailableError`, which a reactive tick retries rather
+  than excluding the task whose `requires()` built the reference.
 - **New: `stardag tasks ref <task-id> [--instance <id>]`** (STA-148)
   prints a `ref(...)` call for a registered task, pinned to an instance
   (the newest by default), and the class's import when `--module` loads it.

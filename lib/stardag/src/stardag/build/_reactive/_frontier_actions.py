@@ -37,6 +37,7 @@ from functools import partial
 from uuid import UUID
 
 from stardag import BaseTask, task_from_registry_data
+from stardag._core.task_ref import TaskRefRegistryUnavailableError
 import httpx
 
 from stardag._core.rehydrate import TaskRehydrationError
@@ -288,6 +289,11 @@ async def _discovery_job(
             max_concurrent_discover=config.max_concurrent_discover,
             registry=registry,
         )
+    except TaskRefRegistryUnavailableError:
+        # A registry outage while hydrating a reference the member's
+        # requires() built: transient, like a completion check that raised.
+        # Propagates, and the next tick tries again; never an exclusion.
+        raise
     except (TaskRehydrationError, StardagError) as e:
         # The code under this scope cannot state this member (a class not
         # importable here, a requires() that raised, a conflicting or
