@@ -29,6 +29,7 @@ Turn the cache off with ``STARDAG_REGISTRY_CACHE=0``.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
@@ -47,6 +48,11 @@ logger = logging.getLogger(__name__)
 
 # Bumped if the entry layout changes; an entry of another version is a miss.
 _ENTRY_VERSION = 1
+
+# :func:`secret_fingerprint`'s KDF parameters. Changing either moves every
+# API-key partition (a one-off cold cache, nothing worse).
+_FINGERPRINT_SALT = b"stardag-registry-cache"
+_FINGERPRINT_ITERATIONS = 100_000
 
 
 def cache_root() -> Path:
@@ -73,9 +79,19 @@ def partition_key(api_url: str, *identity: str | None) -> str:
     return f"{registry_key_from_url(url)}-{digest}"
 
 
+@functools.lru_cache(maxsize=16)
 def secret_fingerprint(secret: str) -> str:
-    """A one-way fingerprint of a credential, for :func:`partition_key`."""
-    return hashlib.sha256(f"stardag-registry-cache\0{secret}".encode()).hexdigest()
+    """A one-way fingerprint of a credential, for :func:`partition_key`.
+
+    PBKDF2, not a bare hash: the input is a credential, and the digest's
+    prefix ends up in a directory name on disk, so it is derived with a
+    deliberately slow key-derivation function rather than a fast hash.
+    Memoised per process, so the cost (tens of milliseconds) is paid once
+    per credential, and only when the cache is used.
+    """
+    return hashlib.pbkdf2_hmac(
+        "sha256", secret.encode("utf-8"), _FINGERPRINT_SALT, _FINGERPRINT_ITERATIONS
+    ).hex()
 
 
 def _partition_dir(partition: str) -> Path:
