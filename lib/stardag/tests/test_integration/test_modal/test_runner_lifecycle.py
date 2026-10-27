@@ -203,7 +203,29 @@ class TestRunnerLifecycleReporting:
 
         assert planned.reports() == []
 
-    def test_registry_errors_never_fail_the_task(self, default_in_memory_fs_target):
+    def test_registry_errors_after_the_start_never_fail_the_task(
+        self, default_in_memory_fs_target
+    ):
+        planned = plan_and_claim(make_range(limit=3))
+
+        def down(*args, **kwargs):
+            raise ConnectionError("registry down")
+
+        # The start was recorded; everything after it is lost.
+        planned.registry.member_complete = down  # type: ignore[method-assign]
+        planned.registry.build_list_executions = down  # type: ignore[method-assign]
+
+        assert _run(planned) is None
+        assert planned.task.complete()  # the actual work still succeeded
+
+    def test_a_registry_down_at_the_start_runs_nothing_and_fails_nothing(
+        self, default_in_memory_fs_target
+    ):
+        """The worker rule (STA-94/STA-135): with its start unrecorded the
+        worker does not run the task -- a reconciling tick may re-drive it
+        -- and reports nothing, so the task is not failed either."""
+        from stardag.exceptions import ExecutionCancelled
+
         planned = plan_and_claim(make_range(limit=3))
 
         def down(*args, **kwargs):
@@ -213,8 +235,10 @@ class TestRunnerLifecycleReporting:
         planned.registry.member_complete = down  # type: ignore[method-assign]
         planned.registry.build_list_executions = down  # type: ignore[method-assign]
 
-        assert _run(planned) is None
-        assert planned.task.complete()  # the actual work still succeeded
+        with pytest.raises(ExecutionCancelled):
+            _run(planned)
+        assert not planned.task.complete()
+        assert not planned.registry.called("member_fail", task_id=planned.task_id)
 
 
 class TestReporterCreate:
@@ -437,3 +461,55 @@ class TestReactiveWorkerBehavior:
 
         assert tick_spawn_stub == {}
         assert not planned.registry.called("build_notify")
+
+
+class TestTheWorkerRule:
+    """A worker never enters ``run()`` unless the ledger records its own
+    ref (STA-94/STA-135): a reconciling tick ends a claim with no ref on
+    the reading that its spawn never landed."""
+
+    @staticmethod
+    def _start_unanswered(planned):
+        from stardag.exceptions import APIError
+
+        original = planned.registry.member_start
+
+        def member_start(plan_id, task_id, **kwargs):
+            if not kwargs.get("claim", True):
+                raise APIError("unavailable", status_code=503)
+            return original(plan_id, task_id, **kwargs)
+
+        planned.registry.member_start = member_start  # type: ignore[method-assign]
+
+    def test_an_unrecorded_start_does_not_run(self, default_in_memory_fs_target):
+        from stardag.exceptions import ExecutionCancelled
+
+        planned = plan_and_claim(make_range(limit=2))
+        self._start_unanswered(planned)
+        with pytest.raises(ExecutionCancelled):
+            _run(planned)
+        assert not planned.task.complete()
+        assert not planned.registry.called("member_complete", task_id=planned.task_id)
+
+    def test_a_ref_the_spawning_tick_recorded_is_enough(
+        self, default_in_memory_fs_target
+    ):
+        planned = plan_and_claim(make_range(limit=2))
+        planned.registry.executions[planned.execution_id].executor_ref = WORKER_CALL_ID
+        self._start_unanswered(planned)
+        assert _run(planned) is None
+        assert planned.task.complete()
+
+    def test_an_unreadable_ledger_does_not_run(self, default_in_memory_fs_target):
+        from stardag.exceptions import ExecutionCancelled
+
+        planned = plan_and_claim(make_range(limit=2))
+        self._start_unanswered(planned)
+
+        def unreadable(*args, **kwargs):
+            raise ConnectionError("registry unreachable")
+
+        planned.registry.build_list_executions = unreadable  # type: ignore[method-assign]
+        with pytest.raises(ExecutionCancelled):
+            _run(planned)
+        assert not planned.task.complete()

@@ -27,6 +27,19 @@ rules in the server default the other way, because there the cheap error
 is to drop a report rather than to evict a live claim; conflating the two
 polarities would be the bug.
 
+**One exception, before any work: the worker rule of reconciliation.**
+A reactive tick ends an execution that never recorded its executor ref, on
+the reading that its spawn never landed (STA-94/STA-135). That reading is
+only safe if a container that *did* land cannot run the task without its
+ref on the ledger. So a Modal worker whose start report got no answer
+reads the ledger at checkpoint one, and unless its own ref is there it
+stops before ``run()`` -- fail-closed, on the absence of evidence. The
+polarity argument above does not reach it: it protects work already
+running, and here none has started; the cost is a container's start-up
+and a delay until the tick re-drives the task, against a duplicate
+execution. A start report that *was* answered, and every checkpoint after
+it, stay fail-open as described.
+
 **What this cannot protect.** A task with side effects outside its target
 — a row written to somebody else's database, an email sent — is not
 covered, and never was. Cancellation happens at checkpoints, and anything

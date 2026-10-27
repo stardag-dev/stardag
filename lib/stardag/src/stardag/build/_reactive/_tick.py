@@ -28,6 +28,7 @@ from stardag.build._reactive._frontier_actions import (
     is_registry_outage,
 )
 from stardag.build._reactive._lease import SchedulerLease
+from stardag.build._reactive._reconcile import Reconciler
 from stardag.build._reactive._rollover import RollOver, RollOverFailed
 from stardag.build._reactive._terminal import TERMINAL_BUILD_STATUSES, handle_terminal
 from stardag.build._settings import settings_applied
@@ -339,6 +340,8 @@ class _Driver:
         self.restart_due: float | None = None
         # Spawns admitted per pass under the registry's rate limit.
         self.admission = Admission()
+        # Ends the build's dead claim-holders (STA-94/STA-135).
+        self.reconciler = Reconciler()
 
     def _out_of_time(self) -> bool:
         return (
@@ -426,6 +429,16 @@ class _Driver:
         )
         try:
             with settings_applied(settings, owner=self.build_id):
+                if self.reconciler.due(asyncio.get_running_loop().time()):
+                    if await self.reconciler.run(
+                        frontier,
+                        registry=self.registry,
+                        task_executor=self.executor,
+                        summary=self.summary,
+                        lease_lost=lambda: lease.lost,
+                    ):
+                        # Re-read before acting: the ends freed claims.
+                        return False, True
                 result = await act_on_frontier(
                     frontier,
                     registry=self.registry,

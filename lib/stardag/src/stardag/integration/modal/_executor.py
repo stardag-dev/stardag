@@ -23,6 +23,8 @@ from stardag.build import (
     TaskExecutorABC,
     get_current_build_context,
 )
+from stardag.build._base import DetachedState
+from stardag.exceptions import ExecutionCancelled
 from stardag.build._claims import claim_ttl_seconds
 from stardag.build._deployment import STARDAG_DEPLOYMENT_ID_ENV
 from stardag.integration.modal._metadata import (
@@ -528,6 +530,59 @@ class ModalTaskExecutor(TaskExecutorABC):
         makes for its neighbours.
         """
         spawn_tick(build_id, app_name)
+
+    def reconciles(self, executor: str) -> bool:
+        """Modal calls: probed with ``get(timeout=0)``, and the runner keeps
+        the worker rule (``_WorkerLifecycleReporter._require_ref_recorded``)."""
+        return executor == MODAL_EXECUTOR_NAME
+
+    async def probe_detached(self, executor: str, ref: str) -> DetachedState:
+        """A non-blocking poll of the call's output (``get(timeout=0)``),
+        classified *positively* -- only an answer that can only come from a
+        finished call is reported as one (see the base method):
+
+        * no output yet (``TimeoutError``) is ``"running"``: still running,
+          queued, or waiting on a preemption's restart;
+        * a returned value is ``"returned"``;
+        * the backend's own terminal failures (its timeout, an internal
+          failure, a remote error) and an exception Modal re-raised from
+          the container -- recognisable by the remote traceback it
+          attaches (``__line_cache__``) -- are ``"raised"``;
+        * everything else is ``"unknown"``: an expired output, and any
+          error that could be the client's own (a network or auth error is
+          indistinguishable by type from a task's exception without that
+          marker, so it never counts as the task's).
+        """
+        if executor != MODAL_EXECUTOR_NAME:
+            return "unknown"
+        from modal.exception import (
+            FunctionTimeoutError,
+            InternalFailure,
+            OutputExpiredError,
+            RemoteError,
+        )
+
+        try:
+            await modal.FunctionCall.from_id(ref).get.aio(timeout=0)
+        except TimeoutError:
+            return "running"
+        except OutputExpiredError:
+            return "unknown"
+        except (FunctionTimeoutError, InternalFailure, RemoteError):
+            return "raised"
+        except ExecutionCancelled:
+            # The worker stopped before ``run()`` (its execution was not
+            # wanted, or its ref could not be recorded) and re-raised to
+            # keep the call from reading as a success. It ran nothing: a
+            # finished call with nothing written, which reconciliation
+            # re-drives rather than charging the task a failed attempt.
+            return "returned"
+        except Exception as e:
+            if hasattr(e, "__line_cache__"):
+                return "raised"
+            logger.debug(f"Probing Modal call {ref!r} failed: {e!r}")
+            return "unknown"
+        return "returned"
 
     async def cancel_detached(self, task: BaseTask, executor: str, ref: str) -> None:
         """Cancel a spawned function call by its recorded id."""

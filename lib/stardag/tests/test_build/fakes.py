@@ -69,6 +69,8 @@ class FakeDetachedExecutor(TaskExecutorABC):
         self.cancelled: list[UUID] = []
         self.background: list[asyncio.Task] = []
         self.ticks_spawned: list[tuple[UUID, str]] = []
+        # What ``probe_detached`` answers, by ref (default ``"unknown"``).
+        self.probes: dict[str, str] = {}
 
     # -- executor surface ------------------------------------------------------------
 
@@ -183,6 +185,12 @@ class FakeDetachedExecutor(TaskExecutorABC):
 
     async def cancel(self, task: BaseTask) -> None:
         self.cancelled.append(task.id)
+
+    def reconciles(self, executor: str) -> bool:
+        return executor == FAKE_EXECUTOR
+
+    async def probe_detached(self, executor: str, ref: str):  # type: ignore[override]
+        return self.probes.get(ref, "unknown")
 
     async def cancel_detached(self, task: BaseTask, executor: str, ref: str) -> None:
         self.cancel_detached_calls.append((task.id, executor, ref))

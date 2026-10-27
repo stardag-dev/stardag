@@ -498,10 +498,34 @@ class APIRegistry(APIRegistryReads, RegistryABC):
     ) -> list[ExecutionInfo]:
         return self.call(_executions_req(build_id, not_in_current_plan, include_ended))
 
+    async def build_list_executions_aio(
+        self,
+        build_id: UUID,
+        *,
+        not_in_current_plan: bool = False,
+        include_ended: bool = False,
+    ) -> list[ExecutionInfo]:
+        return await self.acall(
+            _executions_req(build_id, not_in_current_plan, include_ended)
+        )
+
     def execution_report_stopped(
-        self, execution_id: UUID, *, outcome: StopOutcome = "stopped"
+        self,
+        execution_id: UUID,
+        *,
+        outcome: StopOutcome = "stopped",
+        only_if_unspawned: bool = False,
     ) -> TransitionResult:
-        return self.call(_stopped_req(execution_id, outcome))
+        return self.call(_stopped_req(execution_id, outcome, only_if_unspawned))
+
+    async def execution_report_stopped_aio(
+        self,
+        execution_id: UUID,
+        *,
+        outcome: StopOutcome = "stopped",
+        only_if_unspawned: bool = False,
+    ) -> TransitionResult:
+        return await self.acall(_stopped_req(execution_id, outcome, only_if_unspawned))
 
     def _artifacts_req(
         self,

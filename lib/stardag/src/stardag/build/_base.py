@@ -276,6 +276,10 @@ class ClaimConfig:
     renew_interval_seconds: float = 30.0
 
 
+#: What :meth:`TaskExecutorABC.probe_detached` can say of a detached call.
+DetachedState = Literal["running", "returned", "raised", "unknown"]
+
+
 @dataclass
 class DetachedHandle:
     """Handle to a detached (orchestrator-independent) task execution.
@@ -450,6 +454,32 @@ class TaskExecutorABC(ABC):
             f"{type(self).__name__} does not support detached execution"
         )
 
+    def reconciles(self, executor: str) -> bool:
+        """Whether a reconciling tick may end executions recorded under
+        ``executor`` (the name its handles carry): their calls can be
+        probed (:meth:`probe_detached`), and their workers keep the rule
+        that a call never runs the task before its ref is recorded. Opt-in;
+        default False -- such executions are left to their claim's TTL."""
+        return False
+
+    async def probe_detached(self, executor: str, ref: str) -> "DetachedState":
+        """What became of a detached execution, by its recorded reference:
+
+        * ``"running"`` -- still running, or waiting to (re)start;
+        * ``"returned"`` -- the call finished and returned;
+        * ``"raised"`` -- the call finished by raising (or the backend ended
+          it: a timeout, an internal failure);
+        * ``"unknown"`` -- anything this executor cannot positively say,
+          including a probe that failed.
+
+        A reconciling tick acts only on ``"returned"`` and ``"raised"``
+        (STA-94/STA-135), so an implementation must never answer either
+        for a call that may still run the task; when in doubt, ``"unknown"``.
+        Default: ``"unknown"`` -- an executor that cannot probe is never
+        reconciled, its claims are left to their TTL.
+        """
+        return "unknown"
+
     async def cancel_detached(self, task: BaseTask, executor: str, ref: str) -> None:
         """Best-effort stop of a detached execution by its reference.
 
@@ -582,6 +612,18 @@ class RoutedTaskExecutor(TaskExecutorABC, Generic[ExecutorKeyT]):
         routed = self._executor_for(task)
         if routed is not None:
             await routed.cancel_detached(task, executor, ref)
+
+    def reconciles(self, executor: str) -> bool:
+        return any(e.reconciles(executor) for e in self.executors.values())
+
+    async def probe_detached(self, executor: str, ref: str) -> "DetachedState":
+        # By the recorded executor name, not a task: the first routed
+        # executor with a definite answer gives it.
+        for routed in self.executors.values():
+            state = await routed.probe_detached(executor, ref)
+            if state != "unknown":
+                return state
+        return "unknown"
 
     def can_spawn_scheduler_ticks(self) -> bool:
         return any(e.can_spawn_scheduler_ticks() for e in self.executors.values())

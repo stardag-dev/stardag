@@ -141,6 +141,10 @@ class TickSummary:
     # Containers this tick spawned and then stopped because the registry
     # refused their start (the claim moved on during the spawn).
     cancelled_refs: int = 0
+    # Executions this tick ended because they were dead but still held a
+    # claim: their call finished without reporting, or their spawn never
+    # landed (STA-94/STA-135, see ``_reconcile``).
+    reconciled: int = 0
     # Exit handshake: the linger deadline expired with the wake-up flag set,
     # so the tick kept the lease and re-acted.
     linger_extended: int = 0

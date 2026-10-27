@@ -262,12 +262,19 @@ def _task_artifacts_req(task_id: str) -> Request[list[TaskArtifactInfo]]:
     )
 
 
-def _stopped_req(execution_id: UUID, outcome: StopOutcome) -> Request[TransitionResult]:
+def _stopped_req(
+    execution_id: UUID, outcome: StopOutcome, only_if_unspawned: bool = False
+) -> Request[TransitionResult]:
+    body: dict[str, Any] = {"outcome": outcome}
+    if only_if_unspawned:
+        # Sent only when set: an unconditional stop stays the request every
+        # server version accepts.
+        body["only_if_unspawned"] = True
     return Request(
         "POST",
         f"/executions/{execution_id}/stopped",
         TransitionResult.model_validate,
-        json={"outcome": outcome},
+        json=body,
         operation=f"Report execution {execution_id} {outcome}",
     )
 
