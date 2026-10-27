@@ -36,6 +36,10 @@ arrive, repeat until the roots are complete.
 `sd.build_sequential` / `sd.build_sequential_aio` run one task at a time
 with no executor — for tests and debugging.
 
+`sd.register(task)` registers a task and its dependencies without running
+anything — see [Registering without
+running](#registering-without-running-plan-only-builds).
+
 ## Executors: where a task runs
 
 The scheduling loop never runs a task itself. It hands the task to a
@@ -358,6 +362,45 @@ executions](../configuration/cli.md#stopping-a-builds-executions).
 Deleting a build is refused while any of its executions is still
 unended, or any of its plans holds a live claim, for the same reason: the
 ledger must never be cascaded away under a worker that may still report.
+
+### Registering without running: plan-only builds
+
+`sd.register(tasks)` records tasks in the registry without building them:
+the roots and their **whole** static closure (complete tasks are expanded
+too) are registered under the scope, exactly as a build's static phase
+registers them, and nothing is claimed or executed. For each root it prints
+the line that pins the registered instance:
+
+```python
+import stardag as sd
+
+sd.register(trained_model)
+# Registered build 0193... (nothing was run):
+#   from my_project.models import TrainedModel
+#   TrainedModel.ref("<task_id>", instance_id="<instance_id>")
+```
+
+It returns the roots' instance ids. `sd.build(tasks, plan_only=True)` does
+the same and returns a `BuildSummary` whose status is `REGISTERED`. Pass
+`app_name=` to `sd.register` (or a Modal `task_executor` to `sd.build`) to
+register under a deployed app's current deployment, the scope its reactive
+builds plan under.
+
+Under the hood this is a **plan-only build**: created `pending`, never
+`running`, and ended `registered` once its plan is sealed. Everything that
+hands out or wakes work — the frontier, a claiming start, wake-ups, the
+watchdog, `stardag builds tick`, `stalled-builds` — acts on running builds
+only, so none of it ever acts on a plan-only build, and the registry
+refuses to resume it or to make it reactive. Registering is still an
+observation: a target found complete is recorded completed, and one that
+has vanished is invalidated.
+
+A plan-only build never carries on without the registry
+(`on_registry_failure` does not apply), and a registry that predates
+plan-only builds refuses it with `PlanOnlyUnsupportedError`; upgrade the
+registry. A plan-only build whose driver died before it finished shows as
+"registration incomplete" in the UI; nothing runs from it, so cancel it and
+register again.
 
 ### Concurrency limits across builds
 

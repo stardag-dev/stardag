@@ -34,7 +34,9 @@ export type BuildStatus =
   | "completed"
   | "failed"
   | "cancelled"
-  | "exit_early";
+  | "exit_early"
+  // A plan-only build's end: registered and sealed, nothing ran.
+  | "registered";
 
 export type DeploymentKind = "modal" | "local";
 
@@ -102,6 +104,9 @@ export interface Build {
   // Why the build is FAILED (its last BUILD_FAILED's message); null for
   // any other status.
   error_message: string | null;
+  // Registers and runs nothing: created pending, ends "registered".
+  // Absent from a registry that predates plan-only builds.
+  plan_only?: boolean;
 }
 
 export interface BuildListResponse {

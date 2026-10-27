@@ -8,6 +8,25 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **Added: `sd.register(tasks)` and `sd.build(..., plan_only=True)` register
+  tasks without running them** (STA-150). The roots and their whole static
+  closure, complete tasks expanded too, are registered under the build's
+  scope as a build's static phase registers them, and nothing is claimed or
+  executed. `sd.register` prints, per root, the import line and
+  `Cls.ref("<task_id>", instance_id="<instance_id>")`, and returns the
+  roots' instance ids; `app_name=` registers under a deployed app's current
+  deployment. `sd.build(..., plan_only=True)` returns a summary with the new
+  `BuildExitStatus.REGISTERED`. A plan-only build never carries on without
+  the registry (`on_registry_failure` does not apply), and an older registry
+  that does not know plan-only builds is reported as
+  `PlanOnlyUnsupportedError` rather than worked around. `tags=` and
+  `description=` on `sd.register` are reserved for annotating the roots and
+  raise `NotImplementedError` until the registry supports it. Registry
+  client: `build_create(plan_only=)` (sent only when set) and
+  `build_registered()`; `BuildInfo.plan_only`. **Needs a registry with
+  plan-only builds** (this release's server); every other feature is
+  unaffected against an older one.
+
 - **Fixed: a detached claim could record no executor** (STA-90). The
   claiming start of a detached execution (a reactive tick's spawn, or a
   resident build's Modal-routed task) carried only the best-effort executor
@@ -187,6 +206,21 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### Server
 
+- **Added: plan-only builds** (STA-150). `POST /builds` takes `plan_only`;
+  such a build is created `pending` and is never `running`, so the frontier,
+  claiming starts, wake-up flags, `wake-candidates` and `stalled-builds`,
+  which all act on running builds only, never act on it. `POST
+/builds/{id}/registered` ends it in the new terminal status `registered`
+  (event `build_registered`) once its active plan is sealed, running the
+  closure step first. `resume`, the reactive marker, `complete` and
+  `exit-early` refuse a plan-only build (409 `build_plan_only`); `fail` and
+  `cancel` close one that went wrong. `BuildResponse.plan_only`. Migration:
+  `build.plan_only` (default false), the two enum labels, and the event
+  table's build-level CHECK recreated to compare `event_type::text` (an
+  enum label cannot be used in the transaction that adds it). Additive for
+  a rolling deploy; downgrade rewrites `registered` builds and events to
+  `cancelled`.
+
 - **Changed: the writes that finish running work get their own rate-limit
   window, and a workspace can have its own limit** (STA-135). The
   per-workspace write limit (`LIMITS_MAX_REQUESTS_PER_MINUTE`) refused
@@ -244,6 +278,10 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   Postgres does not guarantee it.
 
 ### UI
+
+- Plan-only builds: a `registered` badge, and a plan-only build still
+  `pending` (its driver died before it finished registering) is labelled
+  "registration incomplete" (STA-150).
 
 - The build stop panel mirrors `stardag builds stop`'s reasons (STA-90):
   an in-process execution is shown as running in its driver's own process,

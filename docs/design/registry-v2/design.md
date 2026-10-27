@@ -497,6 +497,9 @@ the message of the `BUILD_FAILED` that produced the status; NULL for every
 other status, so a resumed or completed build does not keep explaining an old
 failure). Drops `scope_key`, `build_config`,
 `commit_hash`. The active plan is found through `plan`, not stored twice.
+Adds `plan_only` (STA-150, set at create and never changed): a build that
+registers and runs nothing, created PENDING and ended REGISTERED; see
+"Plan-only builds" below.
 
 The wake-up flags `needs_tick_at` and `tick_requested_at` are on
 **`build_wake`**, one row per build (PK `build_id`, composite FK onto
@@ -818,9 +821,10 @@ way.
 **Build status** stays a stored column driven by build events, as in v1
 (a repeat of the current state is a no-op), except that a terminal build
 status is sticky; later lifecycle reports are recorded, not applied: a
-`complete`, `fail`, `cancel` or `exit-early` against a COMPLETED, FAILED or
-CANCELLED build is 409 `build_terminal`, recorded with `report_applied =
-false`, and `resume` is the way out. The
+`complete`, `fail`, `cancel`, `exit-early` or `registered` against a
+COMPLETED, FAILED, CANCELLED or REGISTERED build is 409 `build_terminal`,
+recorded with `report_applied = false`, and `resume` is the way out (for
+every build but a plan-only one, see "Plan-only builds"). The
 server does not flip it inside task transactions (that would lock every
 build holding the task on each completion, the inversion `_flag_builds`
 avoids with `SKIP LOCKED`). What changes is that completion is **verified**:
@@ -869,6 +873,48 @@ the seal's latest-request rule: while a later request for the build is
 still registering — a higher-generation plan never activated — the
 reactivation is refused 409 `plan_superseded`); an unsealed replacement is
 left to its seal; none is returned as none, and the driver creates it.
+
+### Plan-only builds
+
+A **plan-only** build (STA-150; `sd.register`, `sd.build(...,
+plan_only=True)`) registers its roots and their full static closure under
+its scope, exactly as a build's static phase does, and runs nothing. The
+walk expands every task, complete or not (`register_all`), so every
+instance lands with its edges and `expanded_at`. It is how a task is
+recorded, with the instance a reference can pin, without building it.
+
+Its whole safety argument is the build status. `POST /builds {plan_only:
+true}` creates the build **PENDING**, and it is **never RUNNING**. Every
+read that hands out or wakes work already acts on RUNNING builds only: the
+frontier lists no runnable members or discovery jobs, a claiming start is
+409 `build_not_running`, `transition_task()`'s flagging, `notify`,
+`wake-candidates` and `stalled-builds` filter on it, and so does `stardag
+builds tick`. Registration itself never checks the build status, so the
+plan registers and seals as usual. `POST /builds/{id}/registered` then
+ends it **REGISTERED**: it requires a plan-only build (409
+`build_not_plan_only`) whose active plan is sealed (409 `plan_incomplete`,
+`reason: not_sealed`), runs the closure step first as `/seal` and
+`/complete` do, is idempotent by state, and writes `BUILD_REGISTERED`.
+Members need not be COMPLETED. REGISTERED is terminal and sticky like the
+other terminal statuses.
+
+What could turn it into an ordinary build is refused, 409
+`build_plan_only`: `resume` (the way out of every other terminal status),
+the reactive marker, `complete` and `exit-early`. `fail` and `cancel` are
+allowed, so a registration that went wrong can be closed. A driver that
+dies mid-registration leaves the build PENDING with an unsealed plan,
+which nothing acts on; the UI labels it "registration incomplete".
+
+Registration is still an observation: a target found complete is recorded
+COMPLETED and a recorded completion whose target is gone is invalidated,
+and either flags the RUNNING reactive builds holding the task, as from any
+build.
+
+A flag on the build and a terminal status, rather than either alone: a
+`kind` column alone would still need a terminal status, and COMPLETED
+would claim work that never ran; a new status alone would leave the build
+RUNNING while it registers. A plan-level kind would gate nothing, since
+every consumer above gates on the build.
 
 ## Rollover
 
