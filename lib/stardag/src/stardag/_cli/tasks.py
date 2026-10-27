@@ -6,11 +6,11 @@ claim; it holds no parameters. An **instance** is one construction of it
 under a scope ``(deployment, settings)``, with the body (design.md, D1/D2).
 
     stardag tasks list [--status S] [--tag T] [--name N] [--namespace NS]
-                       [--id-prefix P] [--q TEXT] [--cursor C]
+                       [--id-prefix P] [--search TEXT] [--cursor C]
                                                  # most recent change first
     stardag tasks show <task-id>                 # task, claim, executions, events
-    stardag tasks annotate <task-id> [--tag T] [--add-tag T] [--remove-tag T]
-                       [--clear-tags] [--description TEXT]
+    stardag tasks annotate <task-id> [--tag T] [--remove-tag T]
+                       [--set-tags T] [--clear-tags] [--description TEXT]
     stardag tasks check <task-id> -m <module>    # run complete() locally
     stardag tasks retry <task-id> [--build <id>] [--yes]   # reset to PENDING
     stardag tasks cancel <task-id> [--build <id>] [--yes]  # release the claim
@@ -38,6 +38,7 @@ from stardag._cli._registry_ctx import (
     _fail,
     _resolve_registry,
     console,
+    error_console,
 )
 from stardag._cli.tasks_actions import (
     tasks_cancel,
@@ -58,6 +59,9 @@ app.command("exclude")(tasks_exclude)
 app.command("annotate")(tasks_annotate)
 
 _TASK_ID = typer.Argument(..., help="Task ID (the completion hash)")
+
+# The registry's minimum for ``GET /tasks?q=`` (a trigram index serves it).
+MIN_SEARCH_LENGTH = 3
 
 # How ``tasks show`` reads the event log: the server serves at most 500 of
 # a task's events, oldest first.
@@ -246,11 +250,12 @@ def tasks_list(
     id_prefix: Optional[str] = typer.Option(
         None, "--id-prefix", help="Only tasks whose ID starts with this."
     ),
-    q: Optional[str] = typer.Option(
+    search: Optional[str] = typer.Option(
         None,
-        "--q",
+        "--search",
+        "-s",
         help="Only tasks whose name, namespace or description contains this "
-        "(case-insensitive).",
+        "(case-insensitive, at least 3 characters).",
     ),
     limit: int = typer.Option(50, "--limit", "-n", min=1, max=500),
     cursor: Optional[str] = typer.Option(
@@ -272,6 +277,13 @@ def tasks_list(
     discovery filters (all but ``--status``) is refused rather than
     answered unfiltered. v1's ``--older-than`` is not available.
     """
+    if search is not None and len(search) < MIN_SEARCH_LENGTH:
+        error_console.print(
+            f"[bold red]Error:[/bold red] --search needs at least "
+            f"{MIN_SEARCH_LENGTH} characters; for a shorter one use --name, "
+            "--namespace or --id-prefix"
+        )
+        raise typer.Exit(2)
     registry = _resolve_registry(stardag_profile, stardag_env)
     try:
         page = registry.task_list(
@@ -280,7 +292,7 @@ def tasks_list(
             name=name,
             tags=tag or None,
             id_prefix=id_prefix,
-            q=q,
+            q=search,
             limit=limit,
             cursor=cursor,
         )

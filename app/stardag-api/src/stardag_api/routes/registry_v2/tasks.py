@@ -88,7 +88,7 @@ async def list_tasks(
     name: Annotated[str | None, Query(max_length=255)] = None,
     tag: Annotated[list[str] | None, Query()] = None,
     id_prefix: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
-    q: Annotated[str | None, Query(min_length=1, max_length=255)] = None,
+    q: Annotated[str | None, Query(min_length=3, max_length=255)] = None,
     limit: Limit = 100,
     cursor: Cursor = None,
 ):
@@ -96,8 +96,18 @@ async def list_tasks(
     Filters AND together: ``namespace`` and ``name`` match exactly
     (``namespace=`` is the root namespace); ``tag`` is repeatable and a task
     must carry **all** of them; ``id_prefix`` matches the start of the task
-    id; ``q`` is a case-insensitive substring of the name, the namespace or
-    the description. Pass the same filters with each ``cursor``."""
+    id; ``q`` (3+ characters: a trigram index serves it) is a
+    case-insensitive substring of the name, the namespace or the
+    description. Pass the same filters with each ``cursor``."""
+    for param, value in (
+        ("namespace", namespace),
+        ("name", name),
+        ("id_prefix", id_prefix),
+        ("q", q),
+    ):
+        # Postgres ``text`` cannot hold U+0000: a 400, not a database error.
+        if value is not None and "\x00" in value:
+            raise BadRequest("invalid_filter", f"{param} must not contain NUL")
     try:
         tags = annotations.normalise_tags(tag) if tag else None
     except ValueError as exc:

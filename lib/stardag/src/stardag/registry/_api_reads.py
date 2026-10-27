@@ -55,6 +55,17 @@ def _build_list_page_req(
     )
 
 
+def _tag_list(tags: Any) -> list[str]:
+    """``tags`` as sent: ``None`` is refused rather than read as "clear" or
+    "unchanged" (``[]`` clears, omitting leaves them)."""
+    if tags is None or isinstance(tags, str):
+        raise TypeError(
+            "tags must be a sequence of strings: [] clears the tags, and "
+            "omitting the argument leaves them unchanged"
+        )
+    return list(tags)
+
+
 def _task_list_req(
     *,
     status: str | None,
@@ -201,12 +212,12 @@ class APIRegistryReads(HTTPTransport, RegistryReadsABC):
         self,
         task_id: str,
         *,
-        tags: Sequence[str] | None = None,
+        tags: Sequence[str] | EllipsisType = ...,
         description: str | None | EllipsisType = ...,
     ) -> TaskInfo:
         body: dict[str, Any] = {}
-        if tags is not None:
-            body["tags"] = list(tags)
+        if tags is not ...:
+            body["tags"] = _tag_list(tags)
         if description is not ...:
             body["description"] = description
         try:

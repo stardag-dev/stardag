@@ -478,16 +478,20 @@ class RegistryABC(RegistryLedgerABC, RegistryReadsABC):
         self,
         task_id: str,
         *,
-        tags: Sequence[str] | None = None,
+        tags: Sequence[str] | EllipsisType = ...,
         description: str | None | EllipsisType = ...,
     ) -> TaskInfo:
         """``PATCH /tasks/{task_id}``: set a completion's annotations and
-        return it (without instances). ``tags`` replaces the whole set
-        (``[]`` clears it); ``None`` leaves it unchanged. ``description``
-        replaces the description (``None`` or ``""`` clears it); the default
-        ``...`` leaves it unchanged. The registry normalises tags (trimmed,
-        deduplicated, sorted) and refuses an empty or over-long one, or more
-        than 32 (422). Annotations are mutable and outside every hash: they
+        return it (without instances). For both arguments the default
+        ``...`` means "leave unchanged". ``tags`` replaces the whole set
+        (``[]`` clears it); ``description`` replaces the description
+        (``None`` or ``""`` clears it). The registry normalises tags
+        (trimmed, deduplicated, sorted) and refuses an empty or over-long
+        one, or more than 32 (422).
+
+        Replacing the set is last-writer-wins: two callers each adding a tag
+        by read-modify-write can lose one addition (there is no server-side
+        add/remove). Annotations are mutable and outside every hash: they
         never change a task id. 404 for an unknown task."""
         raise _missing(self, "task_annotate")
 

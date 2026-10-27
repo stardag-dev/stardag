@@ -365,21 +365,93 @@ A **local** `sd.build()` plans under a local deployment keyed on its code id:
 local builds at one clean commit share structure. A hybrid build whose tasks run on a Modal app
 plans under that app's current deployment.
 
+**Tasks cross every Modal call as their instance body**, not as a pickle. Workers are looked
+up by name, which always gives the app's _current_ deployment, so a tick still running the old
+code can spawn onto the new workers. The receiving container rehydrates the task under its own
+classes: an added field takes its `compat_default` or default, a removed one is dropped with a
+warning, and a significant change fails the task-id check. A task that cannot be rehydrated
+(a class in `__main__` or inside a function, an `AliasTask`, a lossy round trip) is still sent
+pickled, with a warning once per class. Two consequences:
+
+- **Redeploy the app after upgrading stardag, before triggering it**: an app deployed with an
+  older stardag cannot read the new form.
+- If you override the task-id namespace (`task_uuid5_namespace_provider`), install the
+  override in `container_setup` too, since the receiver recomputes the id to check it.
+
 **Reactive builds** rebuild every task from the registry's stored instance body, which needs
 the task classes importable in the tick: declare `task_modules` if inference cannot find them.
-Tick budgets (`stardag.build.TickConfig`, passed as `tick_kwargs`):
+The bootstrap's pre-flight compares each task with its rebuild, because the body carries
+neither pydantic private attributes nor fields declared `exclude=True`:
 
-| `TickConfig` field  | Default | Bounds                                                                                      |
-| ------------------- | ------- | ------------------------------------------------------------------------------------------- |
-| `max_attempts`      | 2       | a spawn failing before any container starts, retried within one claim                       |
-| `max_interruptions` | 20      | a task checkpointing and raising `ResumableInterruption`                                    |
-| `max_executions`    | 20      | executions of a task in the build (a dead worker's lapsed claim is taken over as a new one) |
-| `linger_seconds`    | 120     | how long an idle tick waits for a wake-up before exiting                                    |
+- an excluded field whose plain-data value the rebuild does not reproduce **refuses the
+  build** before it starts, naming the class and field. That includes an untouched excluded
+  field with a `compat_default`, which the rebuild takes instead;
+- an excluded field holding an object without value equality (a client, say) only warns;
+- a private attribute never refuses. A plain-data value the rebuild loses, such as a cache
+  filled in `requires()`, warns; a lock, `uuid4` or other opaque default is silent.
+
+So do not keep build-relevant state in private attributes or excluded fields of a reactive
+task: compute it in `run()`, or make it a (non-significant) field.
+
+Tick budgets and knobs (`stardag.build.TickConfig`, passed as `tick_kwargs`):
+
+| `TickConfig` field           | Default | Bounds                                                                                      |
+| ---------------------------- | ------- | ------------------------------------------------------------------------------------------- |
+| `max_attempts`               | 2       | a spawn failing before any container starts, retried within one claim                       |
+| `max_interruptions`          | 20      | a task checkpointing and raising `ResumableInterruption`                                    |
+| `max_executions`             | 20      | executions of a task in the build (a dead worker's lapsed claim is taken over as a new one) |
+| `linger_seconds`             | 120     | how long an idle tick waits for a wake-up before exiting                                    |
+| `max_concurrent_actions`     | 16      | a pass's fan-out; spawns are halved after a rate-limited pass and grow back when clean      |
+| `reconcile_interval_seconds` | 60      | how often a tick probes its build's running executions for dead ones (see below)            |
+| `unspawned_grace_seconds`    | 600     | how long a claim may go without a recorded spawn before reconciliation ends it              |
 
 An exception inside a task is `FAILED` and is never retried automatically: `stardag tasks
 retry` or a re-trigger moves it back to `PENDING`. Deployed ticks, workers and the bootstrap
 run one input per container (`stardag modal deploy` refuses `max_concurrent_inputs` above one
 on them), because each applies its build's settings to the process environment.
+
+**Reconciliation.** At most once per `reconcile_interval_seconds`, a tick probes its build's
+running executions on Modal. A call that **returned** has its completion reported, or is
+ended `lost` and re-run if its target is missing. A call that **raised** has its failure
+reported, which counts against the retry budget. A claim with no recorded spawn after
+`unspawned_grace_seconds` is ended `lost` and re-driven. A call still running or restarting,
+or one the probe cannot read, is left alone. This is why a reactive Modal worker whose start
+report got no answer runs nothing unless its own ref is on the ledger (the **worker rule**):
+the tick re-drives it instead, so two containers never run one task.
+
+**Who reports a task's lifecycle** follows from the app's `run_function`. The default
+`Runner` reports from the worker and keeps the worker rule. A custom run function that does
+not subclass `Runner` gets engine-side reporting under resident builds automatically. Declare
+`reports_lifecycle = True` on it only if it really reports, by delegating to a `Runner`, and
+`keeps_worker_rule = True` likewise. `build_trigger(reactive=True)` **refuses** an app whose
+run function does not report, and without the worker rule unspawned claims are left to their
+TTL.
+
+**Worker timeouts and claims.** A detached execution claims for its worker's `timeout` plus a
+grace period, so give long tasks an explicit worker `timeout` in `worker_settings`. The
+deployed `Builder` passes those timeouts on. A `ModalTaskExecutor` you construct yourself
+needs `worker_timeouts={worker_name: seconds}` (it warns without one), or its claims get the
+registry's default one-hour TTL and a longer task can be taken over while it still runs.
+
+**Retries.** stardag never retries a `FAILED` task by itself. Retry transient errors
+_inside_ the task, and use `stardag tasks retry` or a re-trigger for one that failed.
+`max_attempts` covers only a spawn failing before any container exists. A worker's
+`FunctionSettings(retries=...)` (an `int`, or a `modal.Retries` to set the backoff too) does
+**not** recover an ordinary task failure under the default `Runner`. The failure report ends
+the execution, so Modal's retry stops at its start-of-attempt cancellation checkpoint without
+running anything, at the cost of one container start. It re-runs the task only when the
+failure was never recorded (a lost report, a crash before reporting).
+
+**When a build stalls.** Wake-ups ride on writes. A finished worker flags its build. Every
+tick drains flagged builds after each pass, and reads the frontier once more before exiting.
+A busy tick nearing its container's time limit hands off to a successor (`lifetime_reached`).
+CLI writes (`tasks retry/cancel/exclude`, `builds stop`) start their build's tick themselves
+when this machine has a Modal token for the build's workspace. What no write covers is a tick
+that ended on a registry outage (it leaves its build flagged and spawns nothing), or a
+dead worker whose claim lapses unnoticed. The **watchdog** (`watchdog_period_minutes`) is
+optional: `stardag builds stalled` lists the running reactive builds nobody has served, and
+`stardag builds tick <build-id>` (or `--flagged`) starts their scheduler by hand. Turn the
+watchdog on for tasks that run for hours, or when a stall of minutes is unacceptable.
 
 **Placement rule** for everything you pass as a callable (`container_setup`,
 `worker_selector`, `limit_key_selector`, `build_function`, `run_function`): define it in an
@@ -388,7 +460,11 @@ cloudpickled by reference; a `def` in the deploy script pickles as `app.<name>` 
 every container. `StardagApp(...)` raises `SerializedCallablePlacementError` for this.
 
 Worker executions are **detached** Modal calls: they survive the driver, report their own
-lifecycle to the registry, and a later build re-attaches instead of re-running.
+lifecycle to the registry, and a later build re-attaches instead of re-running. A custom
+`TaskExecutorABC` for another backend opts into the same handling through
+`detached_executor_name(task)` (recorded on the claim), `reconciles()` /
+`reconciles_unspawned()` and `probe_detached(executor, ref)`. The defaults opt out, which
+leaves a dead execution's claim to its TTL.
 
 See `docs/docs/concepts/modal-orchestration.md` and `docs/docs/how-to/integrate-modal.md` for
 the full model.
@@ -446,7 +522,10 @@ class TrainModel(sd.TargetTask[sd.DirectoryTarget]):
         try:
             train(resume_from=checkpoint)
         except MODAL_INTERRUPTIONS:        # preemption OR the function timeout
-            save_checkpoint(checkpoint)
+            try:
+                save_checkpoint(checkpoint)  # may be cut short by Modal's follow-up SIGINT
+            except MODAL_INTERRUPTIONS:
+                pass                         # the previous checkpoint still stands
             raise sd.ResumableInterruption("checkpointed") from None
         directory.mark_done()
 ```
@@ -463,7 +542,14 @@ class TrainModel(sd.TargetTask[sd.DirectoryTarget]):
   before any container starts. No configuration decides whether a timeout
   was "expected": the task answers by raising `ResumableInterruption` or not.
 - Resumption is bounded by `TickConfig.max_interruptions` (default 20). A
-  preemption is restarted by Modal on the same call and spends no budget.
+  preemption is restarted by Modal on the same call and spends no budget. It
+  shortens the claim to a 15-minute restart grace, and a tick waits that out,
+  so a restart that never arrives ends in a takeover, not a stall.
+- After a timeout, Modal sends a SIGINT about 30 s later, and it does not wait
+  for your `except` block. Keep the checkpoint well inside that, write it so a
+  cut-short write leaves the previous one intact (temp file, then rename), and
+  raise `ResumableInterruption` either way, as above. Budget a worker container
+  at `timeout + ~60s`.
 - Only reactive builds resume. `sd.build`/`build_aio` fail the task.
 - The checkpoint goes inside the task's directory target; `mark_done()` is
   what marks the task complete.

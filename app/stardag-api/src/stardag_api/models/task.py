@@ -90,8 +90,36 @@ class Task(EnvironmentScopedMixin, Base):
         ),
         Index("ix_task_environment_status", "environment_id", "status", "status_at"),
         Index("ix_task_environment_name", "environment_id", "task_name"),
-        # ``GET /tasks?tag=``: containment (``tags @> ARRAY[...]``).
+        # ``GET /tasks`` (STA-149). ``tag=``: containment (``tags @>
+        # ARRAY[...]``).
         Index("ix_task_tags", "tags", postgresql_using="gin"),
+        # ``q=``: ``ILIKE '%x%'`` on each of the three columns, OR-ed; one
+        # multicolumn trigram index serves all three (a BitmapOr of three
+        # scans of it), at one index write per row. Needs ``pg_trgm``, and
+        # 3+ characters to help.
+        Index(
+            "ix_task_search_trgm",
+            "task_name",
+            "task_namespace",
+            "description",
+            postgresql_using="gin",
+            postgresql_ops={
+                "task_name": "gin_trgm_ops",
+                "task_namespace": "gin_trgm_ops",
+                "description": "gin_trgm_ops",
+            },
+        ),
+        # ``id_prefix=``: ``LIKE 'abc%'``. Under a non-C collation the
+        # unique ``(environment_id, task_id)`` index cannot serve it.
+        Index(
+            "ix_task_environment_task_id_prefix",
+            "environment_id",
+            "task_id",
+            postgresql_ops={"task_id": "text_pattern_ops"},
+        ),
+        # The listing's order and keyset: ``ORDER BY status_at DESC, id
+        # DESC`` with ``(status_at, id) < (...)``, scanned backwards.
+        Index("ix_task_environment_status_at", "environment_id", "status_at", "id"),
         Index(
             "ix_task_running_claim_plan",
             "claim_plan_id",

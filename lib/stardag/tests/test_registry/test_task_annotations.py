@@ -47,6 +47,18 @@ def test_task_annotate_sends_only_what_is_named(kwargs: dict, body: dict):
     assert task.tags == ["best", "v2"] and task.description == "A model."
 
 
+@pytest.mark.parametrize("tags", [None, "single"])
+def test_task_annotate_refuses_an_ambiguous_tags_argument(tags):
+    """``...`` (the default) is "unchanged" and ``[]`` "clear"; ``None`` or a
+    bare string is neither, and is refused before anything is sent."""
+    recorder = _Recorder({("PATCH", "/api/v2/tasks/t1"): TASK})
+    with pytest.raises(TypeError, match=r"\[\] clears"):
+        _registry(recorder).task_annotate("t1", tags=tags)
+    assert recorder.requests == []
+    with pytest.raises(TypeError):
+        InMemoryRegistry().task_annotate("t1", tags=tags)
+
+
 def test_task_annotate_against_a_registry_without_it():
     recorder = _Recorder(
         {
@@ -156,8 +168,40 @@ def test_in_memory_annotate_mirrors_the_server():
         with pytest.raises(APIError) as refused:
             registry.task_annotate("aa11", tags=bad)
         assert refused.value.status_code == 422
+    with pytest.raises(APIError) as refused:  # 129 raw entries, 1 distinct
+        registry.task_annotate("aa11", tags=["x"] * 129)
+    assert refused.value.status_code == 422
+    assert registry.task_annotate("aa11", tags=["x"] * 128).tags == ["x"]
+    for bad_description in ("d" * 4097, "before\x00after", " " * 16385):
+        with pytest.raises(APIError) as refused:
+            registry.task_annotate("aa11", description=bad_description)
+        assert refused.value.status_code == 422
+    assert registry.task_annotate("aa11", description="a\nb").description == "a\nb"
     with pytest.raises(APIError):
         registry.task_annotate("missing", tags=["x"])
+
+
+@pytest.mark.parametrize(
+    ("filters", "status"),
+    [
+        ({"q": ""}, 422),
+        ({"q": "ab"}, 422),
+        ({"id_prefix": ""}, 422),
+        ({"q": "q" * 256}, 422),
+        ({"id_prefix": "a" * 65}, 422),
+        ({"name": "n" * 256}, 422),
+        ({"namespace": "n" * 256}, 422),
+        ({"q": "ab\x00"}, 400),
+        ({"name": "\x00"}, 400),
+        ({"tags": [""]}, 400),
+    ],
+)
+def test_in_memory_task_list_refuses_what_the_route_refuses(filters, status):
+    registry = InMemoryRegistry()
+    _seed(registry)
+    with pytest.raises(APIError) as refused:
+        registry.task_list(**filters)
+    assert refused.value.status_code == status
 
 
 def test_in_memory_task_list_filters_mirror_the_server():
@@ -170,11 +214,12 @@ def test_in_memory_task_list_filters_mirror_the_server():
         return {t.task_id for t in registry.task_list(**filters).tasks}
 
     assert listed(namespace="ml") == {"aa11", "aa22", "bb33"}
-    assert listed(namespace="") == {"cc44"}
+    assert listed(namespace="") == {"cc44"}  # the root namespace, not "no filter"
     assert listed(name="Train") == {"aa11", "aa22"}
     assert listed(tags=["best"]) == {"aa11", "aa22"}
     assert listed(tags=["best", "prod"]) == {"aa11"}
     assert listed(id_prefix="aa") == {"aa11", "aa22"}
     assert listed(q="TUNED") == {"aa11"}
-    assert listed(q="ml") == {"aa11", "aa22", "bb33"}
-    assert listed(q="ml", tags=["prod"]) == {"aa11"}
+    assert listed(q="ml.") == set()
+    assert listed(q="TRAIN") == {"aa11", "aa22"}
+    assert listed(q="Train", tags=["prod"]) == {"aa11"}

@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from typing import Any, TypeVar
 from uuid import UUID
 
+from stardag.exceptions import APIError
 from stardag.registry import (
     BuildInfo,
     BuildListPage,
@@ -48,6 +49,33 @@ def _page(
     page = list(rows[start : start + limit])
     more = start + limit < len(rows)
     return page, (str(start + limit) if more else None)
+
+
+#: ``GET /tasks``'s query bounds: (min, max) length per string filter.
+_TASK_FILTER_BOUNDS = {
+    "namespace": (0, 255),
+    "name": (0, 255),
+    "id_prefix": (1, 64),
+    "q": (3, 255),
+}
+
+
+def _check_task_filters(**filters: str | None) -> None:
+    """The route's refusals: a length out of bounds is 422 (FastAPI's
+    validation), a NUL is 400 ``invalid_filter``. ``namespace=""`` is the
+    root namespace, so it is valid."""
+    for param, value in filters.items():
+        if value is None:
+            continue
+        low, high = _TASK_FILTER_BOUNDS[param]
+        if not low <= len(value) <= high:
+            raise refuse(
+                "validation_error",
+                f"{param} must be {low}..{high} characters",
+                status=422,
+            )
+        if "\x00" in value:
+            raise refuse("invalid_filter", f"{param} must not contain NUL", status=400)
 
 
 def _wire_event_type(internal: str) -> str:
@@ -263,7 +291,12 @@ class ReadsMixin(RegistryState):
             limit=limit,
             cursor=cursor,
         )
-        wanted = set(normalise_tags(tags)) if tags else set()
+        _check_task_filters(namespace=namespace, name=name, id_prefix=id_prefix, q=q)
+        try:
+            wanted = set(normalise_tags(tags)) if tags else set()
+        except APIError as e:
+            # The route answers a bad filter tag 400, not the PATCH's 422.
+            raise refuse("invalid_tag", str(e.detail), status=400) from None
         needle = q.lower() if q else None
 
         def matches(t: TaskRow) -> bool:
