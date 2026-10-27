@@ -139,9 +139,13 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   timeout plus 15 minutes. Now every member's spawn runs to its end and the
   error is raised after. A ref record or a failed-spawn record the
   registry did not answer for no longer fails the pass, since the worker
-  records its own ref. A tick that dies of a registry outage leaves its
-  build flagged for the environment's next drain, instead of unserved
-  behind a lapsed lease. Spawns are admitted adaptively: after a pass in
+  records its own ref. Once one member's call has failed, the members
+  still queued take no new claim. A tick that ends on a registry outage,
+  including an outage while acquiring the lease or a lease lapsed on
+  unanswered renewals, no longer drains or hands off straight into it. It
+  waits 30 seconds, then flags its build and spawns one successor unless a
+  tick holds the lease, instead of leaving the build unserved behind a
+  lapsed lease. Spawns are admitted adaptively: after a pass in
   which the process was rate-limited, a pass admits half as many, growing
   back by an eighth of the cap per clean pass. The default
   `max_concurrent_actions` drops from 50 to 16.

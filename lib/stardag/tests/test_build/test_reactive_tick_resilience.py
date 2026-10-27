@@ -31,6 +31,11 @@ Target = typing.Type[InMemoryFileTarget]
 ONE_PASS = TickConfig(linger_seconds=0, poll_interval_seconds=0.01)
 
 
+@pytest.fixture(autouse=True)
+def _short_outage_backoff(monkeypatch):
+    monkeypatch.setattr(_tick, "_OUTAGE_BACKOFF_SECONDS", 0.01)
+
+
 def _outage() -> APIError:
     return APIError("Registry call failed", status_code=503, detail="unavailable")
 
@@ -64,9 +69,18 @@ async def test_one_failing_claim_does_not_abandon_its_siblings(
                 raise _outage()
             return super().member_start(plan_id, task_id, **kwargs)
 
+    class LastToClaim(_SlowSpawns):
+        """b's claim goes out after a's and c's were granted, while their
+        spawns are in flight."""
+
+        async def get_executor_metadata(self, task):
+            if task.id == b.id:
+                await asyncio.sleep(0.02)
+            return await super().get_executor_metadata(task)
+
     registry = FailsOneClaim()
     build_id, _ = await _plan(registry, [a, b, c])
-    executor = _SlowSpawns(registry=registry)
+    executor = LastToClaim(registry=registry)
     with pytest.raises(APIError):
         await tick(registry, build_id, executor, ONE_PASS)
     for sibling in (a, c):
@@ -99,19 +113,25 @@ async def test_a_tick_dying_of_an_outage_leaves_its_build_flagged(
 
 
 async def test_a_refusal_is_not_an_outage(default_in_memory_fs_target: Target):
-    assert not _tick._is_registry_outage(
+    assert not _frontier_actions.is_registry_outage(
         APIError("no", status_code=409, payload={"code": "x"})
     )
-    assert _tick._is_registry_outage(RateLimitError(retry_after=1))
-    assert _tick._is_registry_outage(_outage())
+    assert _frontier_actions.is_registry_outage(RateLimitError(retry_after=1))
+    assert _frontier_actions.is_registry_outage(_outage())
     # A creation quota is a 429 too, but a refusal for the day: flagging
     # for it would only repeat it.
-    assert not _tick._is_registry_outage(QuotaExceededError("creation quota"))
+    assert not _frontier_actions.is_registry_outage(
+        QuotaExceededError("creation quota")
+    )
 
 
-async def test_an_outage_exit_spawns_nothing(default_in_memory_fs_target: Target):
-    """Neither the drain nor the hand-off runs on the way out of an
-    outage: a tick spawned now would meet the same outage."""
+async def test_an_outage_exit_hands_off_once_after_a_backoff(
+    default_in_memory_fs_target: Target,
+):
+    """Neither the drain nor the immediate hand-off runs on the way out of
+    an outage (a tick spawned then would meet the same outage), but one
+    successor is spawned after the backoff, so a lone build with no
+    watchdog is not left waiting (local review on #506)."""
     task = SyncOnlyTask(name=f"t-{new_id()}")
     spawned: list = []
 
@@ -130,8 +150,53 @@ async def test_an_outage_exit_spawns_nothing(default_in_memory_fs_target: Target
     )
     with pytest.raises(APIError):
         await tick(registry, build_id, FakeDetachedExecutor(registry=registry), config)
-    assert spawned == []
+    assert spawned == [build_id]
     assert registry.builds[build_id].needs_tick
+
+
+async def test_queued_members_take_no_claim_after_a_sibling_failed(
+    default_in_memory_fs_target: Target,
+):
+    """Local review on #506: one member's outage stops the members queued
+    behind it from claiming (each would wait out the same outage), while
+    the settled runner still carries any claim already granted."""
+    tasks = [SyncOnlyTask(name=f"t{i}-{new_id()}") for i in range(4)]
+
+    class Unavailable(InMemoryRegistry):
+        def member_start(self, plan_id, task_id, **kwargs):
+            self._record("member_start", plan_id=plan_id, task_id=task_id, **kwargs)
+            raise _outage()
+
+    registry = Unavailable()
+    build_id, _ = await _plan(registry, list(tasks))
+    config = TickConfig(
+        linger_seconds=0, poll_interval_seconds=0.01, max_concurrent_actions=1
+    )
+    with pytest.raises(APIError):
+        await tick(registry, build_id, FakeDetachedExecutor(registry=registry), config)
+    claims = [c for c in registry.calls_to("member_start") if c["claim"]]
+    assert len(claims) == 1
+
+
+async def test_a_non_outage_error_recording_a_ref_still_fails_the_pass(
+    default_in_memory_fs_target: Target,
+):
+    """Only an outage is "did not answer": any other error recording the
+    ref propagates (after the siblings finish)."""
+    task = SyncOnlyTask(name=f"t-{new_id()}")
+
+    class RefRecordBroken(InMemoryRegistry):
+        def member_start(self, plan_id, task_id, **kwargs):
+            if not kwargs.get("claim", True):
+                raise APIError("bad request", status_code=422)
+            return super().member_start(plan_id, task_id, **kwargs)
+
+    registry = RefRecordBroken()
+    build_id, _ = await _plan(registry, [task])
+    with pytest.raises(APIError):
+        await tick(
+            registry, build_id, FakeDetachedExecutor(registry=registry), ONE_PASS
+        )
 
 
 async def test_an_outage_acquiring_the_lease_is_flagged(

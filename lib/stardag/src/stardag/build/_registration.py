@@ -220,9 +220,11 @@ async def run_bounded_settled(
             await factory()
 
     results = await asyncio.gather(*(one(f) for f in factories), return_exceptions=True)
-    for outcome in results:
-        if isinstance(outcome, BaseException):
-            raise outcome
+    failures = [r for r in results if isinstance(r, BaseException)]
+    for later in failures[1:]:
+        logger.warning(f"A concurrent action also failed: {later!r}")
+    if failures:
+        raise failures[0]
 
 
 async def walk_aio(

@@ -43,11 +43,9 @@ class SchedulerLease:
         self._owner_id = uuid4().hex
         self.acquired = False
         self._renewal: asyncio.Task | None = None
-        self._lost = False
         # Set when a renewal was refused because another tick holds the
-        # lease -- as opposed to the lease lapsing because renewals went
-        # unanswered (an outage).
-        self.taken_over = False
+        # lease (see ``taken_over``).
+        self._lost = False
         self._expires_at: float | None = None
 
     @property
@@ -57,6 +55,13 @@ class SchedulerLease:
         if self._expires_at is None:
             return False
         return asyncio.get_running_loop().time() >= self._expires_at
+
+    @property
+    def taken_over(self) -> bool:
+        """Whether the lease was lost to another tick (a renewal refused),
+        as opposed to lapsing because renewals went unanswered -- an outage,
+        which the tick treats as one (STA-135)."""
+        return self._lost
 
     def _arm(self, asked_at: float) -> None:
         """Start the client-side TTL at ``asked_at`` -- or later, if the
@@ -158,5 +163,4 @@ class SchedulerLease:
                     self._build_id,
                 )
                 self._lost = True
-                self.taken_over = True
                 return

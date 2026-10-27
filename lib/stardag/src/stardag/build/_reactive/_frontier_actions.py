@@ -37,6 +37,8 @@ from functools import partial
 from uuid import UUID
 
 from stardag import BaseTask, task_from_registry_data
+import httpx
+
 from stardag._core.rehydrate import TaskRehydrationError
 from stardag.build._base import DetachedHandle, TaskExecutorABC
 from stardag.build._claims import claim_ttl_seconds
@@ -48,7 +50,12 @@ from stardag.build._registration import (
     walk_aio,
 )
 from stardag.build._task_modules import import_failure_note
-from stardag.exceptions import APIError, StardagError, execution_not_wanted
+from stardag.exceptions import (
+    APIError,
+    RateLimitError,
+    StardagError,
+    execution_not_wanted,
+)
 from stardag.registry import BuildFrontier, FrontierMember, RegistryABC
 from stardag.registry._api_http import transport_retry_counts
 
@@ -94,6 +101,10 @@ class PassResult:
     # A claim was refused ``plan_superseded``: a newer request replaced this
     # tick's plan, so the tick stops.
     superseded: bool = False
+    # A member's spawn work raised: the members still queued take no new
+    # claim (each would wait out the same outage or rate limit), while the
+    # ones already holding a claim carry it through.
+    failed: bool = False
     # The scheduler lease was lost during the pass: another tick may be
     # driving the build, so nothing further was claimed or registered.
     lease_lost: bool = False
@@ -172,7 +183,9 @@ class Admission:
 
     The count is the process's, so a 429 met by another tick in the same
     container throttles this one too: they share a workspace, and so the
-    limit.
+    limit. The state lives for one tick: a successor starts from the cap
+    again, and a run of short ticks under a lasting limit is throttled
+    only within each one (each spawn still waits out its own 429s).
     """
 
     def __init__(self) -> None:
@@ -296,6 +309,28 @@ async def _discovery_job(
     summary.discovered += 1
 
 
+def is_registry_outage(error: BaseException) -> bool:
+    """Whether ``error`` is the registry not answering (unreachable, a 5xx,
+    a rate limit outlasting the client's retries) rather than refusing."""
+    if isinstance(error, (httpx.TransportError, RateLimitError)):
+        return True
+    # Not every 429: a creation quota (``QuotaExceededError``) is a refusal
+    # that lasts the day, and flagging for it would only repeat it.
+    return isinstance(error, APIError) and (error.status_code or 0) >= 500
+
+
+async def _spawn_marking_failure(
+    task: BaseTask, member: FrontierMember, *, result: PassResult, **kwargs: typing.Any
+) -> None:
+    """:func:`_spawn`, recording a failure on the pass so the members still
+    queued behind it take no new claim."""
+    try:
+        await _spawn(task, member, result=result, **kwargs)
+    except Exception:
+        result.failed = True
+        raise
+
+
 async def _spawn(
     task: BaseTask,
     member: FrontierMember,
@@ -339,6 +374,8 @@ async def _spawn(
     except Exception:
         executor_name = None
     if _stop_for_lost_lease(lease_lost, result):
+        return
+    if result.failed or result.superseded:
         return
     # Last, right before the claim: a claim taken is carried through its
     # spawn, so this is the latest point the pass can still stop cheaply.
@@ -412,10 +449,12 @@ async def _spawn(
         )
     except Exception as e:
         if not (isinstance(e, APIError) and execution_not_wanted(e)):
-            # Not a refusal: the registry did not answer. The container is
-            # running and records its own ref when it starts, so this is
-            # not an orphan, and failing the pass would strand the claims
-            # of the siblings it has not reached yet.
+            if not is_registry_outage(e):
+                raise
+            # The registry did not answer. The container is running and
+            # records its own ref when it starts, so this is not an orphan,
+            # and failing the pass would strand the claims of the siblings
+            # it has not reached yet.
             logger.warning(
                 f"Could not record the ref of task {member.task_id} "
                 f"({handle.ref!r}); its worker records it when it starts: {e}"
@@ -681,7 +720,7 @@ async def act_on_frontier(
         await run_bounded_settled(
             [
                 partial(
-                    _spawn,
+                    _spawn_marking_failure,
                     task,
                     member,
                     plan_id=plan_id,

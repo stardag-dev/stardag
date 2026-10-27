@@ -15,7 +15,6 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from uuid import UUID
 
-import httpx
 
 from stardag.build._base import (
     BuildContext,
@@ -23,13 +22,16 @@ from stardag.build._base import (
     current_build_context_var,
 )
 from stardag.build._reactive._config import TickConfig, TickSummary
-from stardag.build._reactive._frontier_actions import Admission, act_on_frontier
+from stardag.build._reactive._frontier_actions import (
+    Admission,
+    act_on_frontier,
+    is_registry_outage,
+)
 from stardag.build._reactive._lease import SchedulerLease
 from stardag.build._reactive._rollover import RollOver, RollOverFailed
 from stardag.build._reactive._terminal import TERMINAL_BUILD_STATUSES, handle_terminal
 from stardag.build._settings import settings_applied
 from stardag.build._wakeups import drain_wake_candidates
-from stardag.exceptions import APIError, RateLimitError
 from stardag.registry import BuildFrontier, RegistryABC
 
 logger = logging.getLogger(__name__)
@@ -196,32 +198,33 @@ async def _continue_in_a_successor(
         )
 
 
-def _is_registry_outage(error: BaseException) -> bool:
-    """Whether ``error`` is the registry not answering (unreachable, a 5xx,
-    a rate limit outlasting the client's retries) rather than refusing."""
-    if isinstance(error, (httpx.TransportError, RateLimitError)):
-        return True
-    # Not every 429: a creation quota (``QuotaExceededError``) is a refusal
-    # that lasts the day, and flagging for it would only repeat it.
-    return isinstance(error, APIError) and (error.status_code or 0) >= 500
+# How long a tick that ended on a registry outage waits before handing
+# the build to a successor: long enough that a successor spawned per
+# failure cannot become a tight loop, short enough that a lone build is not
+# left to the watchdog (which is optional) for a passing outage.
+_OUTAGE_BACKOFF_SECONDS = 30.0
 
 
-async def _flag_for_a_successor(build_id: UUID, *, registry: RegistryABC) -> None:
+async def _hand_off_after_an_outage(
+    build_id: UUID, *, registry: RegistryABC, config: TickConfig, summary: TickSummary
+) -> None:
     """A tick that ended on a registry outage -- an exception, or its lease
-    lapsing on unanswered renewals -- leaves the build flagged, so
-    it is not left unserved behind a lapsed lease until someone notices
-    (STA-135). Flagged without a hand-out (``can_spawn=False``): a tick
-    spawned straight away would meet the same outage, and one spawned from
-    every failure would repeat it for as long as the outage lasts. A flag
-    is picked up at the pace of the environment's drains instead -- any
-    other tick's, or the watchdog's. Best-effort: the registry may well
-    still be out."""
+    lapsing on unanswered renewals -- waits a backoff, then flags the build
+    and spawns one successor unless a tick already holds the lease
+    (STA-135). Not straight away (the successor would meet the same
+    outage) and not never (a lone build with no watchdog would wait for the
+    next unrelated wake-up). During a long outage this is at most one tick
+    per backoff for the build. Best-effort: the registry may still be out,
+    and then the flag waits for a drain or the watchdog."""
+    await asyncio.sleep(_OUTAGE_BACKOFF_SECONDS)
     try:
-        await registry.build_notify_aio(build_id, can_spawn=False)
+        await _flag_and_spawn_unless_live(
+            build_id, registry=registry, config=config, summary=summary
+        )
     except Exception as e:
         logger.warning(
-            "Tick for build %s failed on a registry outage and could not flag "
-            "the build for a successor (left to the watchdog): %s",
+            "Tick for build %s ended on a registry outage and could not hand "
+            "it to a successor (left to a drain or the watchdog): %s",
             build_id,
             e,
         )
@@ -726,7 +729,7 @@ async def _tick_body(
                 )
             await driver.drive(lease)
     except Exception as e:
-        outage = _is_registry_outage(e)
+        outage = is_registry_outage(e)
         raise
     finally:
         # A lease lost to unanswered renewals, not to another tick, is the
@@ -734,9 +737,11 @@ async def _tick_body(
         if acquired and summary.outcome == "lease_lost" and not lease.taken_over:
             outage = True
         if outage:
-            # No drain and no hand-off: either would spawn a tick straight
-            # into the same outage. The flag waits for a later drain.
-            await _flag_for_a_successor(build_id, registry=registry)
+            # No drain and no immediate hand-off: either would spawn a tick
+            # straight into the same outage.
+            await _hand_off_after_an_outage(
+                build_id, registry=registry, config=config, summary=summary
+            )
         elif acquired and summary.outcome == "lifetime_reached":
             # Before the drain: the successor's hand-out stamp keeps the
             # drain from spawning a second tick for this build.
