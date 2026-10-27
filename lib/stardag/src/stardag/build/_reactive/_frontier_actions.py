@@ -44,11 +44,13 @@ from stardag.build._registration import (
     new_id,
     register_members_aio,
     run_bounded,
+    run_bounded_settled,
     walk_aio,
 )
 from stardag.build._task_modules import import_failure_note
 from stardag.exceptions import APIError, StardagError, execution_not_wanted
 from stardag.registry import BuildFrontier, FrontierMember, RegistryABC
+from stardag.registry._api_http import transport_retry_counts
 
 if typing.TYPE_CHECKING:
     from stardag.build._reactive._config import TickConfig, TickSummary
@@ -148,6 +150,59 @@ def spawn_cap(
         _derived_cap(min(timeouts), config),
         f"the tightest execution timeout ({min(timeouts):.0f}s)",
     )
+
+
+def _rate_limited_count() -> int:
+    """Rate-limit refusals this process has waited out so far."""
+    return transport_retry_counts().get("HTTP 429", 0)
+
+
+class Admission:
+    """Adaptive admission of spawns per pass, for one tick's lifetime.
+
+    Additive increase, multiplicative decrease, driven by the registry's
+    rate limit: after a pass in which this process waited out any 429, the
+    spawns a pass may admit are halved; after a pass without one they grow
+    back by an eighth of the cap, until the cap applies alone again. Each
+    spawn costs several writes over its life (the claim and ref record now,
+    the worker's start and end and its wake-up later), so admitting fewer
+    is what lets a workspace at its limit drain the work already running
+    rather than starve it (STA-135). Without a limit -- a self-hosted
+    registry by default -- no 429 is ever seen and the cap applies as is.
+
+    The count is the process's, so a 429 met by another tick in the same
+    container throttles this one too: they share a workspace, and so the
+    limit.
+    """
+
+    def __init__(self) -> None:
+        self.limit: int | None = None
+        self._cap: int | None = None
+        self._seen = _rate_limited_count()
+
+    def apply(self, cap: int) -> int:
+        """The spawns this pass may admit under ``cap``."""
+        self._cap = cap
+        return cap if self.limit is None else min(cap, self.limit)
+
+    def after_pass(self) -> None:
+        """Adjust from what the pass met."""
+        count = _rate_limited_count()
+        throttled = count > self._seen
+        self._seen = count
+        if self._cap is None:
+            return
+        if throttled:
+            current = self._cap if self.limit is None else self.limit
+            self.limit = max(1, current // 2)
+            logger.warning(
+                f"The registry rate-limited this tick's process; admitting at "
+                f"most {self.limit} spawns per pass until it stops."
+            )
+        elif self.limit is not None:
+            self.limit += max(1, self._cap // 8)
+            if self.limit >= self._cap:
+                self.limit = None
 
 
 LeaseLost = typing.Callable[[], bool]
@@ -325,13 +380,20 @@ async def _spawn(
             error = e
             logger.warning(f"Spawning task {member.task_id} failed: {e}")
     if handle is None:
-        await registry.member_fail_aio(
-            plan_id,
-            member.task_id,
-            execution_id=execution_id,
-            error_message=f"Spawn failed: {type(error).__name__}: {error}",
-        )
         summary.spawn_failed += 1
+        try:
+            await registry.member_fail_aio(
+                plan_id,
+                member.task_id,
+                execution_id=execution_id,
+                error_message=f"Spawn failed: {type(error).__name__}: {error}",
+            )
+        except Exception as e:
+            # Nothing ran; the claim lapses on its own.
+            logger.warning(
+                f"Could not record the failed spawn of task {member.task_id} "
+                f"(its claim lapses on its own): {e}"
+            )
         return
     try:
         await registry.member_start_aio(
@@ -343,9 +405,19 @@ async def _spawn(
             executor_ref=handle.ref,
             executor_metadata=handle.executor_metadata,
         )
-    except APIError as e:
-        if not execution_not_wanted(e):
-            raise
+    except Exception as e:
+        if not (isinstance(e, APIError) and execution_not_wanted(e)):
+            # Not a refusal: the registry did not answer. The container is
+            # running and records its own ref when it starts, so this is
+            # not an orphan, and failing the pass would strand the claims
+            # of the siblings it has not reached yet.
+            logger.warning(
+                f"Could not record the ref of task {member.task_id} "
+                f"({handle.ref!r}); its worker records it when it starts: {e}"
+            )
+            summary.spawned += 1
+            result.spawned.append(member.task_id)
+            return
         # This execution is over before its ref was recorded — the claim
         # moved on (to another execution, or to another plan:
         # ``not_claim_holder``), or the ledger has no such execution: this
@@ -479,6 +551,7 @@ async def act_on_frontier(
     summary: "TickSummary",
     lease_lost: "LeaseLost | None" = None,
     out_of_time: "OutOfTime | None" = None,
+    admission: Admission | None = None,
 ) -> PassResult:
     """One pass: discovery jobs, then (if the plan still stands) claims and
     spawns of the runnable members, each phase bounded by
@@ -577,13 +650,21 @@ async def act_on_frontier(
             await _exclude(registry, plan_id, member, e, summary)
             result.acted = True
     cap = spawn_cap([t for t, _ in loaded], task_executor, config)
-    if len(loaded) > cap.limit:
+    limit = cap.limit if admission is None else admission.apply(cap.limit)
+    if len(loaded) > limit:
+        source = (
+            f"cap from {cap.source}"
+            if limit == cap.limit
+            else "throttled by the registry's rate limit"
+        )
         logger.info(
             f"Tick for build {frontier.build_id}: {len(loaded)} runnable, "
-            f"spawning {cap.limit} this pass (cap from {cap.source})."
+            f"spawning {limit} this pass ({source})."
         )
-        loaded = loaded[: cap.limit]
-    await run_bounded(
+        loaded = loaded[:limit]
+    # Settled, not fail-fast: a claim taken is carried through its spawn
+    # and ref even when a sibling fails (see ``run_bounded_settled``).
+    await run_bounded_settled(
         [
             partial(
                 _spawn,

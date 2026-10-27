@@ -130,6 +130,21 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   execution ledger. If the execution ended by its own report, the engine
   takes the call's result. Only a claim taken over, lapsed or released, or
   an operator's stop, still counts as an orphan.
+- **Changed: a reactive tick no longer abandons claims when one member's
+  registry call fails, and it slows down under the registry's rate limit**
+  (STA-135). A pass ran its claims, spawns and ref records fail-fast: the
+  first error, such as a rate limit or a brief outage, cancelled every
+  sibling between its claim and its spawn. Each of those claims then held
+  its task with no container behind it until its TTL lapsed, the executor
+  timeout plus 15 minutes. Now every member's spawn runs to its end and the
+  error is raised after. A ref record or a failed-spawn record the
+  registry did not answer for no longer fails the pass, since the worker
+  records its own ref. A tick that dies of a registry outage leaves its
+  build flagged for the environment's next drain, instead of unserved
+  behind a lapsed lease. Spawns are admitted adaptively: after a pass in
+  which the process was rate-limited, a pass admits half as many, growing
+  back by an eighth of the cap per clean pass. The default
+  `max_concurrent_actions` drops from 50 to 16.
 
 ### Server
 

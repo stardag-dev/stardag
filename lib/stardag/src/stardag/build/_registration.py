@@ -203,6 +203,28 @@ async def run_bounded(
     await run_concurrently([partial(one, f) for f in factories])
 
 
+async def run_bounded_settled(
+    factories: Sequence[_Factory], semaphore: asyncio.Semaphore
+) -> None:
+    """:func:`run_bounded`, but one coroutine's failure cancels none of the
+    others: every one runs to its end, and then the first failure (in
+    submission order) is raised.
+
+    For work whose individual units must not be abandoned half-way once
+    started -- a tick's claim, spawn and ref record, where cancelling a
+    sibling between its claim and its spawn strands that claim until its
+    TTL lapses (STA-135)."""
+
+    async def one(factory: _Factory) -> None:
+        async with semaphore:
+            await factory()
+
+    results = await asyncio.gather(*(one(f) for f in factories), return_exceptions=True)
+    for outcome in results:
+        if isinstance(outcome, BaseException):
+            raise outcome
+
+
 async def walk_aio(
     roots: TaskStruct,
     *,

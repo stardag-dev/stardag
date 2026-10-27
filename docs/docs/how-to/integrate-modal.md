@@ -473,7 +473,7 @@ setting it alone is refused at deploy.
 **Per-build knobs** (`tick_kwargs`, persisted with the build so every tick
 shares them): `linger_seconds` (default 120), `poll_interval_seconds` (3),
 `fail_mode`, `max_attempts` (2), `max_interruptions` (20),
-`max_executions` (20), `max_concurrent_actions` (50),
+`max_executions` (20), `max_concurrent_actions` (16),
 `max_spawns_per_tick` (derived). Callables —
 `worker_selector`, `limit_key_selector` — are deployed-app configuration,
 never per-trigger.

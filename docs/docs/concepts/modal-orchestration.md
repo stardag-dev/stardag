@@ -120,10 +120,13 @@ impossible (`__main__`, a loose script) is resident-only and its reactive
 trigger is refused. The bootstrap dry-runs the reconstruction over the
 whole discovered DAG and refuses a build it could not drive.
 
-A tick's fan-out is bounded (`max_concurrent_actions`, default 50) and the
+A tick's fan-out is bounded (`max_concurrent_actions`, default 16) and the
 work one pass commits to is capped by a duration budget derived from the
 tick function's own `timeout`, so a container never starts more than it
 can live to finish. Truncation re-reads immediately; it is never a stall.
+When the registry rate-limits the tick's process, the spawns a pass admits
+are halved, and they grow back once a pass meets no limit, so a workspace
+at its limit finishes the work it has running before it takes on more.
 
 ### Retries and interruptions
 

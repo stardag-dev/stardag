@@ -15,18 +15,21 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from uuid import UUID
 
+import httpx
+
 from stardag.build._base import (
     BuildContext,
     TaskExecutorABC,
     current_build_context_var,
 )
 from stardag.build._reactive._config import TickConfig, TickSummary
-from stardag.build._reactive._frontier_actions import act_on_frontier
+from stardag.build._reactive._frontier_actions import Admission, act_on_frontier
 from stardag.build._reactive._lease import SchedulerLease
 from stardag.build._reactive._rollover import RollOver, RollOverFailed
 from stardag.build._reactive._terminal import TERMINAL_BUILD_STATUSES, handle_terminal
 from stardag.build._settings import settings_applied
 from stardag.build._wakeups import drain_wake_candidates
+from stardag.exceptions import APIError
 from stardag.registry import BuildFrontier, RegistryABC
 
 logger = logging.getLogger(__name__)
@@ -193,6 +196,36 @@ async def _continue_in_a_successor(
         )
 
 
+def _is_registry_outage(error: BaseException) -> bool:
+    """Whether ``error`` is the registry not answering (unreachable, a 5xx,
+    a rate limit outlasting the client's retries) rather than refusing."""
+    if isinstance(error, httpx.TransportError):
+        return True
+    return isinstance(error, APIError) and (
+        error.status_code == 429 or (error.status_code or 0) >= 500
+    )
+
+
+async def _flag_for_a_successor(build_id: UUID, *, registry: RegistryABC) -> None:
+    """A tick that died of a registry outage leaves the build flagged, so
+    it is not left unserved behind a lapsed lease until someone notices
+    (STA-135). Flagged without a hand-out (``can_spawn=False``): a tick
+    spawned straight away would meet the same outage, and one spawned from
+    every failure would repeat it for as long as the outage lasts. A flag
+    is picked up at the pace of the environment's drains instead -- any
+    other tick's, or the watchdog's. Best-effort: the registry may well
+    still be out."""
+    try:
+        await registry.build_notify_aio(build_id, can_spawn=False)
+    except Exception as e:
+        logger.warning(
+            "Tick for build %s failed on a registry outage and could not flag "
+            "the build for a successor (left to the watchdog): %s",
+            build_id,
+            e,
+        )
+
+
 async def _drain(
     build_id: UUID, *, registry: RegistryABC, config: TickConfig, summary: TickSummary
 ) -> list[UUID]:
@@ -271,6 +304,8 @@ async def run_tick_aio(
         summary.outcome = "error"
         summary.error_type = _bounded(type(e).__name__, _MAX_ERROR_TYPE_CHARS)
         summary.error_message = _bounded(str(e), _MAX_ERROR_MESSAGE_CHARS)
+        if _is_registry_outage(e):
+            await _flag_for_a_successor(build_id, registry=registry)
         await _report(build_id, registry, config, summary)
         raise
     await _report(build_id, registry, config, summary)
@@ -308,6 +343,8 @@ class _Driver:
         # When the earliest outstanding preemption restart's grace ends, on
         # the loop's clock, as of the last frontier read; None: none.
         self.restart_due: float | None = None
+        # Spawns admitted per pass under the registry's rate limit.
+        self.admission = Admission()
 
     def _out_of_time(self) -> bool:
         return (
@@ -403,9 +440,11 @@ class _Driver:
                     summary=self.summary,
                     lease_lost=lambda: lease.lost,
                     out_of_time=self._out_of_time,
+                    admission=self.admission,
                 )
         finally:
             current_build_context_var.reset(token)
+        self.admission.after_pass()
         if result.lease_lost:
             self.summary.outcome = "lease_lost"
             return True, result.acted
