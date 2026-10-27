@@ -323,7 +323,6 @@ export function TaskDetail({
           {(task.instances.length > 0 || context?.planInstanceId) && (
             <TaskRefSnippet
               taskId={task.task_id}
-              taskNamespace={task.task_namespace}
               taskName={task.task_name}
               instances={task.instances}
               preferredInstanceId={context?.planInstanceId}

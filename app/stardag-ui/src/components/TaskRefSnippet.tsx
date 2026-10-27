@@ -1,13 +1,13 @@
 import { useId, useState } from "react";
 import type { TaskInstance } from "../types/task";
 import { shortHash } from "../utils/ids";
-import { taskRefSnippet } from "../utils/taskRef";
+import { TASK_REF_DOCS_URL, taskRefSnippet } from "../utils/taskRef";
 import { formatRelativeTime } from "../utils/time";
 import { CopyButton } from "./ModalExecution";
+import { Tooltip } from "./ui/Tooltip";
 
 interface TaskRefSnippetProps {
   taskId: string;
-  taskNamespace: string;
   taskName: string;
   // Newest first, as the task read returns them (at most its page of them).
   instances: TaskInstance[];
@@ -19,13 +19,12 @@ interface TaskRefSnippetProps {
 
 /**
  * "Reference in code": the `MyTask.ref(task_id, instance_id=...)` line that
- * points code at this exact task, pinned to an instance, with the class's
- * import when the namespace reads as a module path. What
- * `stardag tasks ref <task-id>` prints.
+ * points code at this exact task, pinned to an instance. What
+ * `stardag tasks ref <task-id>` prints. No import line: the class's module
+ * is not recorded, and the namespace is not an import path.
  */
 export function TaskRefSnippet({
   taskId,
-  taskNamespace,
   taskName,
   instances,
   preferredInstanceId,
@@ -49,7 +48,7 @@ export function TaskRefSnippet({
     preferredInstanceId ??
     options[0]?.id ??
     null;
-  const snippet = taskRefSnippet(taskId, instanceId, taskNamespace, taskName);
+  const snippet = taskRefSnippet(taskId, instanceId, taskName);
 
   return (
     <div>
@@ -57,6 +56,17 @@ export function TaskRefSnippet({
         <h3 className="text-sm font-medium text-gray-500 dark:text-gray-400">
           Reference in code
         </h3>
+        <Tooltip content="Points code at this exact task instead of re-composing it, so it keeps resolving to the same task as the code evolves. Click for the docs.">
+          <a
+            href={TASK_REF_DOCS_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="About task references (opens the docs)"
+            className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-gray-400 text-[10px] font-semibold leading-none text-gray-500 hover:border-gray-600 hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-500 dark:text-gray-400 dark:hover:border-gray-300 dark:hover:text-gray-200"
+          >
+            i
+          </a>
+        </Tooltip>
         {options.length > 1 && instanceId && (
           <label
             htmlFor={selectId}
@@ -83,25 +93,10 @@ export function TaskRefSnippet({
           aria-label="Code referencing this task"
           className="min-w-0 flex-1 overflow-x-auto font-mono text-xs leading-relaxed text-gray-800 dark:text-gray-200"
         >
-          {snippet.importLine && (
-            <span className="text-gray-500 dark:text-gray-400">
-              {snippet.importLine}
-              {"\n"}
-            </span>
-          )}
-          {snippet.refLine}
+          {snippet}
         </pre>
-        <CopyButton text={snippet.code} className="flex-shrink-0" />
+        <CopyButton text={snippet} className="flex-shrink-0" />
       </div>
-      <p className="mt-1 text-xs text-gray-400 dark:text-gray-500">
-        {snippet.importLine
-          ? "The import assumes the namespace is the class's module; "
-          : "The class's module is not recorded with the task; "}
-        <code className="font-mono">
-          stardag tasks ref &lt;task-id&gt; -m &lt;module&gt;
-        </code>{" "}
-        prints the exact import.
-      </p>
     </div>
   );
 }

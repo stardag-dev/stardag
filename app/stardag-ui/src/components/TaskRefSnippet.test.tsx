@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type { TaskInstance } from "../types/task";
+import { tooltipOf } from "../test/tooltip";
 import { TaskRefSnippet } from "./TaskRefSnippet";
 
 const TASK_ID = "df0c8b03-fab2-5ddd-9743-09fb4a634cf5";
@@ -22,21 +23,19 @@ describe("TaskRefSnippet", () => {
     render(
       <TaskRefSnippet
         taskId={TASK_ID}
-        taskNamespace="pkg"
         taskName="Train"
         instances={[instance("new"), instance("old")]}
       />,
     );
     const code = screen.getByLabelText("Code referencing this task");
-    expect(code).toHaveTextContent("from pkg import Train");
-    expect(code).toHaveTextContent(`Train.ref("${TASK_ID}", instance_id="new")`);
+    // Only the ref line: the namespace is never offered as an import path.
+    expect(code.textContent).toBe(`Train.ref("${TASK_ID}", instance_id="new")`);
   });
 
   it("pins the plan's instance even when the task read did not return it", () => {
     render(
       <TaskRefSnippet
         taskId={TASK_ID}
-        taskNamespace="pkg"
         taskName="Train"
         instances={[instance("new")]}
         preferredInstanceId="older-plan-instance"
@@ -46,5 +45,21 @@ describe("TaskRefSnippet", () => {
       'instance_id="older-plan-instance"',
     );
     expect(screen.getByRole("combobox")).toHaveValue("older-plan-instance");
+  });
+
+  it("explains itself on hover and links the docs", () => {
+    render(
+      <TaskRefSnippet
+        taskId={TASK_ID}
+        taskName="Train"
+        instances={[instance("new")]}
+      />,
+    );
+    const link = screen.getByRole("link", { name: /About task references/ });
+    expect(link).toHaveAttribute(
+      "href",
+      "https://docs.stardag.com/how-to/reference-existing-tasks/",
+    );
+    expect(tooltipOf(link)).toMatch(/exact task/);
   });
 });

@@ -4,46 +4,21 @@
  *
  * The class name is the task's name — its instances' `__name`
  * discriminator, which the task id hashes, so every instance of a task
- * names the same class. The module is not recorded: the namespace defaults
- * to empty and is only a module path when the project chose one that is.
- * So the import line is offered only when the namespace reads as a dotted
- * Python module path, and is marked a guess — the CLI with `-m <module>`
- * prints the exact one.
+ * names the same class. No import line is offered: the class's module is
+ * not recorded with the task, and a task's namespace is an identity, not an
+ * import path, so it must not be read as one.
  */
 
-export interface TaskRefSnippet {
-  // `from <namespace> import <Class>`, or null when the namespace is not a
-  // plausible module path.
-  importLine: string | null;
-  refLine: string;
-  // Both, newline-joined: what the copy button copies.
-  code: string;
-}
-
-const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
-/** Whether `value` reads as a dotted Python module path. */
-export function isModulePath(value: string): boolean {
-  return value !== "" && value.split(".").every((part) => IDENTIFIER.test(part));
-}
-
+/** The `ref(...)` line, pinned to `instanceId` when one is given. */
 export function taskRefSnippet(
   taskId: string,
   instanceId: string | null,
-  namespace: string,
   className: string,
-): TaskRefSnippet {
-  // `Outer.Inner` is imported as `Outer`, as the CLI does.
-  const importedAs = className.split(".")[0];
-  const importLine =
-    isModulePath(namespace) && IDENTIFIER.test(importedAs)
-      ? `from ${namespace} import ${importedAs}`
-      : null;
+): string {
   const pin = instanceId ? `, instance_id="${instanceId}"` : "";
-  const refLine = `${className}.ref("${taskId}"${pin})`;
-  return {
-    importLine,
-    refLine,
-    code: importLine ? `${importLine}\n${refLine}` : refLine,
-  };
+  return `${className}.ref("${taskId}"${pin})`;
 }
+
+/** The docs page explaining task references. */
+export const TASK_REF_DOCS_URL =
+  "https://docs.stardag.com/how-to/reference-existing-tasks/";

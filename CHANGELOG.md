@@ -288,8 +288,8 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   task's tags and description in place (validated as the server normalises
   them, rolled back if a save is refused), and a "Reference in code" box
   copies `MyTask.ref("<task_id>", instance_id="<instance_id>")` for a
-  chosen instance, with the class's import when the namespace reads as a
-  module path.
+  chosen instance, with an info link to the docs. No import line: a task's
+  namespace is not an import path.
 
 ## [0.28.0] — 2026-10-08
 
