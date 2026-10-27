@@ -27,13 +27,18 @@ the gap before Modal's retry (the app stretches Modal's retry delay to 20s
 so that gap can be probed at all, and several reads must land well after
 the attempt has raised), and while the retry holds. On every read it also
 requires the ledger to show that one execution, unended, with no second
-one. The tick that spawned the task is meanwhile lingering with a
-``reconcile_interval_seconds`` of 5, so it normally probes the same call on
-its own; but its summary records no probe count, so the scenario's own
-probes are the evidence, and the tick's part is only that it reconciled
-nothing. Then the gate opens, and the retry must complete the build under
-the execution it started with -- no failure recorded against it and no
-replacement execution, ever.
+one.
+
+**The tick probes too.** The spawning tick is lingering with a
+``reconcile_interval_seconds`` of 5, but a lingering tick passes over its
+build only when the build is flagged, and nothing flags it while the call
+is retried. So the scenario flags it, every ``NOTIFY_INTERVAL_SECONDS``
+(longer than the reconcile interval, so each pass is due to reconcile)
+for as long as it probes, and afterwards requires the ticks to have made
+at least that many passes and to have reconciled nothing. Then the gate
+opens, and the retry must complete the build under the execution it
+started with -- no failure recorded against it and no replacement
+execution, ever.
 
 The alternatives this rules out: a failed attempt read as the call's end
 (``"raised"`` mid-retry), a reconciled failure ending a running execution,
@@ -58,6 +63,7 @@ from stardag_integration_tests.registry_live._guard import registry_live_guard
 from stardag_integration_tests.registry_live._harness import Deployment
 from stardag_integration_tests.registry_live._wait import (
     describe,
+    require_complete_trail,
     tick_summaries,
     wait_for_terminal,
     wait_until,
@@ -95,6 +101,13 @@ GAP_PROBE_AFTER_SECONDS = 5.0
 HOLD_SECONDS = 6 * RECONCILE_INTERVAL_SECONDS
 MIN_RETRY_PROBES = 8
 PROBE_INTERVAL_SECONDS = 1.0
+# How often the scenario flags the build while it probes, so the lingering
+# tick passes, and reconciles, on each (see the module docstring).
+NOTIFY_INTERVAL_SECONDS = RECONCILE_INTERVAL_SECONDS + 1
+# How long the call may take to read ``"returned"`` once the build is
+# terminal: the worker reports its completion before it uploads artifacts
+# and wakes the scheduler, so the call can still be running briefly.
+RETURN_TIMEOUT_SECONDS = 60
 # The retry's own bound on the hold, reached only if the release is lost.
 GATE_BOUND_SECONDS = 240
 BUILD_TIMEOUT_SECONDS = 300
@@ -120,12 +133,12 @@ def test_a_retried_attempt_is_not_reconciled_as_failed(
     deployment: Deployment, gates: GateSet
 ) -> None:
     from stardag_integration_tests.registry_live.reconcile_app import app
-    from stardag_integration_tests.registry_live.tasks import (
+    from stardag_integration_tests.registry_live.reconcile_tasks import (
         FAILED_ATTEMPT_ARTIFACT_NAME,
         RETRY_ATTEMPT_ARTIFACT_NAME,
         FailsOnceUnreported,
-        get_sum,
     )
+    from stardag_integration_tests.registry_live.tasks import get_sum
 
     salt = uuid.uuid4().hex
     held = gates.new("retry", salt=salt)
@@ -164,8 +177,13 @@ def test_a_retried_attempt_is_not_reconciled_as_failed(
         RETRY_DELAY_SECONDS,
     )
 
+    from stardag.registry import registry_provider
+
+    registry = registry_provider.get()
     gap_reads: list[str] = []
     late_gap_reads = 0
+    notifies = 0
+    last_notify: float | None = None
     retry_reads: list[str] = []
     retry_seen_at: float | None = None
     failed_at = time.monotonic()
@@ -189,6 +207,11 @@ def test_a_retried_attempt_is_not_reconciled_as_failed(
             len(retry_reads) >= MIN_RETRY_PROBES and now - retry_seen_at >= HOLD_SECONDS
         ):
             break
+        if last_notify is None or now - last_notify >= NOTIFY_INTERVAL_SECONDS:
+            # Flag only: the lingering tick is the one meant to pass.
+            registry.build_notify(build_id, can_spawn=False)
+            notifies += 1
+            last_notify = now
         reads = gap_reads if retry_seen_at is None else retry_reads
         state = _probe(executor_ref)
         reads.append(state)
@@ -223,8 +246,8 @@ def test_a_retried_attempt_is_not_reconciled_as_failed(
     print(
         f"[harness] build {build_id}: {len(gap_reads)} probes before the retry "
         f"({late_gap_reads} of them {GAP_PROBE_AFTER_SECONDS:.0f}s+ after the "
-        "failure) "
-        f"and {len(retry_reads)} during it, all 'running'"
+        f"failure) and {len(retry_reads)} during it, all 'running'; the build "
+        f"flagged {notifies} times"
     )
 
     held.release()
@@ -246,16 +269,30 @@ def test_a_retried_attempt_is_not_reconciled_as_failed(
         f"its execution.\n{ledger_text}"
     )
     assert only["executor_ref"] == executor_ref, ledger_text
-    assert _probe(executor_ref) == "returned"
+    wait_until(
+        lambda: _probe(executor_ref) == "returned",
+        build_id=build_id,
+        timeout=RETURN_TIMEOUT_SECONDS,
+        poll_interval=2.0,
+        what="the retried call to read 'returned'",
+    )
 
-    # The trail may be short its last tick, so this can miss a
-    # reconciliation; the ledger above cannot.
+    # Read off the tick trail, which may be short its last tick: a count
+    # it cannot answer is skipped, not guessed.
+    require_complete_trail(build_id, what="the ticks' passes and reconciliations")
     summaries = tick_summaries(build_id)
+    passes = sum(int(s.get("iterations") or 0) for s in summaries)
     reconciled = sum(int(s.get("reconciled") or 0) for s in summaries)
     print(
         f"[harness] build {build_id}: ticks "
-        f"{[(s.get('outcome'), s.get('spawned')) for s in summaries]}; "
-        f"{reconciled} reconciled"
+        f"{[(s.get('outcome'), s.get('iterations')) for s in summaries]}; "
+        f"{passes} passes, {reconciled} reconciled"
+    )
+    assert passes >= notifies, (
+        f"The build was flagged {notifies} times while the call was probed, "
+        f"{NOTIFY_INTERVAL_SECONDS}s apart, but its ticks made only {passes} "
+        "passes: no tick was reconciling through the retry.\n"
+        f"{describe(build_id)}\n{ledger_text}"
     )
     assert reconciled == 0, (
         "No execution of this build was dead; a tick reported reconciling "

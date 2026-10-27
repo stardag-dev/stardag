@@ -278,9 +278,10 @@ second build's yield — polling a `modal.Dict` in the run's environment, with
 the old sleep as its upper bound, so a lost release costs time and never
 correctness. Each hold's outcome is printed at the scenario's teardown, and one
 that ran to its bound is flagged. Changing a gated task's fields changes the
-deployed apps' task classes too: after editing `tasks.py`, re-run
-`provision up` so `registry-live-dag` and friends carry the new code, or a
-scenario triggering on them fails its bootstrap.
+deployed apps' task classes too: after editing `tasks.py` (or
+`reconcile_tasks.py`), re-run `provision up` so `registry-live-dag` and
+friends carry the new code, or a scenario triggering on them fails its
+bootstrap.
 
 **Each scenario declares a budget** (`pytest.mark.budget(seconds)`), which
 orders the collection so xdist starts the long ones first — planned against a

@@ -178,7 +178,10 @@ def build_scenario_app(
         # module. This is the app's ONLY reactive-scheduling declaration:
         # there is no pickle store and no require_pickle_free any more, so
         # declaring the modules is the whole contract (STA-69).
-        task_modules=["stardag_integration_tests.registry_live.tasks"],
+        task_modules=[
+            "stardag_integration_tests.registry_live.tasks",
+            "stardag_integration_tests.registry_live.reconcile_tasks",
+        ],
         limit_key_selector=registry_live_limit_keys,
         container_setup=container_setup,
     )

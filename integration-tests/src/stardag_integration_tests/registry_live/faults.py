@@ -9,7 +9,8 @@ reaches the *tick* as well as the workers (a tick container has no
 the SDK's own sequence -- after the claim, before the spawn; after the run,
 in place of the report -- where no public seam exists. So each wraps one
 SDK method at class level, and acts only for its own task class from
-``tasks``; every other task in the container goes through untouched.
+``tasks`` or ``reconcile_tasks``; every other task in the container goes
+through untouched.
 
 **Each fault records itself, durably, before it strikes**, as an artifact
 on its task naming the execution it struck. That is the scenario's
@@ -31,11 +32,11 @@ import sys
 import typing
 from uuid import UUID
 
+from .reconcile_tasks import FailsOnceUnreported
 from .tasks import (
     TICK_DEATH_ARTIFACT_NAME,
     UNREPORTED_END_ARTIFACT_NAME,
     EndGoesUnreported,
-    FailsOnceUnreported,
     SpawnDiesWithTheTick,
 )
 
