@@ -4,6 +4,7 @@ recorded, the orphan stopped, and who reports what."""
 
 from __future__ import annotations
 
+import asyncio
 import typing
 
 import pytest
@@ -370,3 +371,84 @@ async def test_a_drain_asked_for_while_one_asks_at_shutdown_still_runs(
     answer.set()
     await asyncio.wait_for(flushing, timeout=1)
     assert executor.ticks_spawned == [(neighbour, "app")]
+
+
+class _FastWorkers(FakeDetachedExecutor):
+    """A self-reporting worker that finishes -- and reports its end --
+    before the spawn call returns to the engine: a warm container running
+    a short task while the ref record is still on its way (STA-120)."""
+
+    async def submit_detached(self, task, *, execution_id):
+        handle = await super().submit_detached(task, execution_id=execution_id)
+        await asyncio.gather(*self.background)
+        return handle
+
+
+async def test_a_worker_that_ends_before_its_ref_is_recorded_is_not_an_orphan(
+    registry: InMemoryRegistry, default_in_memory_fs_target: Target
+):
+    """S26's "The claim moved on while the execution was being started": the
+    ref record is refused ``execution_not_current`` because the execution
+    already ended by its own report, not because anyone took the claim."""
+    task = SyncOnlyTask(name=f"fast-{new_id()}")
+    executor = _FastWorkers(app_name="app", registry=registry, workers=True)
+    summary = await build_aio([task], registry=registry, task_executor=executor)
+    assert summary.status == BuildExitStatus.SUCCESS, summary
+    assert executor.cancel_detached_calls == []
+    assert len(registry.calls_to("member_complete", task_id=task.id)) == 1
+    assert registry.status_of(task.id) == "completed"
+
+
+class _StoppedWhileSpawning(InMemoryRegistry):
+    """An operator stops the execution between the spawn and the ref
+    record: an end on the ledger, but not the execution's own."""
+
+    def member_start(self, plan_id, task_id, **kwargs):
+        if not kwargs.get("claim", True):
+            self.execution_report_stopped(kwargs["execution_id"], outcome="stopped")
+        return super().member_start(plan_id, task_id, **kwargs)
+
+
+async def test_an_execution_an_operator_stopped_is_still_an_orphan(
+    default_in_memory_fs_target: Target,
+):
+    registry = _StoppedWhileSpawning()
+    registry.add_deployment(app_name="app")
+    task = SyncOnlyTask(name=f"stopped-{new_id()}")
+    executor = _executor()
+    summary = await build_aio(
+        [task], registry=registry, task_executor=executor, fail_mode=FailMode.CONTINUE
+    )
+    assert summary.status == BuildExitStatus.FAILURE
+    assert len(executor.cancel_detached_calls) == 1
+    assert not registry.called("member_complete", task_id=task.id)
+
+
+class _TakenOverThenLate(_RefusesRefStart):
+    """The claim is taken over while the spawn is in flight, and the
+    original worker's completion then lands late: the ledger records its
+    end, but the claim had already moved on."""
+
+    def member_start(self, plan_id, task_id, **kwargs):
+        if not kwargs.get("claim", True):
+            row = self.executions[kwargs["execution_id"]]
+            now = self.now()
+            row.claim_released_at, row.claim_outcome = now, "taken_over"
+            row.ended_at, row.outcome = now, "completed"
+        return super().member_start(plan_id, task_id, **kwargs)
+
+
+async def test_a_late_completion_after_a_takeover_is_still_an_orphan(
+    default_in_memory_fs_target: Target,
+):
+    """Copilot on #505: an end on the ledger is not enough -- a report after
+    the claim moved on is recorded too, and its result is not the task's."""
+    registry = _TakenOverThenLate()
+    registry.add_deployment(app_name="app")
+    task = SyncOnlyTask(name=f"late-{new_id()}")
+    executor = _executor()
+    summary = await build_aio(
+        [task], registry=registry, task_executor=executor, fail_mode=FailMode.CONTINUE
+    )
+    assert summary.status == BuildExitStatus.FAILURE
+    assert len(executor.cancel_detached_calls) == 1
