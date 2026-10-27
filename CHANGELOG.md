@@ -188,6 +188,16 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `TaskExecutorABC.reconciles()` and `probe_detached()`, implemented for
   Modal. The tick summary counts `reconciled`.
 
+- **Docs: the bundled agent skill (`.claude/skills/stardag/`) is brought up
+  to date** (STA-153). It had not changed since 0.27.0, so it was missing
+  everything since: tasks sent to Modal as instance bodies, the reactive
+  pre-flight, reconciliation and the worker rule, `reports_lifecycle`,
+  worker timeouts and claim TTLs, the new `TickConfig` defaults and knobs,
+  `builds tick` / `builds stalled`, the CLI's own wake-ups, transport and
+  rate-limit retries, the per-workspace rate limit, and the second-signal
+  checkpoint recipe. Its README now records the commit it was last synced
+  at.
+
 ### Server
 
 - **Changed: the writes that finish running work get their own rate-limit
