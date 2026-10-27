@@ -28,7 +28,7 @@ import { BreadcrumbProvider, useBreadcrumb } from "./context/BreadcrumbContext";
 import type React from "react";
 import { ThemeProvider } from "./context/ThemeContext";
 import { EnvironmentProvider, useEnvironment } from "./context/EnvironmentContext";
-import { lastTaskSearchQuery } from "./hooks/useTaskSearchUrl";
+import { lastTaskSearchQuery, notifyLocationChange } from "./hooks/useTaskSearchUrl";
 import { viewFromPath } from "./utils/routes";
 
 // Main app layout with sidebar
@@ -634,6 +634,9 @@ function Router() {
 
   const navigateTo = useCallback((newPath: string) => {
     window.history.pushState({}, "", newPath);
+    // A page that owns its query string (the task search) follows this
+    // too: pushState fires no popstate, and the pathname may not change.
+    notifyLocationChange();
     // The route is the pathname; a query string belongs to the page.
     setPath(window.location.pathname);
   }, []);

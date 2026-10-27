@@ -21,6 +21,14 @@ function rememberLastQuery(query: string): void {
   }
 }
 
+// Fired by the app's own navigation (`pushState` emits no `popstate`), so
+// following a link to `/tasks` from `/tasks?q=x` resets the search.
+const LOCATION_CHANGE = "stardag:locationchange";
+
+export function notifyLocationChange(): void {
+  window.dispatchEvent(new Event(LOCATION_CHANGE));
+}
+
 export interface TaskSearchUrl {
   search: TaskSearchState;
   /**
@@ -29,7 +37,8 @@ export interface TaskSearchUrl {
    * a filter change.
    */
   setSearch: (next: TaskSearchState, options?: { replace?: boolean }) => void;
-  // Bumped when the URL changed under the page (Back/Forward), so state
+  // Bumped when the URL changed under the page (Back/Forward, or the app's
+  // own navigation to the same path), so state
   // derived from the search — the text being typed — can re-sync.
   navigationKey: number;
 }
@@ -54,7 +63,11 @@ export function useTaskSearchUrl(): TaskSearchUrl {
       setNavigationKey((k) => k + 1);
     };
     window.addEventListener("popstate", onPopState);
-    return () => window.removeEventListener("popstate", onPopState);
+    window.addEventListener(LOCATION_CHANGE, onPopState);
+    return () => {
+      window.removeEventListener("popstate", onPopState);
+      window.removeEventListener(LOCATION_CHANGE, onPopState);
+    };
   }, []);
 
   const setSearch = useCallback(

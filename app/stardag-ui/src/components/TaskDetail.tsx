@@ -149,14 +149,23 @@ export function TaskDetail({
   }, [onChanged]);
 
   // A save returns the task without its instances: keep ours. Ignore a
-  // save that lands after the page moved to another task.
-  const handleAnnotated = useCallback((saved: TaskSummary) => {
-    setTask((t) =>
-      t && t.task_id === saved.task_id
-        ? { ...t, tags: saved.tags ?? [], description: saved.description ?? null }
-        : t,
-    );
-  }, []);
+  // save issued for another task or environment than the one now shown
+  // (the callback closes over the identity it was handed out under).
+  const identityRef = useRef(identity);
+  useEffect(() => {
+    identityRef.current = identity;
+  }, [identity]);
+  const handleAnnotated = useCallback(
+    (saved: TaskSummary) => {
+      if (identityRef.current !== identity) return;
+      setTask((t) =>
+        t && t.task_id === saved.task_id
+          ? { ...t, tags: saved.tags ?? [], description: saved.description ?? null }
+          : t,
+      );
+    },
+    [identity],
+  );
 
   const current = executions?.find((e) => e.id === task?.execution_id) ?? null;
 
@@ -247,6 +256,8 @@ export function TaskDetail({
       ) : (
         <div className="space-y-4">
           <TaskAnnotations
+            // A fresh editor (and save queue) per task and environment.
+            key={identity}
             taskId={task.task_id}
             environmentId={environmentId}
             tags={task.tags ?? []}
@@ -309,9 +320,10 @@ export function TaskDetail({
             </div>
           )}
 
-          {task.instances.length > 0 && (
+          {(task.instances.length > 0 || context?.planInstanceId) && (
             <TaskRefSnippet
               taskId={task.task_id}
+              taskNamespace={task.task_namespace}
               taskName={task.task_name}
               instances={task.instances}
               preferredInstanceId={context?.planInstanceId}

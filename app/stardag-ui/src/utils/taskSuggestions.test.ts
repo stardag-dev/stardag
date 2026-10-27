@@ -68,6 +68,21 @@ describe("suggestions", () => {
     );
   });
 
+  it("restricts to a kind before capping", () => {
+    const store = harvest(
+      empty,
+      Array.from({ length: 12 }, (_, i) => task("", `Prod${i}`)).concat([
+        task("", "Other", ["production"]),
+      ]),
+    );
+    expect(suggest(store, "prod", EMPTY_SEARCH).some((s) => s.kind === "tag")).toBe(
+      false,
+    );
+    expect(suggest(store, "prod", EMPTY_SEARCH, ["tag"])).toEqual([
+      { kind: "tag", tag: "production", label: "production" },
+    ]);
+  });
+
   it("skips what the search already filters on", () => {
     const store = harvest(empty, [task("", "A", ["prod"])]);
     expect(suggest(store, "prod", { ...EMPTY_SEARCH, tags: ["prod"] })).toEqual([]);

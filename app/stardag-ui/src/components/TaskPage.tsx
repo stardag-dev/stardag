@@ -64,5 +64,13 @@ export function TaskPage({
       </div>
     );
   }
-  return <TaskSearch environmentId={activeEnvironment.id} onOpenTask={onOpenTask} />;
+  // Keyed: a late read of the previous environment (the autocomplete seed
+  // included) can never land in the new one's search.
+  return (
+    <TaskSearch
+      key={activeEnvironment.id}
+      environmentId={activeEnvironment.id}
+      onOpenTask={onOpenTask}
+    />
+  );
 }

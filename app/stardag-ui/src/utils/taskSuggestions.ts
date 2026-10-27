@@ -158,6 +158,9 @@ export function suggest(
   store: SuggestionStore,
   text: string,
   current: TaskSearchState,
+  // Only these kinds (e.g. tags, for a `#tag` being typed), filtered
+  // before the result is capped.
+  kinds?: Suggestion["kind"][],
 ): Suggestion[] {
   const needle = text.trim().toLowerCase();
   if (!needle) {
@@ -204,6 +207,7 @@ export function suggest(
     }
   }
   return scored
+    .filter((s) => !kinds || kinds.includes(s.suggestion.kind))
     .sort(
       (a, b) =>
         a.score - b.score || compareCodePoints(a.suggestion.label, b.suggestion.label),

@@ -76,6 +76,24 @@ describe("TaskAnnotations", () => {
     expect(onSaved).not.toHaveBeenCalled();
   });
 
+  it("reports a refused save even when a later one succeeds", async () => {
+    mocked
+      .mockRejectedValueOnce(new Error("rate limited"))
+      .mockResolvedValueOnce(saved(["prod"], "described"));
+    const { onSaved } = setup(["prod"], null);
+    fireEvent.click(screen.getByRole("button", { name: "+ Add tag" }));
+    const input = screen.getByRole("textbox", { name: "New tag" });
+    fireEvent.change(input, { target: { value: "extra" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: "Add a description…" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Description" }), {
+      target: { value: "described" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not save: rate limited");
+  });
+
   it("edits a multi-line description and clears it when emptied", async () => {
     mocked.mockImplementation(async (_id, _env, changes) =>
       saved(["prod"], changes.description ?? null),

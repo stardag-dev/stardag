@@ -12,6 +12,7 @@ import type { TaskSummary } from "../types/task";
 vi.mock("../api/registry", () => ({ fetchTasks: vi.fn() }));
 
 import { fetchTasks, type TaskFilters } from "../api/registry";
+import { notifyLocationChange } from "../hooks/useTaskSearchUrl";
 import { TASK_PAGE_SIZE, TaskSearch } from "./TaskSearch";
 
 const mocked = vi.mocked(fetchTasks);
@@ -120,6 +121,18 @@ describe("TaskSearch", () => {
     expect(screen.getByRole("combobox", { name: "Search tasks" })).toHaveValue(
       "evaluate",
     );
+  });
+
+  it("follows the app's own navigation to the same path", async () => {
+    window.history.replaceState({}, "", "/tasks?q=train");
+    render(<TaskSearch environmentId="env-1" onOpenTask={() => {}} />);
+    await waitFor(() => expect(lastSearch()).toMatchObject({ q: "train" }));
+    act(() => {
+      window.history.pushState({}, "", "/tasks");
+      notifyLocationChange();
+    });
+    await waitFor(() => expect(lastSearch()).toEqual({ limit: TASK_PAGE_SIZE }));
+    expect(screen.getByRole("combobox", { name: "Search tasks" })).toHaveValue("");
   });
 
   it("pages with the cursor and the same filters", async () => {

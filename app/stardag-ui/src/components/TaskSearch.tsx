@@ -109,13 +109,6 @@ export function TaskSearch({ environmentId, onOpenTask }: TaskSearchProps) {
     setText(search.text);
   }
 
-  // Suggestions belong to one environment.
-  const [storeEnvironment, setStoreEnvironment] = useState(environmentId);
-  if (storeEnvironment !== environmentId) {
-    setStoreEnvironment(environmentId);
-    setStore(loadStore(environmentId));
-  }
-
   // What the box searches for: a `#tag` being typed is not text yet.
   const tagDraft = TAG_DRAFT.exec(text.trim());
   const effectiveText = tagDraft ? "" : text;
@@ -242,7 +235,7 @@ export function TaskSearch({ environmentId, onOpenTask }: TaskSearchProps) {
       if (check.ok && !search.tags.includes(check.tag)) {
         out.push({ kind: "add-tag", tag: check.tag, label: check.tag });
       }
-      for (const s of suggest(store, draft, search)) {
+      for (const s of suggest(store, draft, search, ["tag"])) {
         if (s.kind === "tag" && !(check.ok && s.tag === check.tag)) out.push(s);
       }
       return out;

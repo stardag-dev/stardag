@@ -7,10 +7,13 @@ import { CopyButton } from "./ModalExecution";
 
 interface TaskRefSnippetProps {
   taskId: string;
+  taskNamespace: string;
   taskName: string;
-  // Newest first, as the task read returns them.
+  // Newest first, as the task read returns them (at most its page of them).
   instances: TaskInstance[];
-  // The instance to pin by default (e.g. the one a build's plan holds).
+  // The instance to pin by default (the one a build's plan holds). It is
+  // pinned even when it is older than the instances the task read
+  // returned: the id is all the reference needs.
   preferredInstanceId?: string | null;
 }
 
@@ -22,24 +25,31 @@ interface TaskRefSnippetProps {
  */
 export function TaskRefSnippet({
   taskId,
+  taskNamespace,
   taskName,
   instances,
   preferredInstanceId,
 }: TaskRefSnippetProps) {
   const selectId = useId();
-  const initial =
-    instances.find((i) => i.id === preferredInstanceId)?.id ?? instances[0]?.id ?? null;
+  const options: { id: string; label: string }[] = instances.map((i, index) => ({
+    id: i.id,
+    label: `${shortHash(i.id)} — ${formatRelativeTime(i.created_at)}${
+      index === 0 ? " (newest)" : ""
+    }${i.id === preferredInstanceId ? " (this plan)" : ""}`,
+  }));
+  if (preferredInstanceId && !options.some((o) => o.id === preferredInstanceId)) {
+    options.push({
+      id: preferredInstanceId,
+      label: `${shortHash(preferredInstanceId)} (this plan)`,
+    });
+  }
   const [chosen, setChosen] = useState<string | null>(null);
-  const instance =
-    instances.find((i) => i.id === chosen) ??
-    instances.find((i) => i.id === initial) ??
+  const instanceId =
+    options.find((o) => o.id === chosen)?.id ??
+    preferredInstanceId ??
+    options[0]?.id ??
     null;
-  const snippet = taskRefSnippet(
-    taskId,
-    instance?.id ?? null,
-    instance?.body ?? {},
-    taskName,
-  );
+  const snippet = taskRefSnippet(taskId, instanceId, taskNamespace, taskName);
 
   return (
     <div>
@@ -47,7 +57,7 @@ export function TaskRefSnippet({
         <h3 className="text-sm font-medium text-gray-500 dark:text-gray-400">
           Reference in code
         </h3>
-        {instances.length > 1 && instance && (
+        {options.length > 1 && instanceId && (
           <label
             htmlFor={selectId}
             className="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400"
@@ -55,15 +65,13 @@ export function TaskRefSnippet({
             pinned to instance
             <select
               id={selectId}
-              value={instance.id}
+              value={instanceId}
               onChange={(e) => setChosen(e.target.value)}
               className="rounded border border-gray-300 px-1 py-0.5 font-mono text-xs text-gray-900 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100"
             >
-              {instances.map((i, index) => (
-                <option key={i.id} value={i.id}>
-                  {shortHash(i.id)} — {formatRelativeTime(i.created_at)}
-                  {index === 0 ? " (newest)" : ""}
-                  {i.id === preferredInstanceId ? " (this plan)" : ""}
+              {options.map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.label}
                 </option>
               ))}
             </select>

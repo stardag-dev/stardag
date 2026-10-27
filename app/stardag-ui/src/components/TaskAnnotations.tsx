@@ -89,7 +89,9 @@ export function TaskAnnotations({
   // task up; only the latest save's outcome clears the optimistic view.
   const save = (changes: TaskAnnotationChanges) => {
     const seq = ++seqRef.current;
-    setError(null);
+    // Only a save with nothing queued before it starts from a clean slate:
+    // an earlier save may still be refused.
+    if (pendingTags === null && pendingDescription === null) setError(null);
     if (changes.tags !== undefined) setPendingTags(changes.tags);
     if (changes.description !== undefined) {
       setPendingDescription({ value: changes.description });
@@ -104,13 +106,15 @@ export function TaskAnnotations({
           setPendingDescription(null);
         },
         (err: unknown) => {
+          // Always say a save was refused, even when a later one is queued:
+          // a later success must not silently swallow it.
+          setError(
+            `Could not save: ${err instanceof Error ? err.message : String(err)}`,
+          );
           if (seq !== seqRef.current) return;
           // Roll back to what the server holds.
           setPendingTags(null);
           setPendingDescription(null);
-          setError(
-            `Could not save: ${err instanceof Error ? err.message : String(err)}`,
-          );
         },
       );
   };
