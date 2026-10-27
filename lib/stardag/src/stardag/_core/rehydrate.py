@@ -79,10 +79,8 @@ def _unregistered_task_types(value: typing.Any) -> set[tuple[str, str]]:
     """Every ``(namespace, name)`` pair in ``value`` (nested dicts and lists
     included) that names no registered task class.
 
-    Read only after validation has failed, to name the class behind it: a
-    nested polymorphic value that is not a task (a ``SubClass`` of some
-    other model) is reported too, which is harmless there because it is a
-    candidate cause, never a refusal on its own.
+    Read only after validation has failed, as candidates for the class
+    behind it; the caller keeps only those the validation error names.
     """
     found: set[tuple[str, str]] = set()
     if isinstance(value, typing.Mapping):
@@ -238,7 +236,16 @@ def task_from_registry_data(
             dict(task_data), context={CONTEXT_MODE_KEY: "compat"}
         )
     except Exception as e:
-        missing = _unregistered_task_types(task_data)
+        # Only the candidates the error itself names: a nested polymorphic
+        # value that is not a task (a ``SubClass`` of another model family)
+        # lives in its own registry, so the scan alone would report it as
+        # missing when some unrelated field is what failed.
+        cause = str(e)
+        missing = {
+            (ns, n)
+            for ns, n in _unregistered_task_types(task_data)
+            if f"name={n!r}" in cause and f"namespace={ns!r}" in cause
+        }
         if missing:
             listed = ", ".join(
                 f"{n} (namespace {ns or '<root>'})" for ns, n in sorted(missing)
