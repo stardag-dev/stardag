@@ -69,17 +69,28 @@ class RegisteredRoot:
 
     @property
     def import_line(self) -> str:
-        cls = type(self.task)
-        return f"from {cls.__module__} import {cls.__qualname__}"
+        module, path = _import_path(type(self.task))
+        if "<locals>" in path:
+            return f"# {path} is defined inside a function in {module}: not importable"
+        return f"from {module} import {path.split('.')[0]}"
 
     @property
     def ref_snippet(self) -> str:
         """The reference that pins this root: ``Cls.ref(task_id,
         instance_id=...)``."""
-        return (
-            f'{type(self.task).__qualname__}.ref("{self.task_id}", '
-            f'instance_id="{self.instance_id}")'
-        )
+        _, path = _import_path(type(self.task))
+        return f'{path}.ref("{self.task_id}", instance_id="{self.instance_id}")'
+
+
+def _import_path(cls: type) -> tuple[str, str]:
+    """``(module, dotted path within it)`` of a task class, as code refers
+    to it: a decorated function task's class is bound under the function's
+    name, not the class name (``@sd.task(name="Sum") def get_sum``), and a
+    nested class is reached through its outermost name."""
+    func = getattr(cls, "_func", None)
+    if func is not None and hasattr(func, "__qualname__"):
+        return func.__module__, func.__qualname__
+    return cls.__module__, cls.__qualname__
 
 
 @dataclass(frozen=True)
@@ -101,9 +112,13 @@ class PlanOnlyResult:
 
 
 def _distinct(roots: Sequence[BaseTask]) -> list[BaseTask]:
-    seen: dict[UUID, BaseTask] = {}
+    """The roots with identical instances coalesced. Two constructions of
+    one task id that differ (a non-significant parameter) are both kept, so
+    the walk refuses them (``InstanceConflictError``) before any build
+    exists."""
+    seen: dict[tuple[UUID, UUID], BaseTask] = {}
     for root in roots:
-        seen.setdefault(root.id, root)
+        seen.setdefault((root.id, root.instance_hash), root)
     return list(seen.values())
 
 

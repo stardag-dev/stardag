@@ -18,12 +18,13 @@ registry, which follows the server's seams:
 from __future__ import annotations
 
 import typing
+from typing import Annotated
 from uuid import UUID
 
 import pytest
 
 import stardag as sd
-from stardag import auto_namespace
+from stardag import InstanceConflictError, StardagField, auto_namespace
 from stardag.build import BuildExitStatus, build_aio
 from stardag.build._registration import new_id
 from stardag.exceptions import APIError, PlanOnlyUnsupportedError
@@ -35,6 +36,19 @@ from stardag.utils.testing.helper_tasks import SyncOnlyTask
 auto_namespace(__name__)
 
 Target = typing.Type[InMemoryFileTarget]
+
+
+class Tunable(sd.Task[int]):
+    key: str
+    width: Annotated[int, StardagField(significant=False)] = 1
+
+    def run(self) -> None:
+        self._save(self.width)
+
+
+@sd.task(name="Doubled")
+def double_it(value: int) -> int:
+    return 2 * value
 
 
 def _chain() -> tuple[SyncOnlyTask, SyncOnlyTask, SyncOnlyTask]:
@@ -196,6 +210,48 @@ class TestRegister:
         assert ids[0] == ids[1]
         (created,) = registry.calls_to("build_create")
         assert created["root_task_ids"] == [str(root.id)]
+
+    async def test_differing_constructions_of_one_task_are_refused(
+        self, default_in_memory_fs_target: Target
+    ):
+        """Only identical instances are coalesced: two roots with one task id
+        and different non-significant fields are refused, before any build
+        exists, rather than both answered with the first's instance."""
+        registry = InMemoryRegistry()
+        key = f"k-{new_id()}"
+        a, b = Tunable(key=key, width=1), Tunable(key=key, width=2)
+        assert a.id == b.id and a.instance_hash != b.instance_hash
+        with pytest.raises(InstanceConflictError):
+            await sd.register_aio([a, b], registry=registry, echo=False)
+        assert registry.builds == {}
+
+    async def test_a_function_task_is_referred_to_by_its_function_name(
+        self, default_in_memory_fs_target: Target, capsys
+    ):
+        """``@sd.task(name="Doubled") def double_it`` is bound as
+        ``double_it`` in its module; the class name would not import."""
+        registry = InMemoryRegistry()
+        task = double_it(value=int(new_id()) % 1000)
+        (instance_id,) = await sd.register_aio(task, registry=registry)
+        out = capsys.readouterr().out
+        assert f"from {__name__} import double_it" in out
+        assert f'double_it.ref("{task.id}", instance_id="{instance_id}")' in out
+
+    def test_a_nested_class_is_imported_by_its_outermost_name(self):
+        from stardag.build._plan_only import RegisteredRoot
+
+        class Outer:
+            class Inner:
+                pass
+
+        root = RegisteredRoot(task=Outer.Inner(), task_id="t", instance_id=new_id())  # type: ignore[arg-type]
+        assert "<locals>" in root.ref_snippet  # defined in this function
+        assert root.import_line.startswith("# ")
+
+        Inner = type("Inner", (), {"__module__": "pkg.mod", "__qualname__": "A.Inner"})
+        nested = RegisteredRoot(task=Inner(), task_id="t", instance_id=new_id())  # type: ignore[arg-type]
+        assert nested.import_line == "from pkg.mod import A"
+        assert nested.ref_snippet.startswith('A.Inner.ref("t"')
 
     @pytest.mark.parametrize(
         "annotation", [{"tags": ["best"]}, {"description": "the baseline"}]
