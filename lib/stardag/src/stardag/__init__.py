@@ -27,6 +27,7 @@ Core components:
 - :class:`TargetTask` - Base class for tasks with typed target outputs
 - :class:`Depends` - Dependency injection type annotation
 - :func:`build` - Execute task and its dependencies
+- :func:`register` - Register tasks without running them, printing a handle
 
 See https://docs.stardag.com for full documentation.
 
@@ -53,7 +54,14 @@ from stardag._core.task_loads import TaskLoads
 from stardag._version import __version__
 from stardag._core.instance import check_serialization_stability
 from stardag.base_model import StardagBaseModel, StardagField
-from stardag.build import build, build_aio, build_sequential, build_sequential_aio
+from stardag.build import (
+    build,
+    build_aio,
+    build_sequential,
+    build_sequential_aio,
+    register,
+    register_aio,
+)
 from stardag.cancellation import cancellation_requested
 from stardag.config import config_provider
 from stardag.exceptions import (
@@ -62,6 +70,7 @@ from stardag.exceptions import (
     AuthorizationError,
     ExecutionCancelled,
     InstanceConflictError,
+    PlanOnlyUnsupportedError,
     StardagError,
     ResumableInterruption,
     TokenExpiredError,
@@ -115,8 +124,11 @@ __all__ = [
     "NakedPolymorphicFieldError",
     "namespace",
     "Polymorphic",
+    "register",
+    "register_aio",
     "registry_provider",
     "ExecutionCancelled",
+    "PlanOnlyUnsupportedError",
     "InstanceConflictError",
     "UnstableSerializationError",
     "check_serialization_stability",

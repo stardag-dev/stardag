@@ -68,6 +68,7 @@ def _build_create_req(
     name: str | None,
     description: str | None,
     executor_metadata: dict[str, Any] | None,
+    plan_only: bool = False,
 ) -> Request[BuildInfo]:
     # Minted here when the caller did not, so the request is the same on
     # every delivery: a create re-sent after its answer was lost then finds
@@ -85,6 +86,10 @@ def _build_create_req(
                 "description": description,
                 "root_task_ids": sorted(set(root_task_ids)),
                 "executor_metadata": executor_metadata,
+                # Sent only when set: an ordinary create stays the request an
+                # older registry accepts (``BuildCreate`` forbids unknown
+                # fields, so a plan-only create there is a 422).
+                "plan_only": True if plan_only else None,
             }
         ),
         operation="Create build",

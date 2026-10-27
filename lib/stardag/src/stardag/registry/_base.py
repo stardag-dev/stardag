@@ -73,9 +73,14 @@ class RegistryABC(RegistryLedgerABC, RegistryReadsABC):
         name: str | None = None,
         description: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
+        plan_only: bool = False,
     ) -> BuildInfo:
         """``POST /builds``: a RUNNING build requesting ``root_task_ids``.
-        Idempotent on a client-minted ``build_id``."""
+        Idempotent on a client-minted ``build_id``.
+
+        ``plan_only``: a build that registers and runs nothing, created
+        PENDING and ended REGISTERED by :meth:`build_registered`. An older
+        registry refuses the field (422)."""
         raise _missing(self, "build_create")
 
     async def build_create_aio(
@@ -86,6 +91,7 @@ class RegistryABC(RegistryLedgerABC, RegistryReadsABC):
         name: str | None = None,
         description: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
+        plan_only: bool = False,
     ) -> BuildInfo:
         return self.build_create(
             root_task_ids=root_task_ids,
@@ -93,6 +99,7 @@ class RegistryABC(RegistryLedgerABC, RegistryReadsABC):
             name=name,
             description=description,
             executor_metadata=executor_metadata,
+            plan_only=plan_only,
         )
 
     def build_get(self, build_id: UUID) -> BuildInfo:
@@ -161,6 +168,16 @@ class RegistryABC(RegistryLedgerABC, RegistryReadsABC):
 
     async def build_exit_early_aio(self, build_id: UUID) -> BuildInfo:
         return self.build_exit_early(build_id)
+
+    def build_registered(self, build_id: UUID) -> BuildInfo:
+        """``POST /builds/{id}/registered``: end a plan-only build
+        REGISTERED, refused (409 ``plan_incomplete``) unless its active
+        plan is sealed, and 409 ``build_not_plan_only`` for any other
+        build."""
+        raise _missing(self, "build_registered")
+
+    async def build_registered_aio(self, build_id: UUID) -> BuildInfo:
+        return self.build_registered(build_id)
 
     def build_list_running(
         self, *, reactive_app_name: str | None = None, limit: int = 100

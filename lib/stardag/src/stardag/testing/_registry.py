@@ -101,15 +101,22 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
         name: str | None = None,
         description: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
+        plan_only: bool = False,
     ) -> BuildInfo:
         self._record(
-            "build_create", root_task_ids=list(root_task_ids), build_id=build_id
+            "build_create",
+            root_task_ids=list(root_task_ids),
+            build_id=build_id,
+            plan_only=plan_only,
         )
         if not root_task_ids:
             raise refuse("invalid_request", "root_task_ids is required", status=422)
         build_id = build_id or new_id()
         if build_id in self.builds:
-            return self._info(self.builds[build_id])
+            existing = self.builds[build_id]
+            if existing.plan_only != plan_only:
+                raise refuse("build_id_conflict")
+            return self._info(existing)
         now = self.now()
         build = BuildRow(
             id=build_id,
@@ -119,6 +126,8 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
             executor_metadata=executor_metadata,
             created_at=now,
             last_active_at=now,
+            plan_only=plan_only,
+            status="pending" if plan_only else "running",
         )
         self.builds[build_id] = build
         self.log(Event("BUILD_STARTED", build_id=build_id))
@@ -143,6 +152,7 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
         )
         with self.transaction():
             build = self.build(build_id)
+            self._refuse_plan_only(build, "resume")
             changed = False
             plan = None
             if deployment_id is not None:
@@ -180,6 +190,16 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
                 build=self._info(build),
                 plan=plan_info(plan) if plan is not None else None,
                 changed=changed,
+            )
+
+    @staticmethod
+    def _refuse_plan_only(build: BuildRow, action: str) -> None:
+        if build.plan_only:
+            raise refuse(
+                "build_plan_only",
+                f"build {build.id} is plan-only: it cannot {action}",
+                build_id=str(build.id),
+                build_status=build.status,
             )
 
     def _refuse_if_terminal(self, build: BuildRow, event_type: str) -> None:
@@ -221,6 +241,7 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
         if build.status == "completed":
             return self._info(build)
         self._refuse_if_terminal(build, "BUILD_COMPLETED")
+        self._refuse_plan_only(build, "complete")
         plan = self.active_plan(build_id)
         if plan is None or plan.sealed_at is None:
             raise refuse("plan_incomplete", reason="not_sealed")
@@ -252,9 +273,28 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
         if build.status == "exit_early":
             return self._info(build)
         self._refuse_if_terminal(build, "BUILD_EXIT_EARLY")
+        self._refuse_plan_only(build, "exit early")
         build.status = "exit_early"
         build.last_active_at = self.now()
         return self._info(build)
+
+    def build_registered(self, build_id: UUID) -> BuildInfo:
+        self._record("build_registered", build_id=build_id)
+        with self.transaction():
+            build = self.build(build_id)
+            if build.status == "registered":
+                return self._info(build)
+            if not build.plan_only:
+                raise refuse("build_not_plan_only", build_status=build.status)
+            self._refuse_if_terminal(build, "BUILD_REGISTERED")
+            plan = self.active_plan(build_id)
+            if plan is None or plan.sealed_at is None:
+                raise refuse("plan_incomplete", reason="not_sealed")
+            self._closure(plan)
+            build.status = "registered"
+            build.last_active_at = self.now()
+            self.log(Event("BUILD_REGISTERED", build_id=build_id))
+            return self._info(build)
 
     def plan_roots_info(self, plan_id: UUID) -> PlanRoots:
         plan = self.plan(plan_id)
@@ -621,6 +661,7 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
             tick_kwargs=tick_kwargs,
         )
         build = self.build(build_id)
+        self._refuse_plan_only(build, "be reactively scheduled")
         build.reactive_app_name = app_name
         if tick_kwargs is not None:
             build.reactive_tick_kwargs = dict(tick_kwargs)

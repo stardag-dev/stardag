@@ -426,6 +426,10 @@ class PlansMixin(TransitionsMixin):
                     discovery.append(self._frontier_member(member))
             elif actionable and not self._blocked(instance):
                 runnable.append(self._frontier_member(member, counts_for=build_id))
+        if build.status != "running":
+            # A build that is not RUNNING hands out no work (the server's
+            # frontier, services/frontier.py).
+            runnable, discovery = [], []
         return BuildFrontier(
             **base,
             plan_id=plan.id,

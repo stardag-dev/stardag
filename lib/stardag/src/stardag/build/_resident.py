@@ -119,6 +119,7 @@ async def build_aio(
     limit_key_selector: LimitKeySelector | None = None,
     description: str | None = None,
     raise_on_failure: bool = True,
+    plan_only: bool = False,
 ) -> BuildSummary:
     """Build tasks concurrently using hybrid async/thread/process execution.
 
@@ -162,12 +163,33 @@ async def build_aio(
             exception (default). False returns the ``FAILURE`` summary
             instead — build id, failed task, error — after the build has
             stopped at the first failure the same way.
+        plan_only: Register the tasks and their whole static closure
+            (``register_all`` implied) under the build's scope, and run
+            nothing: the build ends ``REGISTERED`` and the summary's status
+            is ``BuildExitStatus.REGISTERED``. Needs a registry that
+            supports it, and always raises on a registry failure
+            (``on_registry_failure`` does not apply); cannot resume. See
+            :func:`stardag.register`.
 
     Returns:
         BuildSummary with status, task counts and build id. ``STOPPED``
         when the registry stopped the build (an operator cancelled it):
         the engine then stops without writing a build status.
     """
+    if plan_only:
+        if resume_build_id is not None:
+            raise ValueError("plan_only=True cannot resume a build.")
+        from stardag.build._plan_only import build_plan_only_aio
+
+        result = await build_plan_only_aio(
+            tasks,
+            registry=registry,
+            task_executor=task_executor,
+            settings=settings,
+            description=description,
+            max_concurrent_discover=max_concurrent_discover,
+        )
+        return result.summary()
     roots = [tasks] if isinstance(tasks, BaseTask) else list(tasks)
     for index, task in enumerate(roots):
         if not isinstance(task, BaseTask):

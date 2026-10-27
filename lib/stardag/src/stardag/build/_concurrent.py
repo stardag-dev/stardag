@@ -495,6 +495,7 @@ def build(
     limit_key_selector: LimitKeySelector | None = None,
     description: str | None = None,
     raise_on_failure: bool = True,
+    plan_only: bool = False,
 ) -> BuildSummary:
     """Build tasks concurrently (sync wrapper for build_aio).
 
@@ -524,6 +525,7 @@ def build(
                 limit_key_selector=limit_key_selector,
                 description=description,
                 raise_on_failure=raise_on_failure,
+                plan_only=plan_only,
             )
         )
     except RuntimeError as e:

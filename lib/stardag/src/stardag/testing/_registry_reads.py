@@ -82,6 +82,7 @@ class ReadsMixin(RegistryState):
             reactive_app_name=build.reactive_app_name,
             reactive_tick_kwargs=build.reactive_tick_kwargs,
             error_message=build.error_message if build.status == "failed" else None,
+            plan_only=build.plan_only,
         )
 
     def build_list_page(

@@ -86,6 +86,8 @@ class BuildExitStatus(StrEnum):
     # (cancelled by an operator, or made terminal by another hand). The
     # engine stopped without writing a build status of its own.
     STOPPED = "stopped"
+    # A plan-only build: the plan is registered and sealed, nothing ran.
+    REGISTERED = "registered"
 
 
 @dataclass
@@ -149,7 +151,11 @@ class BuildSummary:
     def __repr__(self) -> str:
         """Return a human-readable summary of the build."""
         tc = self.task_count
-        status_icon = "✓" if self.status == BuildExitStatus.SUCCESS else "✗"
+        status_icon = (
+            "✓"
+            if self.status in (BuildExitStatus.SUCCESS, BuildExitStatus.REGISTERED)
+            else "✗"
+        )
         lines = [
             f"Build {self.status.value.upper()} {status_icon}",
         ]
