@@ -248,6 +248,16 @@ def _with_claim_build(stmt: Select[tuple[Task]]) -> Select[tuple[Task, UUID | No
     )
 
 
+_LIKE_ESCAPE = "\\"
+
+
+def _like_escape(value: str) -> str:
+    """``value`` matched literally inside a ``LIKE`` pattern."""
+    for char in (_LIKE_ESCAPE, "%", "_"):
+        value = value.replace(char, _LIKE_ESCAPE + char)
+    return value
+
+
 @dataclass(frozen=True)
 class TaskPage:
     tasks: list[TaskView]
@@ -284,8 +294,11 @@ async def list_tasks(
     - ``q``: case-insensitive substring of the name, the namespace or the
       description.
 
-    ``%`` and ``_`` in ``id_prefix`` and ``q`` match themselves. The filters
-    only narrow the set; the order and the keyset cursor are those of the
+    ``%`` and ``_`` in ``id_prefix`` and ``q`` match themselves. Indexes
+    (``models/task.py``): ``ix_task_environment_status_at`` for the order
+    and keyset, ``ix_task_search_trgm`` for ``q`` (3+ characters),
+    ``ix_task_environment_task_id_prefix`` for ``id_prefix``,
+    ``ix_task_tags`` for ``tags``. The filters only narrow the set; the order and the keyset cursor are those of the
     unfiltered listing, so paging stays gap- and repeat-free as long as the
     same filters are passed with each cursor."""
     limit = max(1, min(limit, MAX_LIST_LIMIT))
@@ -300,14 +313,20 @@ async def list_tasks(
         stmt = stmt.where(Task.task_name == name)
     if tags:
         stmt = stmt.where(Task.tags.contains(tags))
+    # Each pattern is built here and bound as ONE parameter: the planner
+    # derives an index condition from a pattern it can see (a custom plan),
+    # never from ``'%' || $1 || '%'`` assembled at run time.
     if id_prefix:
-        stmt = stmt.where(Task.task_id.startswith(id_prefix, autoescape=True))
+        stmt = stmt.where(
+            Task.task_id.like(f"{_like_escape(id_prefix)}%", escape=_LIKE_ESCAPE)
+        )
     if q:
+        pattern = f"%{_like_escape(q)}%"
         stmt = stmt.where(
             or_(
-                Task.task_name.icontains(q, autoescape=True),
-                Task.task_namespace.icontains(q, autoescape=True),
-                Task.description.icontains(q, autoescape=True),
+                Task.task_name.ilike(pattern, escape=_LIKE_ESCAPE),
+                Task.task_namespace.ilike(pattern, escape=_LIKE_ESCAPE),
+                Task.description.ilike(pattern, escape=_LIKE_ESCAPE),
             )
         )
     if cursor is not None:

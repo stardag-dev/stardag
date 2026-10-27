@@ -324,10 +324,15 @@ async def test_task_annotations_migrate_over_existing_rows(migrated_database_url
             engine,
             "SELECT tags = '{}' AND description IS NULL FROM task WHERE task_id = 't'",
         )
-        assert await _in_annotations_schema(
-            engine,
-            "SELECT count(*) FROM pg_indexes WHERE indexname = 'ix_task_tags'"
-            f" AND schemaname = '{ANNOTATIONS_SCHEMA}'",
+        assert (
+            await _in_annotations_schema(
+                engine,
+                "SELECT count(*) FROM pg_indexes WHERE indexname IN ('ix_task_tags',"
+                " 'ix_task_search_trgm', 'ix_task_environment_task_id_prefix',"
+                " 'ix_task_environment_status_at')"
+                f" AND schemaname = '{ANNOTATIONS_SCHEMA}'",
+            )
+            == 4
         )
         await _in_annotations_schema(
             engine, "UPDATE task SET tags = '{a}', description = 'd' RETURNING 1"
@@ -337,6 +342,13 @@ async def test_task_annotations_migrate_over_existing_rows(migrated_database_url
             engine, step=lambda c: command.downgrade(c, PRE_ANNOTATIONS)
         )
         assert await _in_annotations_schema(engine, "SELECT count(*) FROM task") == 1
+        assert not await _in_annotations_schema(
+            engine,
+            "SELECT count(*) FROM pg_indexes WHERE indexname IN ('ix_task_tags',"
+            " 'ix_task_search_trgm', 'ix_task_environment_task_id_prefix',"
+            " 'ix_task_environment_status_at')"
+            f" AND schemaname = '{ANNOTATIONS_SCHEMA}'",
+        )
         assert not await _in_annotations_schema(
             engine,
             "SELECT count(*) FROM information_schema.columns"

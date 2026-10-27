@@ -67,10 +67,15 @@ def normalise_tags(tags: Iterable[str]) -> list[str]:
 
 def normalise_description(description: str | None) -> str | None:
     """Trimmed; an empty description is ``None`` (cleared). ``ValueError``
-    if longer than :data:`MAX_DESCRIPTION_LENGTH`."""
+    if longer than :data:`MAX_DESCRIPTION_LENGTH` or carrying a NUL (other
+    control characters, newlines included, are kept)."""
     if description is None:
         return None
     description = description.strip()
+    if "\x00" in description:
+        # Postgres ``text`` cannot hold U+0000: refuse it here, as a 422,
+        # rather than let the UPDATE fail.
+        raise ValueError("a description must not contain NUL characters")
     if len(description) > MAX_DESCRIPTION_LENGTH:
         raise ValueError(
             f"a description is at most {MAX_DESCRIPTION_LENGTH} characters"

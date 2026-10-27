@@ -98,6 +98,15 @@ async def list_tasks(
     must carry **all** of them; ``id_prefix`` matches the start of the task
     id; ``q`` is a case-insensitive substring of the name, the namespace or
     the description. Pass the same filters with each ``cursor``."""
+    for param, value in (
+        ("namespace", namespace),
+        ("name", name),
+        ("id_prefix", id_prefix),
+        ("q", q),
+    ):
+        # Postgres ``text`` cannot hold U+0000: a 400, not a database error.
+        if value is not None and "\x00" in value:
+            raise BadRequest("invalid_filter", f"{param} must not contain NUL")
     try:
         tags = annotations.normalise_tags(tag) if tag else None
     except ValueError as exc:

@@ -328,8 +328,13 @@ Replaces v1 `tasks`. Holds no parameters.
 | `tags`, `description`                                      | annotations of the completion (STA-149): `text[] NOT NULL DEFAULT '{}'` kept normalised (trimmed, deduplicated, sorted), and nullable `text`. Mutable through `PATCH /tasks/{task_id}`, outside every hash and every registration payload; tags are for discovery, never for addressing                                                                  |
 
 Indexes: `(environment_id, status, status_at)`, `(environment_id,
-task_name)`, `(claim_plan_id) WHERE status = 'RUNNING'`, and a GIN index on
-`tags` for containment (`GET /tasks?tag=`).
+task_name)`, `(claim_plan_id) WHERE status = 'RUNNING'`, and for `GET /tasks`
+(STA-149): `(environment_id, status_at, id)` (the listing's order and
+keyset), a GIN index on `tags` (containment), a multicolumn `pg_trgm` GIN
+index over `task_name`, `task_namespace` and `description` (`q`, an
+`ILIKE '%x%'` per column, 3+ characters), and `(environment_id, task_id
+text_pattern_ops)` (`id_prefix`; the unique index cannot serve `LIKE
+'abc%'` under a non-C collation).
 
 Claim arbitration locks this row with `FOR NO KEY UPDATE` (not `FOR
 UPDATE`): every insert into `task_instance`, `plan_member`, `execution` and

@@ -213,8 +213,17 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   returns one instance of the caller's environment: `id`, `task_id`,
   `deployment_id`, `settings_hash`, `instance_hash`, `body`, `created_at`,
   `expanded_at`. Migration: two columns (`tags` defaults to empty, so
-  existing tasks read as untagged) and a GIN index; additive in both
-  directions of a rolling deploy.
+  existing tasks read as untagged) and four indexes serving the listing:
+  `(environment_id, status_at, id)` for its order (the unfiltered listing
+  no longer scans the table), a GIN index on `tags`, a `pg_trgm` trigram
+  index for `q` and a `text_pattern_ops` index for `id_prefix`. **Needs the
+  `pg_trgm` extension**, which the migration creates if missing: bundled
+  with the official Postgres images and Debian's `postgresql`, and a
+  trusted extension since Postgres 13, so the database owner can create
+  it. The indexes are built with a plain `CREATE INDEX`, which blocks
+  writes to `task` for a few seconds per half a million rows. Additive in
+  both directions of a rolling deploy; downgrade leaves `pg_trgm`
+  installed.
 - **Changed: the writes that finish running work get their own rate-limit
   window, and a workspace can have its own limit** (STA-135). The
   per-workspace write limit (`LIMITS_MAX_REQUESTS_PER_MINUTE`) refused

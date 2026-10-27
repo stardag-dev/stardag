@@ -19,6 +19,8 @@ from uuid import uuid4
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import event
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from stardag_api.config import limits_settings
 from stardag_api.limits import _rate_limiter
@@ -104,6 +106,7 @@ async def test_annotations_round_trip_and_omitted_fields_are_unchanged(
         {"tags": [f"t{i}" for i in range(33)]},
         {"tags": "single"},
         {"description": "d" * 4097},
+        {"description": "before\x00after"},
         {"labels": ["x"]},
     ],
 )
@@ -263,6 +266,10 @@ async def test_task_list_filters(client: AsyncClient, h: Harness):
         {"q": ""},
         {"id_prefix": ""},
         {"name": "n" * 256},
+        {"q": "a\x00b"},
+        {"name": "a\x00"},
+        {"namespace": "\x00"},
+        {"id_prefix": "ab\x00"},
     ],
 )
 async def test_invalid_filters_are_refused(client: AsyncClient, params: dict):
@@ -337,3 +344,32 @@ async def test_an_unknown_or_foreign_instance_is_404(
         foreign = await client.get(f"/api/v2/instances/{listed['id']}")
     assert foreign.status_code == 404
     assert foreign.json()["detail"]["code"] == "unknown_instance"
+
+
+async def test_search_patterns_are_bound_whole(
+    client: AsyncClient, h: Harness, async_engine: AsyncEngine
+):
+    """``q`` and ``id_prefix`` reach Postgres as one bound pattern each
+    (``ILIKE $n`` / ``LIKE $n``), never as ``'%' || $n || '%'``: the planner
+    derives an index condition (trigram, ``text_pattern_ops``) only from a
+    pattern it can see, so the concatenated form never uses the indexes."""
+    t = item("Train")
+    await h.planned([t], [t])
+    statements: list[tuple[str, Any]] = []
+
+    def capture(conn, cursor, statement, parameters, *args):  # noqa: ARG001
+        statements.append((statement, parameters))
+
+    event.listen(async_engine.sync_engine, "before_cursor_execute", capture)
+    try:
+        page = await _get(client, "/tasks", q="rai", id_prefix=t.task_id[:8])
+    # The trigram index needs a pattern it can see; so does the btree.
+    finally:
+        event.remove(async_engine.sync_engine, "before_cursor_execute", capture)
+    assert _ids(page) == [t.task_id]
+    (listing, params) = next(
+        (s, p) for s, p in statements if "ORDER BY task.status_at DESC" in s
+    )
+    assert "||" not in listing
+    assert "%rai%" in [str(p) for p in params]
+    assert f"{t.task_id[:8]}%" in [str(p) for p in params]

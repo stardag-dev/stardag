@@ -156,8 +156,35 @@ def test_in_memory_annotate_mirrors_the_server():
         with pytest.raises(APIError) as refused:
             registry.task_annotate("aa11", tags=bad)
         assert refused.value.status_code == 422
+    for bad_description in ("d" * 4097, "before\x00after"):
+        with pytest.raises(APIError) as refused:
+            registry.task_annotate("aa11", description=bad_description)
+        assert refused.value.status_code == 422
+    assert registry.task_annotate("aa11", description="a\nb").description == "a\nb"
     with pytest.raises(APIError):
         registry.task_annotate("missing", tags=["x"])
+
+
+@pytest.mark.parametrize(
+    ("filters", "status"),
+    [
+        ({"q": ""}, 422),
+        ({"id_prefix": ""}, 422),
+        ({"q": "q" * 256}, 422),
+        ({"id_prefix": "a" * 65}, 422),
+        ({"name": "n" * 256}, 422),
+        ({"namespace": "n" * 256}, 422),
+        ({"q": "a\x00"}, 400),
+        ({"name": "\x00"}, 400),
+        ({"tags": [""]}, 400),
+    ],
+)
+def test_in_memory_task_list_refuses_what_the_route_refuses(filters, status):
+    registry = InMemoryRegistry()
+    _seed(registry)
+    with pytest.raises(APIError) as refused:
+        registry.task_list(**filters)
+    assert refused.value.status_code == status
 
 
 def test_in_memory_task_list_filters_mirror_the_server():
@@ -170,7 +197,7 @@ def test_in_memory_task_list_filters_mirror_the_server():
         return {t.task_id for t in registry.task_list(**filters).tasks}
 
     assert listed(namespace="ml") == {"aa11", "aa22", "bb33"}
-    assert listed(namespace="") == {"cc44"}
+    assert listed(namespace="") == {"cc44"}  # the root namespace, not "no filter"
     assert listed(name="Train") == {"aa11", "aa22"}
     assert listed(tags=["best"]) == {"aa11", "aa22"}
     assert listed(tags=["best", "prod"]) == {"aa11"}

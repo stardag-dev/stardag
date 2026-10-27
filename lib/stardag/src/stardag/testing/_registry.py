@@ -365,7 +365,7 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
         new_tags = normalise_tags(tags) if tags is not None else task.tags
         if description is not ...:
             text = (description or "").strip()
-            if len(text) > MAX_DESCRIPTION_LENGTH:
+            if len(text) > MAX_DESCRIPTION_LENGTH or "\x00" in text:
                 raise refuse("invalid_description", status=422)
             task.description = text or None
         task.tags = new_tags
