@@ -440,7 +440,9 @@ _inside_ the task, and use `stardag tasks retry` or a re-trigger for one that fa
 **not** recover an ordinary task failure under the default `Runner`. The failure report ends
 the execution, so Modal's retry stops at its start-of-attempt cancellation checkpoint without
 running anything, at the cost of one container start. It re-runs the task only when the
-failure was never recorded (a lost report, a crash before reporting).
+attempt recorded nothing: an exception before the failure report (in `Runner.setup()`, or a
+report that never reached the registry), or a function timeout the task did not catch.
+`stardag modal deploy` warns about a self-reporting worker with `retries` set.
 
 **When a build stalls.** Wake-ups ride on writes. A finished worker flags its build. Every
 tick drains flagged builds after each pass, and reads the frontier once more before exiting.
