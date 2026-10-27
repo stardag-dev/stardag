@@ -193,7 +193,9 @@ class Admission:
         if self._cap is None:
             return
         if throttled:
-            current = self._cap if self.limit is None else self.limit
+            # From what the pass could actually admit: the cap can shrink
+            # between passes (it follows the candidates' timeouts).
+            current = self._cap if self.limit is None else min(self.limit, self._cap)
             self.limit = max(1, current // 2)
             logger.warning(
                 f"The registry rate-limited this tick's process; admitting at "
@@ -306,6 +308,7 @@ async def _spawn(
     result: PassResult,
     lease_lost: "LeaseLost",
     out_of_time: "OutOfTime",
+    granted: "_Granted | None" = None,
 ) -> None:
     """Claim one runnable member, spawn it, record its ref.
 
@@ -368,6 +371,8 @@ async def _spawn(
             return
         raise
     result.acted = True
+    if granted is not None:
+        granted.count += 1
     handle: DetachedHandle | None = None
     error: BaseException | None = None
     for _attempt in range(max(1, config.max_attempts)):
@@ -650,37 +655,57 @@ async def act_on_frontier(
             await _exclude(registry, plan_id, member, e, summary)
             result.acted = True
     cap = spawn_cap([t for t, _ in loaded], task_executor, config)
-    limit = cap.limit if admission is None else admission.apply(cap.limit)
-    if len(loaded) > limit:
-        source = (
-            f"cap from {cap.source}"
-            if limit == cap.limit
-            else "throttled by the registry's rate limit"
-        )
+    if len(loaded) > cap.limit:
         logger.info(
             f"Tick for build {frontier.build_id}: {len(loaded)} runnable, "
-            f"spawning {limit} this pass ({source})."
+            f"spawning {cap.limit} this pass (cap from {cap.source})."
         )
-        loaded = loaded[:limit]
-    # Settled, not fail-fast: a claim taken is carried through its spawn
-    # and ref even when a sibling fails (see ``run_bounded_settled``).
-    await run_bounded_settled(
-        [
-            partial(
-                _spawn,
-                task,
-                member,
-                plan_id=plan_id,
-                registry=registry,
-                task_executor=task_executor,
-                config=config,
-                summary=summary,
-                result=result,
-                lease_lost=lost,
-                out_of_time=timed_out,
-            )
-            for task, member in loaded
-        ],
-        semaphore,
-    )
+        loaded = loaded[: cap.limit]
+    # The admission limit counts *granted* claims, not attempts: a member
+    # denied its claim (a concurrency limit, another holder) gives its place
+    # to the next one, so a throttled pass is never left idle by a denial
+    # at its head while admissible work waits behind it.
+    budget = len(loaded) if admission is None else admission.apply(cap.limit)
+    if budget < len(loaded):
+        logger.info(
+            f"Tick for build {frontier.build_id}: admitting {budget} of "
+            f"{len(loaded)} spawns this pass (throttled by the registry's "
+            "rate limit)."
+        )
+    pending = list(loaded)
+    while pending and budget > 0:
+        batch, pending = pending[:budget], pending[budget:]
+        granted = _Granted()
+        # Settled, not fail-fast: a claim taken is carried through its spawn
+        # and ref even when a sibling fails (see ``run_bounded_settled``).
+        await run_bounded_settled(
+            [
+                partial(
+                    _spawn,
+                    task,
+                    member,
+                    plan_id=plan_id,
+                    registry=registry,
+                    task_executor=task_executor,
+                    config=config,
+                    summary=summary,
+                    result=result,
+                    lease_lost=lost,
+                    out_of_time=timed_out,
+                    granted=granted,
+                )
+                for task, member in batch
+            ],
+            semaphore,
+        )
+        budget -= granted.count
+        if result.lease_lost or result.superseded or result.out_of_time:
+            break
     return result
+
+
+class _Granted:
+    """Claims granted in one batch of a pass (see ``act_on_frontier``)."""
+
+    def __init__(self) -> None:
+        self.count = 0

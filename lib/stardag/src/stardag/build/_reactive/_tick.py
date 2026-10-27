@@ -29,7 +29,7 @@ from stardag.build._reactive._rollover import RollOver, RollOverFailed
 from stardag.build._reactive._terminal import TERMINAL_BUILD_STATUSES, handle_terminal
 from stardag.build._settings import settings_applied
 from stardag.build._wakeups import drain_wake_candidates
-from stardag.exceptions import APIError
+from stardag.exceptions import APIError, RateLimitError
 from stardag.registry import BuildFrontier, RegistryABC
 
 logger = logging.getLogger(__name__)
@@ -199,15 +199,16 @@ async def _continue_in_a_successor(
 def _is_registry_outage(error: BaseException) -> bool:
     """Whether ``error`` is the registry not answering (unreachable, a 5xx,
     a rate limit outlasting the client's retries) rather than refusing."""
-    if isinstance(error, httpx.TransportError):
+    if isinstance(error, (httpx.TransportError, RateLimitError)):
         return True
-    return isinstance(error, APIError) and (
-        error.status_code == 429 or (error.status_code or 0) >= 500
-    )
+    # Not every 429: a creation quota (``QuotaExceededError``) is a refusal
+    # that lasts the day, and flagging for it would only repeat it.
+    return isinstance(error, APIError) and (error.status_code or 0) >= 500
 
 
 async def _flag_for_a_successor(build_id: UUID, *, registry: RegistryABC) -> None:
-    """A tick that died of a registry outage leaves the build flagged, so
+    """A tick that ended on a registry outage -- an exception, or its lease
+    lapsing on unanswered renewals -- leaves the build flagged, so
     it is not left unserved behind a lapsed lease until someone notices
     (STA-135). Flagged without a hand-out (``can_spawn=False``): a tick
     spawned straight away would meet the same outage, and one spawned from
@@ -304,8 +305,6 @@ async def run_tick_aio(
         summary.outcome = "error"
         summary.error_type = _bounded(type(e).__name__, _MAX_ERROR_TYPE_CHARS)
         summary.error_message = _bounded(str(e), _MAX_ERROR_MESSAGE_CHARS)
-        if _is_registry_outage(e):
-            await _flag_for_a_successor(build_id, registry=registry)
         await _report(build_id, registry, config, summary)
         raise
     await _report(build_id, registry, config, summary)
@@ -706,6 +705,7 @@ async def _tick_body(
         started_at=started_at,
     )
     acquired = False
+    outage = False
     try:
         async with lease:
             if not lease.acquired:
@@ -722,21 +722,34 @@ async def _tick_body(
                     "cannot hand off on the way out or wake other builds. "
                     "Reported once per process."
                 )
-            await driver.drive(lease)
+            try:
+                await driver.drive(lease)
+            except Exception as e:
+                outage = _is_registry_outage(e)
+                raise
     finally:
-        if acquired and summary.outcome == "lifetime_reached":
+        # A lease lost to unanswered renewals, not to another tick, is the
+        # same outage seen from the lease's side.
+        if acquired and summary.outcome == "lease_lost" and not lease.taken_over:
+            outage = True
+        if outage:
+            # No drain and no hand-off: either would spawn a tick straight
+            # into the same outage. The flag waits for a later drain.
+            await _flag_for_a_successor(build_id, registry=registry)
+        elif acquired and summary.outcome == "lifetime_reached":
             # Before the drain: the successor's hand-out stamp keeps the
             # drain from spawning a second tick for this build.
             await _continue_in_a_successor(
                 build_id, registry=registry, config=config, summary=summary
             )
         drained: list[UUID] = []
-        if acquired and summary.outcome != "not_reactive":
+        if not outage and acquired and summary.outcome != "not_reactive":
             drained = await _drain(
                 build_id, registry=registry, config=config, summary=summary
             )
         if (
-            acquired
+            not outage
+            and acquired
             and driver.cleared_a_wakeup
             and build_id not in drained
             and summary.outcome not in _NO_HANDOFF_OUTCOMES

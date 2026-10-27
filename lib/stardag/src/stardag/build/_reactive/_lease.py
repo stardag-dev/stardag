@@ -44,6 +44,10 @@ class SchedulerLease:
         self.acquired = False
         self._renewal: asyncio.Task | None = None
         self._lost = False
+        # Set when a renewal was refused because another tick holds the
+        # lease -- as opposed to the lease lapsing because renewals went
+        # unanswered (an outage).
+        self.taken_over = False
         self._expires_at: float | None = None
 
     @property
@@ -154,4 +158,5 @@ class SchedulerLease:
                     self._build_id,
                 )
                 self._lost = True
+                self.taken_over = True
                 return
