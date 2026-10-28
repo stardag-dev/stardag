@@ -153,7 +153,10 @@ describe("TaskSearch", () => {
           failNext = false;
           throw new Error("page failed");
         }
-        return { tasks: [task(T2, { task_name: "Evaluate" })], next_cursor: null };
+        return {
+          tasks: [task(T2, { task_name: "Evaluate" })],
+          next_cursor: null,
+        };
       }
       return { tasks: [task(T1)], next_cursor: "c1" };
     });
@@ -163,6 +166,31 @@ describe("TaskSearch", () => {
     fireEvent.click(screen.getByRole("button", { name: "Load more" }));
     await screen.findByText("Evaluate");
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("still pages after a pending read is cancelled by shortening the text", async () => {
+    window.history.replaceState({}, "", "/tasks?q=tra");
+    mocked.mockImplementation(async (_env, filters = {}) => {
+      if (filters.cursor) {
+        return {
+          tasks: [task(T2, { task_name: "Evaluate" })],
+          next_cursor: null,
+        };
+      }
+      if (filters.q === "trai") return new Promise(() => {}); // never settles
+      return { tasks: [task(T1)], next_cursor: "c1" };
+    });
+    render(<TaskSearch environmentId="env-1" onOpenTask={() => {}} />);
+    await screen.findByText("TrainModel");
+    const box = screen.getByRole("combobox", { name: "Search tasks" });
+    fireEvent.change(box, { target: { value: "trai" } });
+    await waitFor(() => expect(lastSearch()).toMatchObject({ q: "trai" }));
+    // Shortened under three characters while that read is still pending.
+    fireEvent.change(box, { target: { value: "tr" } });
+    await waitFor(() => expect(window.location.search).toBe("?q=tr"));
+    fireEvent.click(await screen.findByRole("button", { name: "Load more" }));
+    await screen.findByText("Evaluate");
+    expect(screen.queryByRole("button", { name: /Loading/ })).toBeNull();
   });
 
   it("does not send a short q read from the URL", async () => {
@@ -224,7 +252,10 @@ describe("TaskSearch", () => {
     window.history.replaceState({}, "", "/tasks?q=train");
     mocked.mockImplementation(async (_env, filters = {}) =>
       filters.cursor
-        ? { tasks: [task(T2, { task_name: "Evaluate", tags: [] })], next_cursor: null }
+        ? {
+            tasks: [task(T2, { task_name: "Evaluate", tags: [] })],
+            next_cursor: null,
+          }
         : { tasks: [task(T1)], next_cursor: "c1" },
     );
     render(<TaskSearch environmentId="env-1" onOpenTask={() => {}} />);

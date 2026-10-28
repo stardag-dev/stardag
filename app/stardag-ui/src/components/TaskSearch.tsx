@@ -157,6 +157,9 @@ export function TaskSearch({ environmentId, onOpenTask }: TaskSearchProps) {
       // A read for text since shortened is no longer wanted.
       if (readInFlightRef.current) {
         abortRef.current?.abort();
+        // The rows kept are still live: give them a fresh controller, so
+        // their "Load more" is not tied to the aborted read.
+        abortRef.current = new AbortController();
         readInFlightRef.current = false;
         setLoading(false);
       }
@@ -304,7 +307,12 @@ export function TaskSearch({ environmentId, onOpenTask }: TaskSearchProps) {
         openTask(option.taskId);
         break;
       case "name":
-        commit({ ...search, text: "", namespace: option.namespace, name: option.name });
+        commit({
+          ...search,
+          text: "",
+          namespace: option.namespace,
+          name: option.name,
+        });
         break;
       case "namespace":
         commit({ ...search, text: "", namespace: option.namespace });
