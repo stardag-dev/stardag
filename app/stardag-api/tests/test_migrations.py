@@ -87,6 +87,16 @@ async def _catalog(conn, schema: str) -> dict[tuple[str, str, str], str]:
     return rows
 
 
+def test_the_migration_chain_has_a_single_head():
+    """Two branches each adding a migration on the same parent leave two
+    heads, and ``alembic upgrade head`` then refuses to run: the one merged
+    second must revise the other."""
+    from alembic.script import ScriptDirectory
+
+    heads = ScriptDirectory.from_config(get_alembic_config()).get_heads()
+    assert len(heads) == 1, f"migration heads: {heads}"
+
+
 async def test_autogenerate_finds_no_difference(migrated_database_url: str):
     engine = create_async_engine(migrated_database_url)
     try:

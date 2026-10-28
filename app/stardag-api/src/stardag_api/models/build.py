@@ -106,6 +106,17 @@ class Build(EnvironmentScopedMixin, Base):
         default=list,
     )
 
+    # A plan-only build registers its roots and their static closure under
+    # its scope and runs nothing. Set at create and never changed: it is
+    # created PENDING (never RUNNING, so no frontier, claim, wake-up or
+    # stalled-builds read ever acts on it), ends REGISTERED through
+    # ``POST /builds/{id}/registered``, and refuses ``complete``,
+    # ``exit-early``, ``resume`` and the reactive marker (409
+    # ``build_plan_only``).
+    plan_only: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+
     # Bumped on build-level lifecycle events (BUILD_RESUMED, BUILD_COMPLETED,
     # BUILD_FAILED, BUILD_CANCELLED, BUILD_EXIT_EARLY; initial creation sets
     # it via DEFAULT) and, as in v1, on task activity: every status change of

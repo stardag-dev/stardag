@@ -88,7 +88,11 @@ export function BuildInfoDialog({
             <span className="font-medium text-gray-900 dark:text-gray-100">
               {build.name}
             </span>
-            <BuildStatusBadge status={build.status} isResumed={build.is_resumed} />
+            <BuildStatusBadge
+              status={build.status}
+              isResumed={build.is_resumed}
+              planOnly={build.plan_only}
+            />
           </Field>
           <Field
             label="Build id"

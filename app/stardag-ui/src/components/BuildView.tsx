@@ -190,7 +190,11 @@ function BuildViewForIdentity({
         label: build?.name ?? buildId.slice(0, 8),
         title: buildId,
         detail: build ? (
-          <BuildStatusBadge status={build.status} isResumed={build.is_resumed} />
+          <BuildStatusBadge
+            status={build.status}
+            isResumed={build.is_resumed}
+            planOnly={build.plan_only}
+          />
         ) : undefined,
       },
     ];
@@ -358,6 +362,7 @@ function BuildViewForIdentity({
                     buildId={buildId}
                     environmentId={environmentId}
                     buildStatus={build.status}
+                    planOnly={build.plan_only}
                     refreshToken={refreshToken}
                     onBuildChanged={handleBuildChanged}
                     onOpenTask={setSelectedTaskId}

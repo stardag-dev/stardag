@@ -56,6 +56,10 @@ class BuildStatus(str, enum.Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     EXIT_EARLY = "exit_early"  # All remaining tasks running in other builds
+    # A plan-only build's end: its plan is registered and sealed, and it
+    # never ran anything. Terminal, and reached only from PENDING (a
+    # plan-only build is created PENDING and is never RUNNING).
+    REGISTERED = "registered"
 
 
 class DeploymentKind(str, enum.Enum):
@@ -134,6 +138,7 @@ class EventType(str, enum.Enum):
     BUILD_FAILED = "build_failed"
     BUILD_CANCELLED = "build_cancelled"
     BUILD_EXIT_EARLY = "build_exit_early"  # All remaining tasks running elsewhere
+    BUILD_REGISTERED = "build_registered"  # a plan-only build's plan is sealed
 
     # Task events
     TASK_PENDING = "task_pending"  # a new completion was registered
@@ -166,4 +171,5 @@ BUILD_EVENT_TYPES: tuple[EventType, ...] = (
     EventType.BUILD_FAILED,
     EventType.BUILD_CANCELLED,
     EventType.BUILD_EXIT_EARLY,
+    EventType.BUILD_REGISTERED,
 )

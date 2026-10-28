@@ -1,7 +1,7 @@
 """``/api/v2`` routes of a build: create and read, the listing (paged),
 its plans (create one, list them), the frontier, skip-blocked, the
-lifecycle (complete, fail, cancel, exit-early, resume, delete), its event
-log and its execution ledger.
+lifecycle (complete, fail, cancel, exit-early, registered, resume,
+delete), its event log and its execution ledger.
 
 Thin by rule: parse, resolve the environment from the credentials, call
 one service, convert its result.
@@ -42,6 +42,7 @@ from stardag_api.services import (
     exclusion,
     executions,
     frontier,
+    plan_only_builds,
     plan_reads,
     reads,
     registration,
@@ -66,6 +67,7 @@ async def create_build(body: BuildCreate, db: Db, auth: Auth):
         root_task_ids=body.root_task_ids,
         user_id=auth.user.id if auth.user else None,
         executor_metadata=body.executor_metadata,
+        plan_only=body.plan_only,
     )
 
 
@@ -133,6 +135,14 @@ async def cancel_build(build_id: UUID, db: Db, auth: Auth):
 @router.post("/builds/{build_id}/exit-early", response_model=BuildResponse)
 async def exit_early(build_id: UUID, db: Db, auth: Auth):
     return await builds.exit_early(db, auth.environment_id, build_id)
+
+
+@router.post("/builds/{build_id}/registered", response_model=BuildResponse)
+async def register_build(build_id: UUID, db: Db, auth: Auth):
+    """End a plan-only build REGISTERED: its plan is sealed, nothing ran."""
+    return await plan_only_builds.register_build(
+        db, auth.environment_id, build_id, triggered_by=_triggered_by(auth)
+    )
 
 
 @router.post("/builds/{build_id}/resume", response_model=ResumeResponse)

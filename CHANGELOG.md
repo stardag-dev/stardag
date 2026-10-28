@@ -219,6 +219,25 @@ annotate <id>`, where `--tag` (or `--add-tag`) and `--remove-tag` edit
   against an older registry, annotating fails with a clear error, and a
   filtered list is refused rather than answered unfiltered (an unfiltered
   list works as before).
+- **Added: `sd.register(tasks)` and `sd.build(..., plan_only=True)` register
+  tasks without running them** (STA-150). The roots and their whole static
+  closure, complete tasks expanded too, are registered under the build's
+  scope as a build's static phase registers them, and nothing is claimed or
+  executed. A root given as a reference, or holding one, is hydrated first,
+  as a build does. `sd.register` returns one `TaskRef` per root, pinned to
+  the registered instance, and prints the import line and
+  `Cls.ref("<task_id>", instance_id="<instance_id>")` for it (the same line
+  `stardag tasks ref` prints). `tags=` and `task_description=` annotate
+  every root. `app_name=` registers under a deployed app's current
+  deployment. `sd.build(..., plan_only=True)` returns a summary with the new
+  `BuildExitStatus.REGISTERED`, which reads `Registered: N`. A plan-only
+  build never carries on without the registry (`on_registry_failure` does
+  not apply), and an older registry that does not know plan-only builds is
+  reported as `PlanOnlyUnsupportedError` rather than worked around.
+  Registry client: `build_create(plan_only=)` (sent only when set) and
+  `build_registered()`; `BuildInfo.plan_only`. **Needs a registry with
+  plan-only builds** (this release's server); every other feature is
+  unaffected against an older one.
 
 ### Server
 
@@ -250,6 +269,22 @@ annotate <id>`, where `--tag` (or `--add-tag`) and `--remove-tag` edit
   continue while they build, and a failed run can be re-run. Additive in
   both directions of a rolling deploy; downgrade leaves `pg_trgm`
   installed.
+- **Added: plan-only builds** (STA-150). `POST /builds` takes `plan_only`;
+  such a build is created `pending` and is never `running`, so the frontier,
+  claiming starts, wake-up flags, `wake-candidates` and `stalled-builds`,
+  which all act on running builds only, never act on it. `POST
+/builds/{id}/registered` ends it in the new terminal status `registered`
+  (event `build_registered`) once its active plan is sealed, running the
+  closure step first. `resume`, the reactive marker, `complete` and
+  `exit-early` refuse a plan-only build (409 `build_plan_only`); `fail` and
+  `cancel` close one that went wrong, and `skip-blocked` is a no-op on one. `BuildResponse.plan_only`. Migration:
+  `build.plan_only` (default false), the two enum labels, and the event
+  table's build-level CHECK recreated to compare `event_type::text` (an
+  enum label cannot be used in the transaction that adds it), added `NOT
+  VALID` and validated in a separate step so event appends are not blocked
+  while it scans. **Rolling back** the image once a `registered` build
+  exists requires the downgrade first, which rewrites those builds and
+  events to `cancelled`: an older server cannot read the new labels.
 
 ### UI
 
@@ -275,6 +310,9 @@ annotate <id>`, where `--tag` (or `--add-tag`) and `--remove-tag` edit
   copies `MyTask.ref("<task_id>", instance_id="<instance_id>")` for a
   chosen instance, with an info link to the docs. No import line: a task's
   namespace is not an import path.
+- Plan-only builds: a `registered` badge, and a plan-only build still
+  `pending` (its driver died before it finished registering) is labelled
+  "registration incomplete" (STA-150).
 
 ## [0.29.0] — 2026-10-28
 
