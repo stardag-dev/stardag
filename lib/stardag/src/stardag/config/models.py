@@ -201,6 +201,10 @@ class StardagSettings(BaseSettings):
     # Force no registry (offline/local mode)
     no_registry: bool = False
 
+    # Local cache of immutable instance bodies (STARDAG_REGISTRY_CACHE=0 to
+    # turn it off)
+    registry_cache: bool = True
+
     model_config = SettingsConfigDict(
         env_prefix="STARDAG_",
         extra="ignore",
@@ -227,3 +231,7 @@ class StardagConfig(BaseModel):
     registry: RegistryConfig | None = None
     target: TargetConfig = Field(default_factory=TargetConfig)
     context: ConfigContext = Field(default_factory=ConfigContext)
+    #: Whether instance bodies read from the registry are cached on disk
+    #: (``~/.stardag/registry-cache/``) and served from there by id. Set
+    #: ``STARDAG_REGISTRY_CACHE=0`` to turn it off.
+    registry_cache: bool = True

@@ -142,7 +142,9 @@ sd.namespace(ns, scope=__name__)   # Set task namespace
 sd.auto_namespace(scope=__name__)  # Auto namespace from module
 sd.flatten_task_struct()           # Flatten nested task structures
 sd.get_default_relpath(task)       # Construct default task output relpath
-sd.task_from_registry_data(data)   # Rebuild a task from a stored instance body (pickle-free)
+sd.task_from_body(body, expected_task_id=None)  # Rebuild a task from a stored instance body (compat mode, pickle-free)
+sd.task_from_registry_data(data)   # Same function, engine-side name
+Task.from_registry(task_id, instance_id=None)  # Load from the registry; pinned instances are cached on disk
 sd.TaskRehydrationError            # Raised when reconstruction fails
 
 # Cooperative cancellation (inside run())

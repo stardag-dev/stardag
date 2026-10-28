@@ -8,7 +8,7 @@ import pytest
 
 import stardag as sd
 from stardag import TaskRehydrationError, task_from_registry_data
-from stardag.polymorphic import NAME_KEY, NAMESPACE_KEY
+from stardag.polymorphic import NAME_KEY, NAMESPACE_KEY, PolymorphicRoot
 from stardag.target import InMemoryFileTarget
 
 sd.auto_namespace(__name__)
@@ -33,6 +33,23 @@ class RehydrateClassTask(sd.Task[int]):
 
     def run(self):
         self._save(self.factor * sum(self.values.load()))
+
+
+class RehydrateOptimizer(PolymorphicRoot):
+    """A non-task polymorphic family: its classes register in its own
+    registry, not the task registry."""
+
+
+class RehydrateAdam(RehydrateOptimizer):
+    lr: float = 0.1
+
+
+class RehydrateWithOptimizer(sd.Task[int]):
+    optimizer: sd.SubClass[RehydrateOptimizer]
+    epochs: int
+
+    def run(self):
+        self._save(self.epochs)
 
 
 class RehydrateDynamicTask(sd.Task[int]):
@@ -165,3 +182,98 @@ class TestErrors:
 
                 def run(self):
                     self._save(1)
+
+
+class TestTaskFromBody:
+    """``sd.task_from_body``: the public, documented entry point for
+    validating a stored instance body (``task_from_registry_data`` stays as
+    the same function under its engine-side name)."""
+
+    def test_round_trips_an_instance_body_in_compat_mode(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        caplog: pytest.LogCaptureFixture,
+    ):
+        root = RehydrateClassTask(factor=2, values=rehydrate_range(limit=3))
+        body = root.instance_body()
+        body["no_longer_declared"] = "dropped"  # compat: unknown key dropped
+
+        back = sd.task_from_body(body, expected_task_id=root.id)
+
+        assert "no_longer_declared" in caplog.text
+        assert isinstance(back, RehydrateClassTask)
+        assert back == root
+
+    def test_identity_check(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        body = rehydrate_range(limit=3).instance_body()
+        with pytest.raises(TaskRehydrationError, match="does not match"):
+            sd.task_from_body(body, expected_task_id=rehydrate_range(limit=4).id)
+
+    def test_unregistered_root_class_names_namespace_and_name(self):
+        with pytest.raises(TaskRehydrationError) as info:
+            sd.task_from_body({NAMESPACE_KEY: "models", NAME_KEY: "TrainedModel"})
+        message = str(info.value)
+        assert "namespace='models'" in message and "name='TrainedModel'" in message
+        assert "must be imported" in message
+
+    def test_unregistered_nested_class_names_namespace_and_name(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A nested task class whose module is not imported is named, with
+        its namespace and what to do, in plain terms: no internal names
+        (``task_data``) and no repr quoting."""
+        body = RehydrateClassTask(
+            factor=1, values=rehydrate_range(limit=1)
+        ).instance_body()
+        body["values"][NAMESPACE_KEY] = "datasets"
+        body["values"][NAME_KEY] = "Dataset"
+        with pytest.raises(TaskRehydrationError) as info:
+            sd.task_from_body(body)
+        message = str(info.value)
+        assert message.startswith(
+            f"Cannot rehydrate {__name__}.RehydrateClassTask: no task class is "
+            "registered for Dataset (namespace datasets)"
+        )
+        assert "Import the module that defines" in message
+        assert "task_data" not in message and "'" not in message
+
+    def test_a_non_task_polymorphic_value_is_not_reported_missing(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A ``SubClass`` of another family is not in the task registry; it
+        must not be blamed when an unrelated field is what fails."""
+        task = RehydrateWithOptimizer(optimizer=RehydrateAdam(), epochs=3)
+        body = task.instance_body()
+        assert sd.task_from_body(body, expected_task_id=task.id) == task
+        body["epochs"] = "not a number"
+        with pytest.raises(TaskRehydrationError) as info:
+            sd.task_from_body(body)
+        message = str(info.value)
+        assert "does not validate" in message and "epochs" in message
+        assert "RehydrateAdam" not in message
+
+    def test_the_id_mismatch_names_the_common_causes(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        body = rehydrate_range(limit=3).instance_body()
+        with pytest.raises(TaskRehydrationError) as info:
+            sd.task_from_body(body, expected_task_id=rehydrate_range(limit=4).id)
+        message = str(info.value)
+        assert "compat_default" in message
+        assert "removed or renamed" in message
+        assert "https://stardag-dev.github.io/stardag/how-to/evolve-dags/" in message
+
+    def test_the_expected_id_is_compared_as_a_uuid(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        task = rehydrate_range(limit=3)
+        back = sd.task_from_body(
+            task.instance_body(), expected_task_id=str(task.id).upper()
+        )
+        assert back.id == task.id
+
+    def test_refuses_a_partial_dump(self):
+        with pytest.raises(TaskRehydrationError, match="discriminator keys"):
+            sd.task_from_body({"limit": 3})
