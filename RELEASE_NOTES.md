@@ -54,8 +54,10 @@ instance_hash=...)` loads the real task eagerly, offline, with no registry
   lookup miss, so no module has to import every task class by hand. A task's
   namespace is never read as an import path.
 - **Register without running:** `sd.register(tasks, tags=..., task_description=...)`
-  (or `sd.build(..., plan_only=True)`) registers tasks and their static
-  dependencies without executing anything, and returns pinned references.
+  registers tasks and their static dependencies without executing anything,
+  and returns one pinned reference per root. `sd.build(..., plan_only=True)`
+  does the same registration but returns the build's `BuildSummary`, with
+  status `REGISTERED`.
 - **Find and document tasks:** tags and a description on each task
   (`stardag tasks annotate`, editable in the UI), `stardag tasks list
 --tag/--name/--search`, and search on the UI's `/tasks` page.
