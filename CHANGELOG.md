@@ -105,6 +105,19 @@ annotate <id>`, where `--tag` (or `--add-tag`) and `--remove-tag` edit
   highlights the matched characters, opens their ancestors and steps
   through the matches best first. Keyboard: arrows move and fold, `c`
   copies the focused value and `p` its path.
+- **Added: task search and annotation editing** (STA-152). `/tasks` is now
+  a search over `GET /tasks`: free text, a task-id prefix (anything that
+  looks like the start of an id, or `id:<prefix>`), exact name and
+  namespace, tags (all of them; `#tag` in the box, or click a tag) and
+  status, with "Load more" paging. The search lives in the URL, so it can
+  be shared and Back walks through it. Autocomplete suggests names,
+  namespaces and tags already seen in the environment, and recent searches;
+  there is no server suggestion route. The task page shows and edits the
+  task's tags and description in place (validated as the server normalises
+  them, rolled back if a save is refused), and a "Reference in code" box
+  copies `MyTask.ref("<task_id>", instance_id="<instance_id>")` for a
+  chosen instance, with an info link to the docs. No import line: a task's
+  namespace is not an import path.
 
 ## [0.29.0] — 2026-10-28
 
@@ -403,19 +416,6 @@ deploy` now **warns** about a worker with `retries` above zero (an `int`
   an in-process execution is shown as running in its driver's own process,
   and the "no executor recorded" reason now says it comes from an older
   SDK.
-- **Added: task search and annotation editing** (STA-152). `/tasks` is now
-  a search over `GET /tasks`: free text, a task-id prefix (anything that
-  looks like the start of an id, or `id:<prefix>`), exact name and
-  namespace, tags (all of them; `#tag` in the box, or click a tag) and
-  status, with "Load more" paging. The search lives in the URL, so it can
-  be shared and Back walks through it. Autocomplete suggests names,
-  namespaces and tags already seen in the environment, and recent searches;
-  there is no server suggestion route. The task page shows and edits the
-  task's tags and description in place (validated as the server normalises
-  them, rolled back if a save is refused), and a "Reference in code" box
-  copies `MyTask.ref("<task_id>", instance_id="<instance_id>")` for a
-  chosen instance, with an info link to the docs. No import line: a task's
-  namespace is not an import path.
 
 ## [0.28.0] — 2026-10-08
 
