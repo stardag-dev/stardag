@@ -625,6 +625,9 @@ class APIRegistry(APIRegistryLedger, APIRegistryReads, RegistryABC):
                 f"/concurrency-limits/{key}",
                 lambda _payload: None,
                 operation=f"Delete concurrency limit {key!r}",
+                # Re-sent after a lost answer, a delete that landed finds
+                # no limit: that is the delete having happened.
+                gone_code="unknown_limit",
             )
         )
 

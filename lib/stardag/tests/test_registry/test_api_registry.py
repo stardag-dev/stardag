@@ -881,6 +881,153 @@ class TestLostExchange:
         assert len(script.requests) == 2
 
 
+def _unknown_limit() -> httpx.Response:
+    return httpx.Response(
+        404,
+        json={"detail": {"code": "unknown_limit", "message": "no limit 'k'"}},
+    )
+
+
+class TestAlreadyGoneAfterLostAnswer:
+    """A delete re-sent after its answer was lost finds nothing to delete:
+    the first delivery did it (STA-174). Read per route, never globally."""
+
+    @pytest.fixture(autouse=True)
+    def _no_backoff(self, monkeypatch):
+        monkeypatch.setattr(_api_http, "_TRANSIENT_BACKOFF_SECONDS", 0.0)
+
+    @pytest.mark.parametrize(
+        "lost",
+        [
+            pytest.param(_body_stalls, id="body-stalls"),
+            pytest.param(lambda: httpx.ReadTimeout("no headers"), id="no-headers"),
+            pytest.param(lambda: httpx.Response(504), id="gateway-504"),
+        ],
+    )
+    def test_a_retried_delete_that_finds_nothing_succeeded(self, lost, caplog):
+        script = _Script(lost(), _unknown_limit())
+        with caplog.at_level("WARNING", logger=_api_http.__name__):
+            assert _registry(script).concurrency_limit_delete("k") is None
+        assert [r.method for r in script.requests] == ["DELETE", "DELETE"]
+        assert "already done" in caplog.records[-1].getMessage()
+
+    def test_a_first_attempt_404_still_raises(self):
+        script = _Script(_unknown_limit())
+        with pytest.raises(NotFoundError) as excinfo:
+            _registry(script).concurrency_limit_delete("k")
+        assert excinfo.value.code == "unknown_limit"
+        assert len(script.requests) == 1
+
+    def test_a_404_after_only_a_rate_limit_still_raises(self, monkeypatch):
+        """A rate-limited attempt was never delivered, so it cannot be the
+        one that deleted."""
+        monkeypatch.setattr(_api_http.time, "sleep", lambda _: None)
+        script = _Script(_rate_limited(retry_after="0"), _unknown_limit())
+        with pytest.raises(NotFoundError):
+            _registry(script).concurrency_limit_delete("k")
+        assert len(script.requests) == 2
+
+    @pytest.mark.parametrize(
+        "undelivered",
+        [
+            pytest.param(lambda: httpx.ConnectError("refused"), id="connect-error"),
+            pytest.param(lambda: httpx.ConnectTimeout("connect"), id="connect-timeout"),
+            pytest.param(lambda: httpx.PoolTimeout("pool"), id="pool-timeout"),
+        ],
+    )
+    def test_a_404_after_only_undelivered_attempts_still_raises(self, undelivered):
+        """Copilot on #528: an attempt that never connected cannot be the
+        one that deleted, so the 404 is the first delivery's answer."""
+        script = _Script(undelivered(), _unknown_limit())
+        with pytest.raises(NotFoundError):
+            _registry(script).concurrency_limit_delete("k")
+        assert len(script.requests) == 2
+
+    def test_a_lost_answer_then_a_failed_connect_then_404_succeeded(self):
+        script = _Script(
+            _body_stalls(), httpx.ConnectError("refused"), _unknown_limit()
+        )
+        _registry(script).concurrency_limit_delete("k")
+        assert len(script.requests) == 3
+
+    def test_a_lost_answer_then_a_rate_limit_then_404_succeeded(self, monkeypatch):
+        monkeypatch.setattr(_api_http.time, "sleep", lambda _: None)
+        script = _Script(_body_cut(), _rate_limited(retry_after="0"), _unknown_limit())
+        _registry(script).concurrency_limit_delete("k")
+        assert len(script.requests) == 3
+
+    def test_a_different_404_code_after_a_lost_answer_still_raises(self):
+        """Only the route's own "gone" answer means done: an unknown
+        environment, or a route the server does not have, is not."""
+        script = _Script(
+            _body_stalls(),
+            httpx.Response(404, json={"detail": {"code": "unknown_environment"}}),
+        )
+        with pytest.raises(NotFoundError):
+            _registry(script).concurrency_limit_delete("k")
+
+    def test_a_read_404_after_a_lost_answer_still_raises(self):
+        script = _Script(
+            _body_stalls(),
+            httpx.Response(404, json={"detail": {"code": "unknown_build"}}),
+        )
+        with pytest.raises(NotFoundError):
+            _registry(script).build_get(uuid4())
+        assert len(script.requests) == 2
+
+    def test_other_writes_keep_raising_a_404_after_a_lost_answer(self):
+        """The lease release answers ``held``, and its 404 means an unknown
+        build -- never something the first delivery did."""
+        script = _Script(
+            _body_stalls(),
+            httpx.Response(404, json={"detail": {"code": "unknown_build"}}),
+        )
+        with pytest.raises(NotFoundError):
+            _registry(script).scheduler_lease_release(uuid4(), owner_id="o")
+        assert len(script.requests) == 2
+
+    async def test_the_async_path_raises_after_only_a_failed_connect(self):
+        import asyncio
+
+        from stardag.registry._api_http import Request
+
+        script = _Script(httpx.ConnectError("refused"), _unknown_limit())
+        registry = APIRegistry(api_url="https://registry.test", api_key="sk-test")
+        registry._async_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(script)
+        )
+        registry._async_client_loop = asyncio.get_running_loop()
+        request = Request(
+            "DELETE",
+            "/concurrency-limits/k",
+            lambda _p: None,
+            gone_code="unknown_limit",
+        )
+        with pytest.raises(NotFoundError):
+            await registry.acall(request)
+        assert len(script.requests) == 2
+
+    async def test_the_async_path_reads_it_the_same(self):
+        import asyncio
+
+        from stardag.registry._api_http import Request
+
+        script = _Script(_body_cut(), _unknown_limit())
+        registry = APIRegistry(api_url="https://registry.test", api_key="sk-test")
+        registry._async_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(script)
+        )
+        registry._async_client_loop = asyncio.get_running_loop()
+        request = Request(
+            "DELETE",
+            "/concurrency-limits/k",
+            lambda _p: "done",
+            gone_code="unknown_limit",
+        )
+        assert await registry.acall(request) == "done"
+        assert len(script.requests) == 2
+
+
 def _rate_limited(retry_after: str | None = "7", code: str = "rate_limited"):
     """The v2 write guard's refusal (``routes/registry_v2/guard.py``)."""
     headers = {} if retry_after is None else {"Retry-After": retry_after}
