@@ -212,6 +212,24 @@ class TestCacheEntries:
         assert _instance_cache.clear("p") == 0
         assert _instance_cache.clear() == 1
 
+    def test_clear_reports_entries_it_could_not_delete(self, monkeypatch):
+        for partition in ("p", "p"):
+            _instance_cache.write(partition, self._info())
+        real_unlink = Path.unlink
+        calls = {"n": 0}
+
+        def flaky_unlink(self, *args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise PermissionError("read-only")
+            return real_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", flaky_unlink)
+        with pytest.raises(_instance_cache.CacheClearError) as excinfo:
+            _instance_cache.clear("p")
+        assert excinfo.value.removed == 1
+        assert len(excinfo.value.failed) == 1
+
 
 class TestPartition:
     def test_api_key_registries_partition_by_key(self):
