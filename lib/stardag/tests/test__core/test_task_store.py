@@ -453,3 +453,11 @@ def test_an_unpinned_ref_with_several_stored_bodies_reads_the_registry(
     sd.write_to_store([plain, annotated])
     with pytest.raises(sd.TaskRefHydrationError, match="no registry"):
         Dataset.ref(plain.id).hydrate()
+
+
+def test_a_corrupt_stored_body_fails_the_ref_loudly(configured_store):
+    model = TrainedModel(data=Dataset(size=3))
+    (stored,) = sd.write_to_store(model)
+    stored.path.write_text("{not json")
+    with pytest.raises(sd.TaskRefHydrationError, match="not valid JSON"):
+        TrainedModel.ref(model.id).hydrate()

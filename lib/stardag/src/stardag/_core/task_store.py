@@ -54,6 +54,10 @@ class TaskStoreNotConfiguredError(TaskStoreError):
     """No task store directory was given or configured."""
 
 
+class AmbiguousStoredTaskError(TaskStoreError):
+    """The store holds several bodies of one task and none was picked."""
+
+
 # -----------------------------------------------------------------------------
 # Locating the store
 # -----------------------------------------------------------------------------
@@ -179,8 +183,8 @@ class TaskStore:
         hash, or the only one stored; ``None`` when none matches.
 
         Raises:
-            TaskStoreError: Several bodies are stored for the task and
-                neither an instance id nor a hash picks one.
+            AmbiguousStoredTaskError: Several bodies are stored for the task
+                and neither an instance id nor a hash picks one.
         """
         index = self.index()
         candidates = sorted(p for (tid, _), p in index.items() if tid == task_id)
@@ -199,7 +203,7 @@ class TaskStore:
                 )
                 for e in envelopes
             )
-            raise TaskStoreError(
+            raise AmbiguousStoredTaskError(
                 f"The task store at {self.root} holds {len(envelopes)} bodies of "
                 f"task {task_id}: {listed}. Pass instance_id= or instance_hash= "
                 "to pick one."
@@ -371,10 +375,8 @@ def find_in_store(
             str(task_id),
             instance_id=None if instance_id is None else str(instance_id),
         )
-    except TaskStoreError:
-        if instance_id is None:
-            return None  # several bodies stored: not "exactly one"
-        raise
+    except AmbiguousStoredTaskError:
+        return None  # several bodies stored: not "exactly one"
     if envelope is None:
         return None
     return load_envelope(cls, envelope, task_store)

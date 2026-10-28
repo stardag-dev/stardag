@@ -209,10 +209,9 @@ def write_to_store(
     source = {"kind": "local", **_stamp()}
     results: list[StoredTask] = []
     for task in roots:
-        _refuse_aliased(task.instance_body(), str(task.id))
-        path, root_hash, written = _write_tree(
-            task_store, task, task.instance_body(), source, source
-        )
+        body = task.instance_body()
+        _refuse_aliased(body, str(task.id))
+        path, root_hash, written = _write_tree(task_store, task, body, source, source)
         results.append(
             StoredTask(
                 task_class=type(task),
