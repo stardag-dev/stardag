@@ -9,6 +9,8 @@ from typing import assert_type
 
 import stardag as sd
 
+sd.auto_namespace(__name__)
+
 ID = "6f1c2c62-1f5c-5a0e-9b8e-3a4f0e1d2c3b"
 
 
