@@ -150,8 +150,9 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `stardag tasks ref <task-id> --write [--store DIR]` copies a registry
   instance after checking it rehydrates to its task id, and
   `sd.write_to_store(tasks)` writes from task objects with no registry;
-  both print the reader line, pinned by instance id (unverified metadata)
-  and instance hash (verified). The format is normalized and
+  both print the reader line, pinned by instance hash (verified; the
+  registry instance id stays in the file's `sources` as unverified
+  metadata, and `instance_id=` still selects by it). The format is normalized and
   content-addressed: one file per distinct instance body at
   `<namespace>.<Name>/<task_id>/<instance_hash>.json`, every nested task a
   pointer (`{"__stardag_task": {"task", "task_id", "instance_hash"}}`) to

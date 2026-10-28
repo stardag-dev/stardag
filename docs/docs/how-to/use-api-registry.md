@@ -147,14 +147,16 @@ sd.build(task, registry=registry)
 Every task the registry has seen is stored as one or more **instances**:
 the full body of the task as it was constructed, one per deployment and
 build settings it ran under. `from_registry` rebuilds the task object from
-one of them:
+one of them. (To keep a stable handle on a task in code, see
+[Stable References to Tasks](../concepts/task-references.md).)
 
 ```python
 import stardag as sd
 
 from my_project.models import TrainedModel  # the class must be imported
 
-# The newest instance of the task:
+# Unpinned: for a completed task, the instance its completing execution
+# ran; otherwise the newest instance:
 model = TrainedModel.from_registry("2f4c...")
 
 # A specific instance, pinned:

@@ -717,10 +717,12 @@ deployments`.
   `--write`: then the instance body is checked to rehydrate to its task
   id, written with every nested task's body into the committed task store,
   and the printed line is the eager `Task.from_store(...)`, pinned by
-  instance id and instance hash. The store is `--store DIR` (printed as
+  instance hash (the stored file's verified address). The store is `--store DIR` (printed as
   given; a relative one resolves against the package root) or the
   `[tool.stardag] task_store` of the `pyproject.toml` found from the
   working directory: run it in the package you write to. See
+  [Stable References to Tasks](../concepts/task-references.md) for the
+  workflow, and
   [Reference Existing Tasks](../how-to/reference-existing-tasks.md) and
   [Pin Tasks in a Committed Store](../how-to/committed-task-store.md).
 - `tasks retry` — reset a failed (or otherwise ended) task to `PENDING`

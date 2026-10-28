@@ -2,7 +2,9 @@
 
 Point code at a task the registry already holds — a trained model, a
 curated dataset — by a stable, typed handle, instead of re-composing it
-from code that keeps evolving.
+from code that keeps evolving. For the overview — which handle to use, and
+the workflow from registering a task to pinning and testing it — see
+[Stable References to Tasks](../concepts/task-references.md).
 
 !!! tip "What you need to know"
 

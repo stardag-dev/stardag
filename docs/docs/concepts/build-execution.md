@@ -383,7 +383,8 @@ evaluation = Evaluate(model=model_ref)  # same task id as with the real model
 
 It returns one `TaskRef` per root, pinned to the instance it registered, so
 it can be passed wherever the task goes (see
-[Reference existing tasks](../how-to/reference-existing-tasks.md)); a root given as a reference is hydrated
+[Stable References to Tasks](task-references.md) for the workflow around
+it); a root given as a reference is hydrated
 first. `tags=` and `task_description=` annotate every root. A class defined
 in the script being run (`__main__`) gets a note instead of an import line,
 since other code cannot import it from there. `sd.build(tasks, plan_only=True)` does the same and

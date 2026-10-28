@@ -19,6 +19,7 @@ Stardag is built around a few key abstractions:
 | **[AsyncIO](asyncio.md)**                            | How to use and implement asyncio tasks and targets execution                                            |
 | **[Build & Execution](build-execution.md)**          | How DAGs are executed, and how builds share tasks and structure                                         |
 | **[Orchestration on Modal](modal-orchestration.md)** | Deployed apps, reactive scheduling, deployments and code versions                                       |
+| **[Stable References to Tasks](task-references.md)** | Pinning key tasks in code: the committed task store, registry references, and finding tasks again       |
 
 ## The Big Picture
 
