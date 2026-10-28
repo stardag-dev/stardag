@@ -118,6 +118,18 @@ annotate <id>`, where `--tag` (or `--add-tag`) and `--remove-tag` edit
   copies `MyTask.ref("<task_id>", instance_id="<instance_id>")` for a
   chosen instance, with an info link to the docs. No import line: a task's
   namespace is not an import path.
+- **Added: compare two task instances** (STA-170). "Compare (with other
+  instance)" in a task's Task Parameters box opens `/task-diff` with that
+  instance on the left; the right side is picked with the `/tasks` search,
+  pre-filtered to the same namespace and name (removable, with a hint), or
+  is another instance of the same task. Both sides and the search live in
+  the URL. The diff is structural: added, removed and changed values
+  (old and new both shown) in red and green, nested tasks labelled
+  `namespace.Name`, identical subtrees collapsed and differing ones open,
+  a `+a −r ~c` summary on collapsed nodes, "only differences", and the
+  parameter tree's fuzzy search, keyboard model and copy actions across
+  both sides. Arrays are aligned on their equal elements before pairing
+  by position, so an inserted element reads as one addition.
 
 ## [0.29.0] — 2026-10-28
 

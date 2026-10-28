@@ -31,6 +31,7 @@ import {
 import { GroupAfterControl } from "./GroupAfterControl";
 import { MemberTable } from "./MemberTable";
 import { TaskDetail } from "./TaskDetail";
+import type { CompareTarget } from "../utils/taskDiff";
 import { TaskFilters } from "./TaskFilters";
 import { ToolbarButton } from "./ui/ToolbarButton";
 import { Tooltip } from "./ui/Tooltip";
@@ -41,6 +42,8 @@ interface BuildViewProps {
   onOpenTask?: (taskId: string) => void;
   // Jump to another build: a claim holder, an execution's build.
   onOpenBuild?: (buildId: string) => void;
+  // Open `/task-diff` with a task's instance on the left.
+  onCompareTask?: (target: CompareTarget) => void;
 }
 
 const PAGE_SIZE = 20;
@@ -71,6 +74,7 @@ function BuildViewForIdentity({
   onBack,
   onOpenTask,
   onOpenBuild,
+  onCompareTask,
   environmentId,
 }: BuildViewProps & { environmentId: string | undefined }) {
   const { setItems: setBreadcrumb } = useBreadcrumb();
@@ -497,6 +501,7 @@ function BuildViewForIdentity({
                       onChanged={refreshNow}
                       refreshToken={refreshToken}
                       onOpenBuild={onOpenBuild}
+                      onCompare={onCompareTask}
                     />
                   </div>
                 </div>

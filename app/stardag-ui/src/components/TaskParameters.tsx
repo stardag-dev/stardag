@@ -16,6 +16,9 @@ interface TaskParametersProps {
   deploymentsById: Map<string, Deployment>;
   // The instance the viewed plan holds; the newest when absent.
   planInstanceId?: string | null;
+  // Compare the shown instance with another (`/task-diff`). The header
+  // action is drawn only when given.
+  onCompare?: (instanceId: string) => void;
 }
 
 /**
@@ -35,6 +38,7 @@ export function TaskParameters({
   instances,
   deploymentsById,
   planInstanceId,
+  onCompare,
 }: TaskParametersProps) {
   const [infoOpen, setInfoOpen] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
@@ -83,6 +87,18 @@ export function TaskParameters({
           <span className="rounded bg-gray-200 px-2 py-0.5 text-xs text-gray-500 dark:bg-gray-700 dark:text-gray-400">
             json
           </span>
+          {current && onCompare && (
+            <Tooltip content="Compare (with other instance): diff these parameters against another task of this type, or another instance of this one">
+              <button
+                type="button"
+                onClick={() => onCompare(current.id)}
+                aria-label="Compare (with other instance)"
+                className="rounded p-1 text-gray-400 hover:bg-gray-200 hover:text-gray-600 dark:hover:bg-gray-600 dark:hover:text-gray-300"
+              >
+                <CompareIcon />
+              </button>
+            </Tooltip>
+          )}
           {current && (
             <ExpandButton
               onClick={() => setFullscreen(true)}
@@ -374,6 +390,26 @@ function DifferingNote({ differing }: { differing: string[] }) {
         ? "Instances of one task differ only in non-significant parameters, or in how a nested task was built."
         : "Same parameters throughout: the instances differ only in scope."}
     </p>
+  );
+}
+
+// Two opposed arrows: compare one thing against another.
+function CompareIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      viewBox="0 0 24 24"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M8 7h12m0 0l-4-4m4 4l-4 4M16 17H4m0 0l4 4m-4-4l4-4"
+      />
+    </svg>
   );
 }
 

@@ -1,9 +1,18 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { fetchTasks, type TaskFilters } from "../api/registry";
-import { useTaskSearchUrl } from "../hooks/useTaskSearchUrl";
+import { useTaskSearchUrl, type TaskSearchUrl } from "../hooks/useTaskSearchUrl";
 import type { TaskStatus, TaskSummary } from "../types/task";
 import { checkTag } from "../utils/annotations";
 import { shortTaskId } from "../utils/ids";
+import { qualifiedName } from "../utils/instances";
 import { formatAbsoluteTime, formatRelativeTime } from "../utils/time";
 import {
   classifyQuery,
@@ -62,6 +71,22 @@ interface TaskSearchProps {
   onOpenTask: (taskId: string) => void;
 }
 
+interface TaskSearchPanelProps extends TaskSearchProps {
+  /** The search and its URL binding (`useTaskSearchUrl`). */
+  url: TaskSearchUrl;
+  /** Drawn under the filter chips: a page's note on its filters. */
+  notice?: ReactNode;
+  /** A row to mark as selected (the one a page has picked). */
+  selectedTaskId?: string | null;
+  /** What opening a row does, for its accessible name: "Open", "Compare with". */
+  openVerb?: string;
+  /**
+   * Record searches as "Recent" suggestions. On for `/tasks`; off where
+   * the search is a picker pre-filled by the page.
+   */
+  rememberSearches?: boolean;
+}
+
 type Option =
   | { kind: "add-tag"; tag: string; label: string }
   | { kind: "open-id"; taskId: string; label: string }
@@ -92,7 +117,27 @@ function optionText(option: Option): { prefix: string; text: string } {
  * already seen, and recent searches): the registry has no suggestion route.
  */
 export function TaskSearch({ environmentId, onOpenTask }: TaskSearchProps) {
-  const { search, setSearch, navigationKey } = useTaskSearchUrl();
+  const url = useTaskSearchUrl();
+  return (
+    <TaskSearchPanel url={url} environmentId={environmentId} onOpenTask={onOpenTask} />
+  );
+}
+
+/**
+ * The search bar, filter chips and results table of `/tasks`, over a
+ * search the caller binds to the URL: `/tasks` itself, and the right-hand
+ * picker of `/task-diff`, which pre-filters it to one task type.
+ */
+export function TaskSearchPanel({
+  url,
+  environmentId,
+  onOpenTask,
+  notice,
+  selectedTaskId = null,
+  openVerb = "Open",
+  rememberSearches = true,
+}: TaskSearchPanelProps) {
+  const { search, setSearch, navigationKey } = url;
   const [text, setText] = useState(search.text);
   const [tasks, setTasks] = useState<TaskSummary[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -260,10 +305,10 @@ export function TaskSearch({ environmentId, onOpenTask }: TaskSearchProps) {
 
   const openTask = useCallback(
     (taskId: string) => {
-      rememberSearch(environmentId, search);
+      if (rememberSearches) rememberSearch(environmentId, search);
       onOpenTask(taskId);
     },
-    [environmentId, search, onOpenTask],
+    [environmentId, search, onOpenTask, rememberSearches],
   );
 
   // ---- Autocomplete ----
@@ -339,7 +384,7 @@ export function TaskSearch({ environmentId, onOpenTask }: TaskSearchProps) {
         // too short to search is not worth remembering).
         const next = current;
         setSearch(next, { replace: true });
-        if (classifyQuery(next.text).kind !== "short") {
+        if (rememberSearches && classifyQuery(next.text).kind !== "short") {
           rememberSearch(environmentId, next);
         }
         setStore(loadStore(environmentId));
@@ -551,6 +596,8 @@ export function TaskSearch({ environmentId, onOpenTask }: TaskSearchProps) {
             )}
           </div>
         )}
+
+        {notice}
       </div>
 
       {error && (
@@ -622,6 +669,8 @@ export function TaskSearch({ environmentId, onOpenTask }: TaskSearchProps) {
                     activeTags={search.tags}
                     onOpen={openTask}
                     onFilterTag={addTagFilter}
+                    selected={task.task_id === selectedTaskId}
+                    openVerb={openVerb}
                   />
                 ))}
               </tbody>
@@ -705,17 +754,26 @@ function TaskRow({
   activeTags,
   onOpen,
   onFilterTag,
+  selected = false,
+  openVerb = "Open",
 }: {
   task: TaskSummary;
   activeTags: string[];
   onOpen: (taskId: string) => void;
   onFilterTag: (tag: string) => void;
+  selected?: boolean;
+  openVerb?: string;
 }) {
   const tags = task.tags ?? [];
   return (
     <tr
       onClick={() => onOpen(task.task_id)}
-      className="cursor-pointer align-top transition-colors hover:bg-gray-50 dark:hover:bg-gray-700/50"
+      aria-selected={selected || undefined}
+      className={`cursor-pointer align-top transition-colors ${
+        selected
+          ? "bg-blue-50 dark:bg-blue-950/40"
+          : "hover:bg-gray-50 dark:hover:bg-gray-700/50"
+      }`}
     >
       <td className="px-4 py-2.5">
         <button
@@ -724,6 +782,14 @@ function TaskRow({
             e.stopPropagation();
             onOpen(task.task_id);
           }}
+          aria-label={
+            openVerb === "Open"
+              ? undefined
+              : `${openVerb} ${qualifiedName(
+                  task.task_namespace,
+                  task.task_name,
+                )} ${shortTaskId(task.task_id)}`
+          }
           className="rounded text-left text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           {task.task_namespace && (

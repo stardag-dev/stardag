@@ -9,6 +9,7 @@ import type {
   TaskSummary,
 } from "../types/task";
 import { qualifiedName } from "../utils/instances";
+import type { CompareTarget } from "../utils/taskDiff";
 import { formatAbsoluteTime } from "../utils/time";
 import { ArtifactList } from "./ArtifactViewer";
 import { MembershipFacts } from "./MembershipFacts";
@@ -47,6 +48,9 @@ interface TaskDetailProps {
   onOpenBuild?: (buildId: string) => void;
   // Search tasks by one of this task's tags (the tag chips link there).
   onSearchTag?: (tag: string) => void;
+  // Compare an instance of this task with another (`/task-diff`); the
+  // Task Parameters box offers it when given.
+  onCompare?: (target: CompareTarget) => void;
 }
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -79,6 +83,7 @@ export function TaskDetail({
   refreshToken = 0,
   onOpenBuild,
   onSearchTag,
+  onCompare,
 }: TaskDetailProps) {
   const [task, setTask] = useState<Task | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -346,6 +351,17 @@ export function TaskDetail({
             instances={task.instances}
             deploymentsById={deploymentsById}
             planInstanceId={context?.planInstanceId}
+            onCompare={
+              onCompare
+                ? (instanceId) =>
+                    onCompare({
+                      taskId: task.task_id,
+                      instanceId,
+                      namespace: task.task_namespace,
+                      name: task.task_name,
+                    })
+                : undefined
+            }
           />
 
           <Section

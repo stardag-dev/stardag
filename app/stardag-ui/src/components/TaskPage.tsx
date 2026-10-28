@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { useBreadcrumb } from "../context/BreadcrumbContext";
 import { useEnvironment } from "../context/EnvironmentContext";
 import { shortTaskId } from "../utils/ids";
+import type { CompareTarget } from "../utils/taskDiff";
 import { EMPTY_SEARCH, formatSearch, withTag } from "../utils/taskSearch";
 import { TaskDetail } from "./TaskDetail";
 import { TaskSearch } from "./TaskSearch";
@@ -13,6 +14,8 @@ interface TaskPageProps {
   onOpenBuild?: (buildId: string) => void;
   // Open the task search at a query string (`?tag=...`).
   onSearchTasks?: (query: string) => void;
+  // Open `/task-diff` with a task's instance on the left.
+  onCompareTask?: (target: CompareTarget) => void;
 }
 
 /**
@@ -25,6 +28,7 @@ export function TaskPage({
   onOpenTask,
   onOpenBuild,
   onSearchTasks,
+  onCompareTask,
 }: TaskPageProps) {
   const { activeEnvironment } = useEnvironment();
   const { setItems: setBreadcrumb } = useBreadcrumb();
@@ -55,6 +59,7 @@ export function TaskPage({
           taskId={taskId}
           environmentId={activeEnvironment.id}
           onOpenBuild={onOpenBuild}
+          onCompare={onCompareTask}
           onSearchTag={
             onSearchTasks
               ? (tag) => onSearchTasks(formatSearch(withTag(EMPTY_SEARCH, tag)))
