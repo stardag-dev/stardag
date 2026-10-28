@@ -33,6 +33,13 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   unreadable or mismatching entry is discarded and re-read. Writes are
   atomic. `stardag cache clear [--all]` empties it;
   `STARDAG_REGISTRY_CACHE=0` turns it off.
+- **Fixed: a dropped connection to Modal could fail a build** (STA-169). An
+  existence check on an unmounted Modal Volume target lists the volume over
+  a streaming RPC, which Modal's client does not retry, so a reset stream
+  (`grpclib.exceptions.StreamTerminatedError`) escaped the check and ended
+  the build in discovery. The check now retries transient failures —
+  a reset stream, a connection error, `ServiceError`, `InternalError` —
+  under the same backoff and budget it already used for rate limits.
 
 ### UI
 
