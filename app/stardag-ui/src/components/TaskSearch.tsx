@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { fetchTasks, type TaskFilters } from "../api/registry";
+import {
+  fetchTasks,
+  RegistryError,
+  SEARCH_UNSUPPORTED,
+  type TaskFilters,
+} from "../api/registry";
 import { useTaskSearchUrl } from "../hooks/useTaskSearchUrl";
 import type { TaskStatus, TaskSummary } from "../types/task";
 import { checkTag } from "../utils/annotations";
@@ -99,6 +104,8 @@ export function TaskSearch({ environmentId, onOpenTask }: TaskSearchProps) {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The registry predates task search: retrying cannot help.
+  const [searchUnsupported, setSearchUnsupported] = useState(false);
   const [retryNonce, setRetryNonce] = useState(0);
   // The search the shown rows answer, so a stale page is never appended to.
   const [shownQuery, setShownQuery] = useState<string | null>(null);
@@ -186,6 +193,9 @@ export function TaskSearch({ environmentId, onOpenTask }: TaskSearchProps) {
         setTasks([]);
         setNextCursor(null);
         setShownQuery(null);
+        setSearchUnsupported(
+          err instanceof RegistryError && err.code === SEARCH_UNSUPPORTED,
+        );
         setError(err instanceof Error ? err.message : "Failed to search tasks");
       })
       .finally(() => {
@@ -563,16 +573,29 @@ export function TaskSearch({ environmentId, onOpenTask }: TaskSearchProps) {
 
       {error && (
         <div className="border-b border-gray-200 bg-white px-4 py-2 dark:border-gray-700 dark:bg-gray-800">
-          <ResultBanner tone="error">
-            {error}{" "}
-            <button
-              type="button"
-              onClick={() => setRetryNonce((n) => n + 1)}
-              className="font-medium underline hover:no-underline"
-            >
-              Retry
-            </button>
-          </ResultBanner>
+          {searchUnsupported ? (
+            <ResultBanner tone="warning">
+              {error}{" "}
+              <button
+                type="button"
+                onClick={() => commit({ ...EMPTY_SEARCH, status: search.status })}
+                className="font-medium underline hover:no-underline"
+              >
+                Clear search
+              </button>
+            </ResultBanner>
+          ) : (
+            <ResultBanner tone="error">
+              {error}{" "}
+              <button
+                type="button"
+                onClick={() => setRetryNonce((n) => n + 1)}
+                className="font-medium underline hover:no-underline"
+              >
+                Retry
+              </button>
+            </ResultBanner>
+          )}
         </div>
       )}
 

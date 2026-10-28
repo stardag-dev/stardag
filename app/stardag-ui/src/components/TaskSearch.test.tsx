@@ -9,9 +9,17 @@ import {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TaskSummary } from "../types/task";
 
-vi.mock("../api/registry", () => ({ fetchTasks: vi.fn() }));
+vi.mock("../api/registry", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api/registry")>()),
+  fetchTasks: vi.fn(),
+}));
 
-import { fetchTasks, type TaskFilters } from "../api/registry";
+import {
+  fetchTasks,
+  RegistryError,
+  SEARCH_UNSUPPORTED,
+  type TaskFilters,
+} from "../api/registry";
 import { notifyLocationChange } from "../hooks/useTaskSearchUrl";
 import { TASK_PAGE_SIZE, TaskSearch } from "./TaskSearch";
 
@@ -313,6 +321,32 @@ describe("TaskSearch", () => {
     expect(await screen.findByText("No tasks match this search")).toBeInTheDocument();
     fireEvent.click(screen.getAllByRole("button", { name: "Clear search" })[0]);
     await waitFor(() => expect(window.location.search).toBe(""));
+  });
+
+  it("says an older registry cannot search, instead of showing its rows", async () => {
+    window.history.replaceState({}, "", "/tasks?tag=prod&status=failed");
+    mocked.mockRejectedValue(
+      new RegistryError(
+        "This registry does not support task search",
+        200,
+        SEARCH_UNSUPPORTED,
+      ),
+    );
+    render(<TaskSearch environmentId="env-1" onOpenTask={() => {}} />);
+    expect(
+      await screen.findByText(/This registry does not support task search/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("TrainModel")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    // Clearing keeps the status filter, which an older registry serves.
+    mocked.mockResolvedValue({ tasks: [task(T1)], next_cursor: null });
+    fireEvent.click(
+      within(screen.getByText(/does not support task search/)).getByRole("button", {
+        name: "Clear search",
+      }),
+    );
+    await screen.findByText("TrainModel");
+    expect(window.location.search).toBe("?status=failed");
   });
 
   it("shows a failed read with a retry", async () => {

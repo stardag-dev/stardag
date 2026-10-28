@@ -6,7 +6,8 @@ vi.mock("../context/EnvironmentContext", () => ({
   useEnvironment: () => ({ activeEnvironment: { id: "env-1" } }),
 }));
 vi.mock("./TaskDetail", () => ({ TaskDetail: () => null }));
-vi.mock("../api/registry", () => ({
+vi.mock("../api/registry", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api/registry")>()),
   fetchTasks: vi.fn(async () => ({ tasks: [], next_cursor: null })),
 }));
 
