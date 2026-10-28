@@ -43,6 +43,7 @@ from ._harness import (
     connect,
     deploy_registry,
     modal_cli,
+    read_boot_id,
     stop_existing_app,
 )
 from ._registry_app import DEFAULT_APP_NAME as DEFAULT_REGISTRY_APP
@@ -143,8 +144,58 @@ def sdk_environment(deployment: Deployment) -> dict[str, str]:
     }
 
 
+# How many times ``up`` provisions in all when the registry container is
+# replaced while it does (see ``up``). Each is one recycle identified off
+# the boot id, so the bound is on recycles, not on failures.
+PROVISION_ATTEMPTS = 3
+
+
+class RegistryRecycledWhileProvisioning(RuntimeError):
+    """The registry container was replaced before provisioning finished."""
+
+
 def up(modal_environment: str) -> Deployment:
-    """Deploy the registry, wire the SDK to it, deploy the scenario apps."""
+    """Deploy the registry, wire the SDK to it, deploy the scenario apps.
+
+    **Provisioned again if the registry container is replaced meanwhile**,
+    up to ``PROVISION_ATTEMPTS`` in all, and for no other failure. The
+    database lives in that container, so a recycle during provisioning
+    loses the workspace, target root and API key just written, and the
+    first symptom is unrelated-looking: a 500 from Modal's proxy
+    ("function was terminated by signal") followed by ``InvalidAPIKeyError``
+    from a deploy's activation call. In CI the container's log said why --
+    "Container terminated due to preemption" -- twice on 2026-10-28, ending
+    two runs before any scenario ran, because the workflow's recycle retry
+    covers the scenarios step and not this one (STA-168).
+
+    Identified the same way as a recycle mid-run: the boot id read once the
+    registry first answers is compared with the one it answers with when
+    provisioning ends, or fails. Changed means recycled, and that alone is
+    retried; a failure under an unchanged boot id is raised as it is.
+    """
+    for attempt in range(1, PROVISION_ATTEMPTS + 1):
+        try:
+            return _up_once(modal_environment)
+        except RegistryRecycledWhileProvisioning as recycled:
+            if attempt == PROVISION_ATTEMPTS:
+                raise
+            _warn(
+                "Registry container recycled at provisioning",
+                f"{recycled} Provisioning again (attempt {attempt + 1} of "
+                f"{PROVISION_ATTEMPTS}).",
+            )
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+def _warn(title: str, message: str) -> None:
+    """Print a warning, as a workflow annotation when run in CI."""
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::warning title={title}::{message}", flush=True)
+    else:
+        print(f"[provision] {title}: {message}", file=sys.stderr, flush=True)
+
+
+def _up_once(modal_environment: str) -> Deployment:
     _require_disposable_name(modal_environment, "provision into")
     _require_expected_workspace()
     repo_root = _repo_root()
@@ -157,18 +208,54 @@ def up(modal_environment: str) -> Deployment:
         modal_environment=modal_environment,
         admin_password=admin_password,
     )
-    deployment = connect(
-        api_url,
-        admin_password=admin_password,
-        execution_modal_env=modal_environment,
-    )
+    # Read before anything is written to the database, so a recycle at any
+    # point after it -- connect included -- shows as a different id below.
+    first_boot = read_boot_id(api_url)
 
-    # The CLI subprocess below resolves the registry from these, exactly as
-    # the scenarios will.
-    os.environ.update(sdk_environment(deployment))
-    os.environ.pop("STARDAG_PROFILE", None)
+    def recycled() -> str | None:
+        try:
+            current = read_boot_id(api_url, timeout=15.0)
+        except Exception:
+            # Nothing identified: not a recycle this can name, so the
+            # original failure stands.
+            return None
+        return current if current != first_boot else None
 
-    _deploy_dag_apps(repo_root, modal_environment)
+    try:
+        deployment = connect(
+            api_url,
+            admin_password=admin_password,
+            execution_modal_env=modal_environment,
+        )
+
+        # The CLI subprocess below resolves the registry from these,
+        # exactly as the scenarios will.
+        os.environ.update(sdk_environment(deployment))
+        os.environ.pop("STARDAG_PROFILE", None)
+
+        _deploy_dag_apps(repo_root, modal_environment)
+    except (Exception, SystemExit) as error:
+        current = recycled()
+        if current is None:
+            raise
+        raise RegistryRecycledWhileProvisioning(
+            f"The registry container was replaced while provisioning (boot "
+            f"id {first_boot} -> {current}), and provisioning failed: "
+            f"{str(error).strip()[:500]}"
+        ) from error
+
+    current = recycled()
+    if current is not None:
+        raise RegistryRecycledWhileProvisioning(
+            f"The registry container was replaced while provisioning (boot "
+            f"id {first_boot} -> {current}); what was provisioned went with "
+            "its database."
+        )
+    if deployment.boot_id != first_boot:
+        raise RegistryRecycledWhileProvisioning(
+            f"The registry container was replaced while connecting (boot id "
+            f"{first_boot} -> {deployment.boot_id})."
+        )
 
     path = coordinates_path(modal_environment)
     path.parent.mkdir(parents=True, exist_ok=True)
