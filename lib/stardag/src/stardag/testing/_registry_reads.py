@@ -21,6 +21,7 @@ from stardag.registry import (
     ExecutionInfo,
     PlanDetail,
     TaskInfo,
+    TaskInstanceInfo,
     TaskListPage,
 )
 from stardag.testing._registry_state import (
@@ -58,6 +59,23 @@ def _wire_event_type(internal: str) -> str:
 
 class ReadsMixin(RegistryState):
     """See the module docstring."""
+
+    def task_instance_get(
+        self, instance_id: UUID | str, *, task_id: str | None = None
+    ) -> TaskInstanceInfo:
+        """``GET /instances/{id}``: the server's shape, ``task_id``
+        included. ``task_id`` is only the HTTP client's fallback hint."""
+        row = self.instances.get(UUID(str(instance_id)))
+        if row is None:
+            raise refuse("unknown_instance", f"no instance {instance_id}", status=404)
+        return TaskInstanceInfo(
+            id=row.id,
+            task_id=row.task_id,
+            deployment_id=row.deployment_id,
+            settings_hash=row.settings_hash,
+            instance_hash=row.instance_hash,
+            body=row.body,
+        )
 
     # Implemented by InMemoryRegistry (deployment rows need its "current"
     # rule).
