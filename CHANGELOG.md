@@ -8,6 +8,44 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **New: `sd.task_from_body(body, expected_task_id=None)`** (STA-147), the
+  public, documented way to rebuild a task from a stored instance body:
+  compat-mode validation, the task id check, and an error naming the
+  namespace and name of any task class, nested ones included, whose module
+  is not imported. Previously this needed the private `CONTEXT_MODE_KEY`.
+  `task_from_registry_data` stays, as the same function.
+- **New: `from_registry(task_id, instance_id=...)` pins an instance**
+  (STA-147). Without `instance_id` it loads the newest instance, as before;
+  with it, that instance, after checking it belongs to the task. The
+  registry client gains `task_instance_get(instance_id, *, task_id=None)`
+  (and `_aio`), reading `GET /instances/{id}`. Against a registry without
+  that route it reads the instance from `GET /tasks/{task_id}` instead, so
+  it needs no server upgrade when `task_id` is given (`from_registry` always
+  passes it). `TaskInstanceInfo` gains an optional `task_id`.
+- **New: a local cache of instance bodies** (STA-147), under
+  `~/.stardag/registry-cache/`, partitioned by registry URL and by what
+  decides the answering environment (the API key's fingerprint, or the
+  workspace and environment), so one profile never reads another's
+  entries. It holds immutable instance bodies keyed by instance id, never
+  status, `expanded_at` or "the newest instance". `task_instance_get` and a pinned
+  `from_registry` read through it, so a pinned load works offline after one
+  online read; a cached body is still checked against the task id, and an
+  unreadable or mismatching entry is discarded and re-read. Writes are
+  atomic. `stardag cache clear [--all]` empties it;
+  `STARDAG_REGISTRY_CACHE=0` turns it off.
+- **Fixed: a non-release build reported a version counted from the server's
+  tags** (STA-167). The SDK takes its version from git (hatch-vcs), and the
+  SDK (`vX.Y.Z`) and server (`server-vX.Y.Z`) tags sit on the same commits,
+  but nothing restricted the lookup to the SDK's own. So a git install, an
+  editable install or an image built from a checkout reported e.g.
+  `0.7.1.dev77+g…` (from `server-v0.7.0`) instead of `0.28.1.dev77+g…`, and a
+  non-editable install built from a full checkout exactly at a release commit
+  could report the server's `0.8.0` instead of `0.29.0`. In that last case
+  `with_stardag_on_image` under the default `local_stardag_source="auto"`
+  pinned the Modal image to that old PyPI release. Published releases were
+  unaffected: the release build checks out only the pushed tag. The version
+  lookup now considers `v*` tags only; the server's version
+  (`scripts/server-version.sh`) already considered only `server-v*`.
 - **Added: task annotations and task search** (STA-149).
   `registry.task_annotate(task_id, tags=..., description=...)` sets a
   task's tags and description: an omitted argument is left unchanged,
@@ -24,6 +62,64 @@ annotate <id>`, where `--tag` (or `--add-tag`) and `--remove-tag` edit
   against an older registry, annotating fails with a clear error, and a
   filtered list is refused rather than answered unfiltered (an unfiltered
   list works as before).
+
+### Server
+
+- **Added: task annotations, task search filters and an instance read**
+  (STA-149). A task (the completion) gains `tags` and `description`:
+  mutable annotations outside every hash and every registration payload,
+  set by `PATCH /tasks/{task_id}` with `{tags?, description?}`. An omitted
+  field is unchanged; `tags` replaces the set, last writer wins (no
+  server-side add/remove). Tags are trimmed, deduplicated and sorted, at
+  most 32 of at most 64 characters; a description is at most 4096. The
+  write counts against the workspace's write rate limit, like any write
+  that does not finish running work. `GET /tasks` filters by `namespace`
+  and `name` (exact), `tag` (repeatable, all of them), `id_prefix` and `q`
+  (3+ characters; case-insensitive substring of name, namespace or
+  description), and task summaries and details carry the annotations.
+  `GET /instances/{id}` returns one instance of the caller's environment:
+  `id`, `task_id`, `deployment_id`, `settings_hash`, `instance_hash`,
+  `body`, `created_at`, `expanded_at`. Migration: two columns (`tags`
+  defaults to empty, so existing tasks read as untagged) and four indexes
+  serving the listing: `(environment_id, status_at, id)` for its order
+  (the unfiltered listing no longer scans the table), a GIN index on
+  `tags`, a `pg_trgm` trigram index for `q` and a `text_pattern_ops`
+  index for `id_prefix`. **Needs the `pg_trgm` extension**, which the
+  migration creates if missing: it ships with the official Postgres images
+  and Debian's `postgresql`, and it is a trusted extension since Postgres
+  13, so the database owner can create it. The columns are added in one
+  short transaction under a 5 s `lock_timeout` (a catalog-only change);
+  the indexes are built `CONCURRENTLY`, so reads and writes to `task`
+  continue while they build, and a failed run can be re-run. Additive in
+  both directions of a rolling deploy; downgrade leaves `pg_trgm`
+  installed.
+
+### UI
+
+- Task parameters are shown as a collapsible, searchable tree instead of
+  raw JSON (STA-151): expand/collapse per node or all at once, sizes on
+  collapsed containers, nested task bodies labelled with their task name,
+  and copy value / copy JSON path per node. The search fuzzy-matches keys
+  and values in the manner of an editor's quick-open filter (characters
+  in order, case-insensitive, word starts and contiguous runs preferred),
+  highlights the matched characters, opens their ancestors and steps
+  through the matches best first. Keyboard: arrows move and fold, `c`
+  copies the focused value and `p` its path.
+
+## [0.29.0] — 2026-10-28
+
+SDK `0.29.0` and server `server-v0.8.0`. The SDK has three behaviour changes
+that can affect existing code (a missing `run()`, `Depends` under PEP 563, and
+run functions that delegate to a `Runner`), and the tick and worker changes
+below take effect only once a Modal app is **redeployed with the new SDK**. The
+server carries one additive migration
+(`workspaces.max_write_requests_per_minute`), and its images now install
+their dependencies from the lockfile. The SDK keeps working against a
+`server-v0.7.0` registry, but reconciliation does not: there a tick stops
+reconciling at the first unspawned claim it tries to end. See [RELEASE_NOTES.md](RELEASE_NOTES.md).
+
+### SDK
+
 - **Corrected: a worker's `retries=` does not recover a task that raises**
   (STA-154). The docs and the `FunctionSettings.retries` docstring said
   Modal's retry covers an exception raised inside the container. Under the
@@ -213,8 +309,10 @@ deploy` now **warns** about a worker with `retries` above zero (an `int`
   landed late can never run alongside its replacement. The same holds for
   a reactive worker that cannot create its lifecycle reporter, and for one
   whose call id is not readable inside its container. The conditional end
-  needs a registry that supports it; against an older one the tick leaves
-  unspawned claims to their TTL. New executor hooks:
+  needs a registry that supports it. An older one refuses it, and the tick
+  that is refused stops reconciling for the rest of its run, including the
+  probes of recorded calls, so their lost reports are left to the claim's
+  TTL as before; the next tick starts reconciling again. New executor hooks:
   `TaskExecutorABC.reconciles()` and `probe_detached()`, implemented for
   Modal. The tick summary counts `reconciled`.
 
@@ -230,34 +328,6 @@ deploy` now **warns** about a worker with `retries` above zero (an `int`
 
 ### Server
 
-- **Added: task annotations, task search filters and an instance read**
-  (STA-149). A task (the completion) gains `tags` and `description`:
-  mutable annotations outside every hash and every registration payload,
-  set by `PATCH /tasks/{task_id}` with `{tags?, description?}`. An omitted
-  field is unchanged; `tags` replaces the set, last writer wins (no
-  server-side add/remove). Tags are trimmed, deduplicated and sorted, at
-  most 32 of at most 64 characters; a description is at most 4096. The
-  write counts against the workspace's write rate limit, like any write
-  that does not finish running work. `GET /tasks` filters by `namespace`
-  and `name` (exact), `tag` (repeatable, all of them), `id_prefix` and `q`
-  (3+ characters; case-insensitive substring of name, namespace or
-  description), and task summaries and details carry the annotations.
-  `GET /instances/{id}` returns one instance of the caller's environment:
-  `id`, `task_id`, `deployment_id`, `settings_hash`, `instance_hash`,
-  `body`, `created_at`, `expanded_at`. Migration: two columns (`tags`
-  defaults to empty, so existing tasks read as untagged) and four indexes
-  serving the listing: `(environment_id, status_at, id)` for its order
-  (the unfiltered listing no longer scans the table), a GIN index on
-  `tags`, a `pg_trgm` trigram index for `q` and a `text_pattern_ops`
-  index for `id_prefix`. **Needs the `pg_trgm` extension**, which the
-  migration creates if missing: it ships with the official Postgres images
-  and Debian's `postgresql`, and it is a trusted extension since Postgres
-  13, so the database owner can create it. The columns are added in one
-  short transaction under a 5 s `lock_timeout` (a catalog-only change);
-  the indexes are built `CONCURRENTLY`, so reads and writes to `task`
-  continue while they build, and a failed run can be re-run. Additive in
-  both directions of a rolling deploy; downgrade leaves `pg_trgm`
-  installed.
 - **Changed: the writes that finish running work get their own rate-limit
   window, and a workspace can have its own limit** (STA-135). The
   per-workspace write limit (`LIMITS_MAX_REQUESTS_PER_MINUTE`) refused
@@ -313,6 +383,19 @@ deploy` now **warns** about a worker with `retries` above zero (an `int`
   the retry or name a reason not to. Comments that claimed a
   `SELECT … ORDER BY … FOR UPDATE` acquires its locks in order now say that
   Postgres does not guarantee it.
+
+- **Changed: the server images install their dependencies from
+  `app/stardag-api/uv.lock`** (STA-137). Every build of the API resolved its
+  dependencies fresh from `pyproject.toml`, so the lockfile never reached a
+  running server: two builds of one tag could ship different versions, and a
+  lockfile bump, a security fix included, did not reach the image at all.
+  `app/server.Dockerfile`, the API-only `app/stardag-api/Dockerfile` and the
+  self-host `--from-source` image now install the locked, hash-checked set.
+  Against `0.28.0`'s lock this release moves fastapi 0.141.1 → 0.162.0,
+  starlette 1.7.0 → 1.9.0, pydantic 2.13.5 → 2.14.1, pyjwt 2.14.0 → 2.15.0,
+  certifi 2026.7.22 → 2026.10.19, asyncpg 0.31.0 → 0.32.0 and alembic 1.20.0
+  → 1.20.1. The certifi bump drops the compromised emSign roots
+  (Dependabot alert 407) from the bundle the API trusts for its JWKS fetch.
 
 ### UI
 

@@ -4,7 +4,8 @@ counts, a build's plans, paged and filtered task lists, a task's executions and 
 tick summaries, a deployment. Split from ``_base.py`` by the module-size rule;
 :class:`RegistryABC` inherits them.
 
-Sync only: no async caller reads them (the watchdog's
+Sync only, except ``task_instance_get``, which task-loading code may call
+from a coroutine (no other async caller reads them: the watchdog's
 ``build_list_running`` goes through ``build_list``, synchronously). As
 everywhere on the seam, a double that does not implement one raises
 :class:`NotImplementedError` naming it.
@@ -23,6 +24,7 @@ from stardag.registry._models import (
     ExecutionInfo,
     PlanDetail,
     StalledBuild,
+    TaskInstanceInfo,
     TaskListPage,
     TickSummaryRecord,
 )
@@ -91,6 +93,37 @@ class RegistryReadsABC:
         (anything but ``status``) is refused rather than answered
         unfiltered."""
         raise _missing(self, "task_list")
+
+    def task_instance_get(
+        self, instance_id: UUID | str, *, task_id: str | None = None
+    ) -> TaskInstanceInfo:
+        """One instance by id: ``GET /instances/{id}``, its body included.
+
+        Instances are immutable, so an HTTP registry serves a repeat read
+        from the local body cache (``~/.stardag/registry-cache/``) without
+        a request. The one mutable field, ``expanded_at``, is not cached:
+        a cached read reports it as ``None`` (read ``task_get`` for it).
+
+        ``task_id`` is the completion the caller expects the instance to
+        belong to. It is not checked here (the caller compares
+        ``TaskInstanceInfo.task_id``); it is what lets the read degrade
+        against a registry that predates the route, by reading the task
+        (``GET /tasks/{task_id}``) and picking the instance from its
+        instances. Without it, such a registry answers
+        :class:`~stardag.exceptions.NotFoundError`.
+        """
+        raise _missing(self, "task_instance_get")
+
+    async def task_instance_get_aio(
+        self, instance_id: UUID | str, *, task_id: str | None = None
+    ) -> TaskInstanceInfo:
+        return self.task_instance_get(instance_id, task_id=task_id)
+
+    def instance_cache_partition(self) -> str | None:
+        """This registry's partition of the local instance-body cache, or
+        ``None`` when it has none (it is never cached). Only a registry
+        that knows which environment answers it has one."""
+        return None
 
     def task_list_executions(
         self, task_id: str, *, include_ended: bool = True, limit: int = 100

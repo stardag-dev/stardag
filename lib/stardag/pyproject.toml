@@ -70,14 +70,31 @@ dev = [
 package = true
 
 [build-system]
-requires = ["hatchling", "hatch-vcs"]
+# setuptools-scm >= 9 for `scm.git.describe_command` below (8.x rejects the
+# key with a TypeError, which fails the build rather than misversioning it).
+requires = ["hatchling", "hatch-vcs", "setuptools-scm>=9"]
 build-backend = "hatchling.build"
 
 [tool.hatch.version]
 source = "vcs"
 
+# The SDK is versioned from its own tags only. The repo carries two tag
+# families, often on the same commit: `vX.Y.Z` (this package) and
+# `server-vX.Y.Z` (the server image). An unfiltered `git describe --tags`
+# considers both, so a non-release build could be versioned from the server's
+# tags (e.g. 0.7.1.devN instead of 0.29.1.devN), and a build exactly at a
+# release commit could report the server's X.Y.Z. `--match` restricts describe
+# to SDK tags; `tag_regex` rejects anything else that reaches the parser.
+# `scripts/test_version_tags.py` (a pre-commit hook) checks both families.
 [tool.hatch.version.raw-options]
 root = "../.."
+scm.git.describe_command = [
+    "git", "describe", "--dirty", "--tags", "--long", "--match", "v[0-9]*",
+]
+# `tag_regex` is deprecated in setuptools-scm 10 in favour of `tag.regex`, but
+# the latter is not a `get_version()` argument, so through hatch-vcs's
+# raw-options this is still the only spelling that takes effect.
+tag_regex = '^v(?P<version>[0-9]+(?:\.[0-9]+)*(?:(?:a|b|rc)[0-9]+)?(?:\.post[0-9]+)?)$'
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/stardag"]

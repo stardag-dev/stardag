@@ -1,7 +1,7 @@
 ---
 name: stardag
 description: >
-  Stardag SDK usage guide (registry v2 line, SDK 0.28+). Use when writing code that imports stardag,
+  Stardag SDK usage guide (registry v2 line, SDK 0.29+). Use when writing code that imports stardag,
   defining tasks/DAGs, choosing significant vs non-significant parameters, passing build
   settings, configuring builds, working with targets/serialization, deploying to Modal, or
   interacting with the Stardag Registry API/UI/CLI. Covers the full SDK surface: task
@@ -17,7 +17,7 @@ Tasks are Pydantic models with deterministic output paths based on parameter has
 
 **Always `import stardag as sd`** — this is the standard convention. Python 3.11 or newer.
 
-This guide describes the **v2 line** (SDK `0.28` and `main` after it, registry server `0.7`).
+This guide describes the **v2 line** (SDK `0.29` and `main` after it, registry server `0.8`).
 Anything you remember about `significance=`, `hash_exclude=`, `build_config`,
 `build_config_scope`, scope keys or global locks is v1 and gone — see
 [registry-and-platform.md](registry-and-platform.md#upgrading-from-v1).
@@ -142,7 +142,9 @@ sd.namespace(ns, scope=__name__)   # Set task namespace
 sd.auto_namespace(scope=__name__)  # Auto namespace from module
 sd.flatten_task_struct()           # Flatten nested task structures
 sd.get_default_relpath(task)       # Construct default task output relpath
-sd.task_from_registry_data(data)   # Rebuild a task from a stored instance body (pickle-free)
+sd.task_from_body(body, expected_task_id=None)  # Rebuild a task from a stored instance body (compat mode, pickle-free)
+sd.task_from_registry_data(data)   # Same function, engine-side name
+Task.from_registry(task_id, instance_id=None)  # Load from the registry; pinned instances are cached on disk
 sd.TaskRehydrationError            # Raised when reconstruction fails
 
 # Cooperative cancellation (inside run())
