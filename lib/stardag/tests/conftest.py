@@ -135,3 +135,26 @@ def isolated_registry_cache(
         "stardag.registry._instance_cache.get_registry_cache_dir", lambda: root
     )
     return root
+
+
+@pytest.fixture(scope="function", autouse=True)
+def hermetic_project_config() -> typing.Generator[None, None, None]:
+    """No test reads a ``[tool.stardag]`` table (no task store, no task
+    modules) unless it sets one or re-enables discovery,
+    and the once-per-process task-module import starts fresh."""
+    from stardag._core import task_imports
+    from stardag._core.task_store_read import clear_store_memo
+    from stardag.config.project import (
+        ProjectConfig,
+        clear_project_config_cache,
+        project_config_override,
+    )
+
+    task_imports._reset_for_tests()
+    clear_store_memo()
+    clear_project_config_cache()
+    with project_config_override(ProjectConfig()):
+        yield
+    task_imports._reset_for_tests()
+    clear_store_memo()
+    clear_project_config_cache()

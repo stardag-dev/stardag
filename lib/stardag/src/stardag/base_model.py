@@ -386,9 +386,8 @@ class StardagBaseModel(BaseModel):
                 # compat_default on the validate side. Hash mode only: the
                 # body keeps the value, since it is what a rehydrated task
                 # should carry.
-                if (
-                    stardag_field.compat_default is not _UNSET
-                    and getattr(self, name) == stardag_field.compat_default
+                if stardag_field.compat_default is not _UNSET and _equals_default(
+                    getattr(self, name), stardag_field.compat_default
                 ):
                     continue
 
@@ -497,6 +496,19 @@ def _reachable_model_ids(root: Any) -> set[int]:
         ):
             stack.extend(value)
     return models
+
+
+def _equals_default(value: Any, default: Any) -> bool:
+    """``value == default`` for the hash-mode ``compat_default`` check, with
+    a task reference (``Task.ref``) on either side compared by task id: in
+    the hash a nested task is only its id, so a reference must drop out
+    exactly when the task it stands for would."""
+    from stardag._core.task_ref import TaskRef
+
+    if isinstance(value, TaskRef) or isinstance(default, TaskRef):
+        value_id, default_id = getattr(value, "id", None), getattr(default, "id", None)
+        return value_id is not None and value_id == default_id
+    return value == default
 
 
 _AnnotationType = TypeVar("_AnnotationType")

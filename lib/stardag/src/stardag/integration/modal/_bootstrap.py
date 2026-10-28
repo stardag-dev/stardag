@@ -249,7 +249,7 @@ async def _plan_aio(
     task_module_patterns: typing.Sequence[str],
 ) -> Walk:
     deployment_id = await resolve_deployment_id_aio(registry, app_name=app_name)
-    walk = await walk_aio(list(roots))
+    walk = await walk_aio(list(roots), registry=registry)
     _preflight_rehydration(build_id, walk.incomplete, task_module_patterns)
     # Reactivates this scope's plan if the build moved away from it since.
     await registry.build_resume_aio(

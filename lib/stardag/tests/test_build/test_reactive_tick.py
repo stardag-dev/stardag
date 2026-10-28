@@ -21,7 +21,7 @@ from stardag.build._registration import (
     register_plan_aio,
     walk_aio,
 )
-from stardag.registry import BuildFrontier
+from stardag.registry import BuildFrontier, registry_provider
 from stardag.target import InMemoryFileTarget
 from stardag.testing import InMemoryRegistry
 from stardag.testing._registry_state import refuse
@@ -262,6 +262,59 @@ class TestDiscoveryJobs:
         )
         assert summary.excluded == 1
         assert "exploded" in registry.calls_to("member_discovery_failed")[0]["error"]
+
+    async def test_a_registry_outage_hydrating_a_ref_excludes_nothing(
+        self, default_in_memory_fs_target: Target
+    ):
+        """A ``TaskRef`` built in ``requires()`` that cannot be hydrated
+        because the registry is down is an outage: retried by a later tick,
+        never a discovery failure."""
+        import httpx
+
+        from stardag._core.task_ref import clear_hydration_memo
+
+        missing_id = str(new_id())
+
+        class NeedsRef(SyncOnlyTask):
+            def requires(self):  # type: ignore[override]
+                return SyncOnlyTask.ref(missing_id)
+
+        class Down(InMemoryRegistry):
+            def task_get(self, task_id):
+                if task_id == missing_id:
+                    raise httpx.ConnectError("registry down")
+                return super().task_get(task_id)
+
+        from datetime import datetime, timezone
+
+        from stardag.build._registration import registration_item
+
+        clear_hydration_memo()
+        registry = Down()
+        deployment = registry.add_deployment(app_name="app")
+        root = NeedsRef(name=f"ref-{new_id()}")
+        build_id = registry.build_create(root_task_ids=[str(root.id)]).id
+        registry.plan_create(
+            build_id,
+            plan_id=new_id(),
+            deployment_id=deployment,
+            settings={},
+            roots=[
+                registration_item(
+                    root,
+                    declared_upstreams=None,
+                    observed_complete=False,
+                    observed_at=datetime.now(timezone.utc),
+                )
+            ],
+        )
+        registry.build_set_reactive_meta(build_id, app_name="app")
+        try:
+            await _tick(registry, build_id, FakeDetachedExecutor(registry=registry))
+        except Exception:
+            pass  # surfacing the outage is fine; excluding the member is not
+        assert registry.calls_to("member_discovery_failed") == []
+        clear_hydration_memo()
 
 
 class TestRefusals:
@@ -1112,6 +1165,63 @@ class TestRollover:
         plans = sorted(registry.plans.values(), key=lambda p: p.generation)
         assert [p.deployment_id for p in plans] == [old, new]
         assert plans[0].superseded_at is not None and plans[1].active
+
+    async def test_a_registry_outage_hydrating_a_ref_does_not_fail_the_build(
+        self, default_in_memory_fs_target: Target
+    ):
+        """A rollover whose roots' requires() build a ``TaskRef`` the
+        registry cannot serve right now propagates the outage (a later tick
+        retries) instead of failing the build as "planning failed"."""
+        import httpx
+
+        from stardag._core.task_ref import (
+            TaskRefRegistryUnavailableError,
+            clear_hydration_memo,
+        )
+        from stardag.testing._registry_state import InstanceRow, TaskRow
+
+        leaf = SyncOnlyTask(name=f"rollover-ref-leaf-{new_id()}")
+
+        class RolloverNeedsRef(SyncOnlyTask):
+            def requires(self):  # type: ignore[override]
+                return SyncOnlyTask.ref(leaf.id)
+
+        class Flaky(InMemoryRegistry):
+            down = False
+
+            def task_get(self, task_id):
+                if self.down and task_id == str(leaf.id):
+                    raise httpx.ConnectError("registry down")
+                return super().task_get(task_id)
+
+        clear_hydration_memo()
+        registry = Flaky()
+        registry.tasks[str(leaf.id)] = TaskRow(
+            task_id=str(leaf.id),
+            task_namespace=leaf.get_namespace(),
+            task_name=leaf.get_name(),
+            version=leaf.version,
+            output_uri=leaf.target().uri,
+        )
+        registry.instances[new_id()] = InstanceRow(
+            id=new_id(),
+            deployment_id=new_id(),
+            settings_hash="s",
+            instance_hash=str(leaf.instance_hash),
+            task_id=str(leaf.id),
+            body=leaf.instance_body(),
+        )
+        with registry_provider.override(registry):
+            build_id, old, new = await self._rolled_setup(
+                registry, [RolloverNeedsRef(name=f"rollover-ref-{new_id()}")]
+            )
+        clear_hydration_memo()
+        registry.down = True
+        frontier = registry.build_get_frontier(build_id)
+        with pytest.raises(TaskRefRegistryUnavailableError):
+            await roll_over_aio(registry, frontier, own_deployment_id=new)
+        assert registry.builds[build_id].status != "failed"
+        clear_hydration_memo()
 
     async def test_a_tick_of_an_older_deployment_is_superseded(
         self, default_in_memory_fs_target: Target

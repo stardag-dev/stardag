@@ -15,8 +15,11 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   is not imported. Previously this needed the private `CONTEXT_MODE_KEY`.
   `task_from_registry_data` stays, as the same function.
 - **New: `from_registry(task_id, instance_id=...)` pins an instance**
-  (STA-147). Without `instance_id` it loads the newest instance, as before;
-  with it, that instance, after checking it belongs to the task. The
+  (STA-147). Without `instance_id` it loads, for a completed task, the
+  instance of the execution that completed it (from
+  `GET /tasks/{id}/executions`, read by id even when it is not among the
+  newest listed), and otherwise the newest instance, as before; with it,
+  that instance, after checking it belongs to the task. The
   registry client gains `task_instance_get(instance_id, *, task_id=None)`
   (and `_aio`), reading `GET /instances/{id}`. Against a registry without
   that route it reads the instance from `GET /tasks/{task_id}` instead, so
@@ -46,6 +49,142 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   unaffected: the release build checks out only the pushed tag. The version
   lookup now considers `v*` tags only; the server's version
   (`scripts/server-version.sh`) already considered only `server-v*`.
+- **New: `Task.ref(task_id, instance_id=None)`, a typed reference to a
+  registered task** (STA-148). Code can point at a task the registry
+  already holds (a trained model, a dataset) by id, instead of re-composing
+  it from factories and defaults that keep moving and silently re-key it.
+  `TrainedModel.ref(...)` is a `TaskRef[TrainedModel, Model]`, a
+  `Task[Model]`, so a type checker accepts it wherever an
+  `sd.TaskLoads[Model]` is and rejects it for any other loaded type;
+  `.hydrate()` returns a `TrainedModel`. Constructing one makes no registry
+  call; its id is the referenced task id, and a task given it as a
+  dependency has the same id as with the real task. `.hydrate()` reads the
+  instance through `from_registry` (a pinned reference from the local body
+  cache, offline after one read) and checks the class and the task id;
+  `complete()`, `target()` and `load()` delegate to it, and `get_name()` /
+  `get_namespace()` answer for the referenced class. Every task class has
+  `ref`: a `LoadableTask[T]` subclass gets `TaskRef[MyTask, T]`, a plain
+  `BaseTask` subclass `TaskRef[MyTask, Any]`. `ref.model_copy(update=...)`
+  is refused (derive from `ref.hydrate()`). See the new how-to, "Reference
+  Existing Tasks".
+- **New: builds hydrate references at start** (STA-148). `sd.build`,
+  `build_aio`, the sequential builds, the Prefect build and the Modal
+  triggers replace every
+  `TaskRef` in the DAG (roots, nested fields, lists and dicts of tasks)
+  with its hydrated task before discovery, so the registry stores real
+  bodies only and workers and `run()` see real tasks. `sd.resolve_refs`
+  does the same outside a build. `build_spawn` / `build_remote` hydrate
+  only from an explicit `registry=` (they need no local registry
+  otherwise), and refuse references without one; `build_trigger` hydrates
+  from the registry it creates the build in. A reference cannot be
+  serialized except into its parent's task id: an instance body, a Modal
+  payload or a plain `model_dump()` of a task holding one raises
+  (`sd.TaskRefNotHydratedError`). Hydration failures, including an
+  unreachable registry, raise `sd.TaskRefHydrationError`, a
+  `TaskRehydrationError`; an outage (unreachable, 5xx, 429) is the subclass
+  `sd.TaskRefRegistryUnavailableError`, which a reactive tick retries rather
+  than excluding the task whose `requires()` built the reference.
+- **New: `stardag tasks ref <task-id> [--instance <id>]`** (STA-148)
+  prints a `ref(...)` call for a registered task, pinned to an instance,
+  and the class's import when `--module` (or the package's `task_modules`)
+  loads it. By default the instance is, for a completed task, the one its
+  completing execution ran, else the newest; `--instance newest` and
+  `--instance <id>` override, and the choice and its reason are printed on
+  stderr. An unpinned `TaskRef` and `from_registry` choose the same way,
+  and `stardag tasks show` names the completing execution's instance.
+  Against a registry without `GET /tasks/{id}/executions`, the newest.
+- **Changed: `from_registry` validates a body into the class it names**
+  (STA-148). A body of an unrelated class is refused by name rather than as
+  a task id mismatch, `Base.from_registry(...)` returns the concrete
+  subclass the task was registered as, and a nested task class whose
+  module is not imported is named.
+- **Deprecated: `AliasTask`** (STA-148), in favour of `Task.ref`.
+  Constructing one (or `AliasTask.from_registry`) emits a
+  `DeprecationWarning` once per process; validating a stored body never
+  does. It still works.
+- **Breaking: the former `stardag.TaskRef` dataclass is `stardag.TaskSlug`**
+  (STA-148). `stardag.TaskRef` is now the typed reference above. The
+  dataclass (name, version, id and a `slug`) keeps its fields under the new
+  name, and `sd.TaskRef.from_task(task)` still returns one, with a
+  `DeprecationWarning`. Code constructing `sd.TaskRef(name=..., ...)`
+  directly now gets a `TypeError` naming `sd.TaskSlug`, and an
+  `isinstance(x, sd.TaskRef)` check for the old class no longer matches:
+  switch both to `sd.TaskSlug`. See RELEASE_NOTES.md.
+- **Breaking: a task field named `ref` now shadows the `ref` method**
+  (STA-148), which every task class has. Such a class still works, and its
+  field still holds its value, but pydantic warns at class definition
+  (`Field name "ref" ... shadows an attribute in parent`), pyright reports
+  an incompatible override of `ref` in that class, and the class has no
+  `.ref(...)`. Reference it with the new function form instead,
+  `sd.task_ref(MyTask, task_id, instance_id=...)`, or rename the field.
+- **New: `sd.task_ref(task_class, task_id, instance_id=None)`** (STA-148),
+  the function form of `task_class.ref(...)`: the same reference, typed as
+  precisely (`TaskRef[MyTask, LoadedT]`, or `TaskRef[MyTask, Any]` for a
+  plain `BaseTask` subclass), and usable when a field shadows `ref`.
+  `stardag tasks ref` prints it for such a class.
+- **New: `InMemoryRegistry.add_instance(*, body, task_id, instance_id)`**
+  (STA-148) seeds an instance under the ids given, with no build,
+  deployment or class import, so a test can hydrate a pinned `Task.ref`
+  from a body recorded next to the code (`stardag tasks show <id> --json`).
+  The body is stored as is; hydration checks it. Re-seeding an instance is
+  idempotent with the same body and a `ValueError` with another; an
+  unpinned reference reads the most recently seeded instance.
+- **New: the committed task store** (STA-157), a reviewed,
+  registry-independent copy of the task instances a package pins (a key
+  dataset, a trained model), kept inside the package and loaded eagerly.
+  `MyTask.from_store(task_id, instance_id=None, *, ...)` returns the real
+  task (typed `Self`; fields readable, `model_copy` works; `instance_hash=`
+  and `store=` are keyword-only), and `sd.task_from_store(MyTask, ...)` is
+  the function form for a class whose field shadows it. Writers:
+  `stardag tasks ref <task-id> --write [--store DIR]` copies a registry
+  instance after checking it rehydrates to its task id, and
+  `sd.write_to_store(tasks)` writes from task objects with no registry;
+  both print the reader line, pinned by instance id (unverified metadata)
+  and instance hash (verified). The format is normalized and
+  content-addressed: one file per distinct instance body at
+  `<namespace>.<Name>/<task_id>/<instance_hash>.json`, every nested task a
+  pointer (`{"__stardag_task": {"task", "task_id", "instance_hash"}}`) to
+  its own file (shared upstreams stored once), re-inlining to the original
+  body byte for byte, written deterministically. Each file records its
+  class's module as an import hint and where the body came from. A root
+  task id mismatch names the deepest nested task whose id moved. See the
+  new how-to, "Pin Tasks in a Committed Store".
+- **New: `[tool.stardag]` in a package's `pyproject.toml`** (STA-157,
+  STA-162): `task_store` (a path relative to the file, or
+  `"pkg:<package>/<dir>"` inside a package) and `task_modules`, read apart
+  from registry configuration and even with `STARDAG_NO_REGISTRY=1`;
+  `STARDAG_TASK_STORE` / `STARDAG_TASK_MODULES` override them. The settings
+  that apply are found per call, walking up to the nearest `pyproject.toml`
+  with the table from the calling module's file, then from the task
+  class's module, then from the working directory, so each package of a
+  repository reads its own store wherever its pins are imported from; an
+  installed package's store is found by a marker file inside it, which
+  also carries a copy of the `task_modules` (a found `pyproject.toml`
+  always wins; a write refreshes the copy, a read warns on a mismatch). Any
+  rehydration that misses a class (`task_from_body`, `from_registry`,
+  `TaskRef` hydration, `from_store`) imports the applicable `task_modules`
+  once per process and retries; the error, now
+  `sd.TaskClassNotRegisteredError` (a `TaskRehydrationError`), names the
+  class, the patterns and any import failure. `stardag tasks ref` uses them
+  to print the import without `--module`.
+- **New: `!pattern` excludes in `task_modules`** (STA-157), for
+  `StardagApp(task_modules=...)` as for `[tool.stardag]`: `"!pkg.deploy"`
+  or `"!pkg.scripts.*"` removes what it matches from what the other
+  patterns include, whatever the order.
+- **New: references consult the task store first** (STA-157).
+  `TaskRef.hydrate()` and build-start hydration serve a pinned reference
+  from a body stored under its instance id, and an unpinned one when the
+  store holds exactly one body of the task, before the body cache and the
+  registry. The store is that of the package whose code created the
+  reference. An explicit `hydrate(registry=...)` skips it. Inside a remote
+  container without the store, the registry is read as before.
+- **Fixed: `find_project_config` never returns `~/.stardag/config.toml`**,
+  which a working directory under the home directory used to find as a
+  project config.
+- **Breaking: a task field named `from_store` now shadows the classmethod**
+  (STA-157), as a field named `ref` does: pydantic warns at class
+  definition and pyright reports an incompatible override. Use
+  `sd.task_from_store(MyTask, ...)` for such a class, or rename the field.
 
 ### UI
 
