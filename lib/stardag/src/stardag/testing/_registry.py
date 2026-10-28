@@ -74,7 +74,7 @@ if TYPE_CHECKING:
 
 
 class InMemoryRegistry(
-    YieldMixin, ExclusionMixin, ReadsMixin, DeploymentsMixin, RegistryABC
+    YieldMixin, ExclusionMixin, DeploymentsMixin, ReadsMixin, RegistryABC
 ):
     """See the module docstring."""
 

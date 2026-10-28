@@ -142,7 +142,9 @@ every significant field but may differ in non-significant ones (see
 - **Unpinned**: chosen at hydration time, which always asks the registry.
   For a completed task, it is the instance its completing execution ran
   (an execution that reported completion and whose report completed the
-  task; a rejected late report does not count);
+  task, at the task's current completion time: a rejected late report does
+  not count, nor an execution that predates a later completion observed at
+  discovery after an invalidation);
   otherwise, or when no completed execution is recorded (a completion
   observed at discovery, say), the newest instance.
 

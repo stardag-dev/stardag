@@ -470,6 +470,39 @@ class TestErrorsAndHints:
             StrictParent(model=TrainedModel.ref(model.id))  # type: ignore[arg-type]
         assert StrictParent(model=model).model == model
 
+    def test_an_unrelated_failure_is_not_hinted_and_keeps_its_errors(self, model):
+        """A valid reference in a TaskLoads field and an invalid other field:
+        the original ValidationError, field errors intact, no hint."""
+        from pydantic import ValidationError
+
+        class Loose(sd.Task[str]):
+            model: sd.TaskLoads[str]
+            count: int = 0
+
+            def run(self):
+                self._save("x")
+
+        with pytest.raises(ValidationError) as e:
+            Loose(model=TrainedModel.ref(model.id), count="many")  # type: ignore[arg-type]
+        assert "TaskLoads" not in str(e.value)
+        assert [err["loc"] for err in e.value.errors()] == [("count",)]
+
+    def test_refs_in_a_deque_are_detected_and_resolved_keeping_maxlen(self, model):
+        import collections
+
+        registry = InMemoryRegistry()
+        iid = uuid4()
+        registry.add_instance(
+            body=model.instance_body(), task_id=model.id, instance_id=iid
+        )
+        held = collections.deque(
+            [TrainedModel.ref(model.id, instance_id=iid)], maxlen=3
+        )
+        assert contains_refs(held)
+        resolved = resolve_refs(held, registry)
+        assert isinstance(resolved, collections.deque) and resolved.maxlen == 3
+        assert list(resolved) == [model]
+
     def test_hydration_errors_are_rehydration_errors(self):
         assert issubclass(sd.TaskRefHydrationError, sd.TaskRehydrationError)
 

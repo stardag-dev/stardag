@@ -68,7 +68,10 @@ class StoredTask:
         )
 
     def __str__(self) -> str:
-        return "\n".join(line for line in (self.import_line, self.call) if line)
+        call = self.call
+        # The function form needs ``sd`` in the pasted module.
+        sd_import = "import stardag as sd" if call.startswith("sd.") else None
+        return "\n".join(line for line in (sd_import, self.import_line, call) if line)
 
 
 def reader_call(
