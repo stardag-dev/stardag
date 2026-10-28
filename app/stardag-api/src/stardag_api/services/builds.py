@@ -1,5 +1,6 @@
 """Build lifecycle: create, read, complete, fail, cancel, exit-early,
-resume, delete.
+resume, delete. A plan-only build's ``registered`` is in
+:mod:`stardag_api.services.plan_only_builds`.
 
 See design.md, "The runnable rule" (the build-status paragraph and
 resumability), "Registration" (lifecycle transitions are idempotent by
@@ -29,6 +30,14 @@ state) and the ``build`` entity.
 - **Claims**: ``complete``, ``fail`` and ``cancel`` release the claims held
   by any of the build's plans, through ``transition_task()`` (``claim_outcome
   = released``, task CANCELLED); ``exit-early`` releases nothing.
+- **Plan-only builds** (``plan_only``) register and run nothing. Created
+  PENDING and never RUNNING — every read that hands out or wakes work
+  (frontier, claiming start, wake-up flags, ``wake-candidates``,
+  ``stalled-builds``) acts on RUNNING builds only, so none ever acts on
+  one — they end REGISTERED through ``registered`` (a sealed active plan
+  required), a terminal status. ``complete``, ``exit-early`` and
+  ``resume`` refuse them (409 ``build_plan_only``); ``fail`` and ``cancel``
+  are allowed, so a registration that went wrong can be closed.
 """
 
 from __future__ import annotations
@@ -62,7 +71,11 @@ from stardag_api.services.deployments import (
 )
 from stardag_api.services.errors import Conflict, NotFound, RecordedConflict
 from stardag_api.services.event_log import EventClock
-from stardag_api.services.registration import PlanState, lock_build
+from stardag_api.services.registration import (
+    PlanState,
+    lock_build,
+    refuse_plan_only,
+)
 from stardag_api.services.slug import generate_build_slug
 from stardag_api.services.transitions import Transition, transition_task
 from stardag_api.services.tx import retry_on_deadlock, transaction
@@ -75,7 +88,12 @@ _MAX_NAMED = 50
 
 #: Statuses no later lifecycle report moves a build out of (``resume`` does).
 TERMINAL_STATUSES = frozenset(
-    {BuildStatus.COMPLETED, BuildStatus.FAILED, BuildStatus.CANCELLED}
+    {
+        BuildStatus.COMPLETED,
+        BuildStatus.FAILED,
+        BuildStatus.CANCELLED,
+        BuildStatus.REGISTERED,
+    }
 )
 
 
@@ -95,16 +113,27 @@ async def create_build(
     root_task_ids: Sequence[str] = (),
     user_id: UUID | None = None,
     executor_metadata: dict[str, Any] | None = None,
+    plan_only: bool = False,
 ) -> Build:
     """Create a RUNNING build (``BUILD_STARTED``) requesting
     ``root_task_ids``. Idempotent on a client-minted id: a re-delivered
-    create returns the build unchanged."""
+    create returns the build unchanged.
+
+    A ``plan_only`` build is created PENDING instead, with no
+    ``started_at`` (it never starts anything); its ``BUILD_STARTED`` records
+    the creation, with ``{"plan_only": true}`` in its metadata."""
     async with transaction(session):
         if build_id is not None:
             existing = await session.get(Build, build_id)
             if existing is not None:
                 if existing.environment_id != environment_id:
                     raise Conflict("build_id_conflict", f"build id {build_id} is taken")
+                if existing.plan_only != plan_only:
+                    raise Conflict(
+                        "build_id_conflict",
+                        f"build id {build_id} exists with plan_only="
+                        f"{existing.plan_only}",
+                    )
                 return existing
         now = utc_now()
         build = Build(
@@ -115,8 +144,9 @@ async def create_build(
             description=description,
             root_task_ids=sorted(set(root_task_ids)),
             executor_metadata=executor_metadata,
-            status=BuildStatus.RUNNING,
-            started_at=now,
+            plan_only=plan_only,
+            status=BuildStatus.PENDING if plan_only else BuildStatus.RUNNING,
+            started_at=None if plan_only else now,
             last_active_at=now,
             created_at=now,
         )
@@ -130,7 +160,11 @@ async def create_build(
             session,
             [
                 event_log.event_row(
-                    environment_id, EventType.BUILD_STARTED, at=now, build_id=build.id
+                    environment_id,
+                    EventType.BUILD_STARTED,
+                    at=now,
+                    build_id=build.id,
+                    metadata={"plan_only": True} if plan_only else None,
                 )
             ],
         )
@@ -181,9 +215,10 @@ async def complete_build(
         build = await lock_build(session, environment_id, build_id)
         if build.status == BuildStatus.COMPLETED:
             return build
-        await _refuse_if_terminal(
+        await refuse_if_terminal(
             session, build, EventType.BUILD_COMPLETED, triggered_by=triggered_by
         )
+        refuse_plan_only(build, "complete (it ends REGISTERED)")
         outstanding = await _verify_plan_complete(session, build, force=force)
         now = utc_now()
         await _terminal(
@@ -272,7 +307,7 @@ async def fail_build(
         build = await lock_build(session, environment_id, build_id)
         if build.status == BuildStatus.FAILED:
             return build
-        await _refuse_if_terminal(
+        await refuse_if_terminal(
             session,
             build,
             EventType.BUILD_FAILED,
@@ -305,7 +340,7 @@ async def cancel_build(
         build = await lock_build(session, environment_id, build_id)
         if build.status == BuildStatus.CANCELLED:
             return build
-        await _refuse_if_terminal(
+        await refuse_if_terminal(
             session, build, EventType.BUILD_CANCELLED, triggered_by=triggered_by
         )
         await _terminal(
@@ -330,11 +365,12 @@ async def exit_early(
         build = await lock_build(session, environment_id, build_id)
         if build.status == BuildStatus.EXIT_EARLY:
             return build
-        await _refuse_if_terminal(
+        await refuse_if_terminal(
             session, build, EventType.BUILD_EXIT_EARLY, triggered_by=None
         )
+        refuse_plan_only(build, "exit early")
         now = utc_now()
-        _set_status(build, BuildStatus.EXIT_EARLY, now=now, triggered_by=None)
+        set_build_status(build, BuildStatus.EXIT_EARLY, now=now, triggered_by=None)
         await event_log.append(
             session,
             [
@@ -350,7 +386,7 @@ async def exit_early(
         return build
 
 
-async def _refuse_if_terminal(
+async def refuse_if_terminal(
     session: AsyncSession,
     build: Build,
     attempted: EventType,
@@ -391,7 +427,7 @@ async def _refuse_if_terminal(
     )
 
 
-def _set_status(
+def set_build_status(
     build: Build,
     status: BuildStatus,
     *,
@@ -423,7 +459,7 @@ async def _terminal(
     COMPLETED, FAILED and CANCELLED), then record the build event."""
     released = await release_claims(session, build, reason=status.value, clock=clock)
     at = clock.tick()
-    _set_status(
+    set_build_status(
         build, status, now=at, triggered_by=triggered_by, error_message=error_message
     )
     meta = dict(metadata or {})
@@ -589,6 +625,7 @@ async def resume_build(
     """
     async with transaction(session):
         build = await lock_build(session, environment_id, build_id)
+        refuse_plan_only(build, "resume")
         now = utc_now()
         changed = False
         plan: Plan | None = None

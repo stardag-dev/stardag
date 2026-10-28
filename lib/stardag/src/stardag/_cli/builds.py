@@ -79,7 +79,8 @@ def builds_list(
         None,
         "--status",
         help="Only builds in this status: pending, running, completed, failed, "
-        "cancelled.",
+        "cancelled, exit_early, registered. A plan-only build left pending "
+        "never finished registering (close it with `builds cancel`).",
     ),
     app_name: Optional[str] = typer.Option(
         None,

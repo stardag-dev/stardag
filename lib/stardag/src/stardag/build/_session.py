@@ -55,7 +55,11 @@ from stardag.build._registration import (
     register_plan_aio,
     send_yield_aio,
 )
-from stardag.exceptions import EXECUTION_OVER_CODES, APIError
+from stardag.exceptions import (
+    EXECUTION_OVER_CODES,
+    APIError,
+    PlanOnlyUnsupportedError,
+)
 from stardag.registry import RegistryABC, is_noop_registry
 
 logger = logging.getLogger(__name__)
@@ -133,13 +137,30 @@ class ResidentSession:
         app_name: str | None = None,
         resume_build_id: UUID | None = None,
         description: str | None = None,
+        plan_only: bool = False,
     ) -> None:
         """Resolve the deployment and create (or resume) the build.
 
         ``app_name`` is the deployed app the build's tasks run on, if any
         (``TaskExecutorABC.deployment_app_name``): the build then plans
         under that app's current deployment (D13).
+
+        ``plan_only`` creates a build that registers and runs nothing
+        (created PENDING, ended by ``build_registered``). It never carries
+        on without the registry, whatever ``on_registry_failure`` says —
+        a plan-only build that registers nothing has done nothing — and an
+        older registry's refusal of the field (422) is raised as
+        :class:`~stardag.exceptions.PlanOnlyUnsupportedError`.
         """
+        if plan_only:
+            if not self.enabled:
+                raise RuntimeError(
+                    "A plan-only build needs a registry: configure one (a "
+                    "Stardag profile, or pass registry=)."
+                )
+            if resume_build_id is not None:
+                raise ValueError("A plan-only build cannot resume another build.")
+            self.on_registry_failure = "raise"
         if not self.enabled:
             return
         try:
@@ -155,12 +176,32 @@ class ResidentSession:
                 self.build_id = result.build.id
                 self.resumed = True
                 return
-            build = await self.registry.build_create_aio(
-                root_task_ids=[str(r.id) for r in roots],
-                build_id=new_id(),
-                description=description,
-            )
+            root_task_ids = [str(r.id) for r in roots]
+            if plan_only:
+                build = await self.registry.build_create_aio(
+                    root_task_ids=root_task_ids,
+                    build_id=new_id(),
+                    description=description,
+                    plan_only=True,
+                )
+            else:
+                # Without the keyword: a registry double overriding
+                # ``build_create`` from before plan-only builds still works.
+                build = await self.registry.build_create_aio(
+                    root_task_ids=root_task_ids,
+                    build_id=new_id(),
+                    description=description,
+                )
             self.build_id = build.id
+        except APIError as e:
+            # FastAPI's 422 names the refused field (``extra_forbidden`` at
+            # ``body.plan_only``); any other 422 is not this.
+            if plan_only and e.status_code == 422 and "plan_only" in str(e):
+                raise PlanOnlyUnsupportedError(
+                    "This registry does not support plan-only builds; upgrade "
+                    f"it (the registry refused the request: {e})"
+                ) from e
+            self._degrade(e, "Failed to create the build in the registry")
         except Exception as e:
             self._degrade(e, "Failed to create the build in the registry")
 

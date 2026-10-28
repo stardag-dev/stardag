@@ -114,6 +114,14 @@ _TRANSIENT_EXCEPTIONS: tuple[type[Exception], ...] = (
     httpx.NetworkError,
     httpx.RemoteProtocolError,
 )
+# The lost exchanges that cannot have been delivered: no connection was
+# made, or none was free, so no byte of the request left. Every other one
+# may have reached the app (``Request.gone_code``).
+_UNDELIVERED_EXCEPTIONS: tuple[type[Exception], ...] = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+)
 _GATEWAY_STATUSES = frozenset({502, 503, 504})
 # Modal's web proxy answers 500 with a plain-text body of its own when it
 # loses the request on its way to or from the container ("modal-http:
@@ -168,6 +176,14 @@ class Request(Generic[T]):
     # one. A rate-limit refusal is re-sent regardless: it was never
     # delivered (see ``_RATE_LIMIT_CODES``).
     retry: bool = True
+    # The 404 code that means "already done" for this route, when a retry
+    # of an attempt that may have been delivered gets it: a delete re-sent
+    # after its answer was lost finds nothing left to delete, because the
+    # first delivery deleted it (STA-174). Such a 404 is then read as
+    # success (``parse(None)``). A 404 on an attempt with no possibly
+    # delivered predecessor still raises -- the thing was never there --
+    # as does any 404 on a route that leaves this unset.
+    gone_code: str | None = None
 
 
 def gzip_json_body(body: object) -> tuple[bytes | None, dict[str, str]]:
@@ -287,6 +303,35 @@ def _retry_after_seconds(response: httpx.Response) -> int:
         return max(int(response.headers.get("Retry-After", 1)), 1)
     except (TypeError, ValueError):
         return 1
+
+
+def _already_gone(
+    request: Request[Any], error: NotFoundError, maybe_delivered: bool
+) -> bool:
+    """Whether a 404 is the answer to an earlier delivery of this request
+    that landed but whose answer was lost (see ``Request.gone_code``).
+
+    ``maybe_delivered`` is whether any earlier attempt retried as lost may
+    have reached the app: one that timed out reading or was cut short may
+    have run, and a gateway error may come back after the app answered;
+    one that never connected (``_UNDELIVERED_EXCEPTIONS``) cannot have. It
+    holds whatever came between: a rate-limit refusal or a failed connect
+    was never delivered, but does not undo an earlier attempt that was.
+    """
+    if (
+        request.gone_code is None
+        or not maybe_delivered
+        or error.code != request.gone_code
+    ):
+        return False
+    logger.warning(
+        "Registry %s %s answered 404 %s after a retry of an attempt whose "
+        "answer was lost; reading it as already done by that attempt.",
+        request.method,
+        request.path,
+        error.code,
+    )
+    return True
 
 
 def _json_or_none(response: httpx.Response) -> Any:
@@ -470,6 +515,7 @@ class HTTPTransport:
     def call(self, request: Request[T]) -> T:
         url, kwargs = self._kwargs(request)
         transient = rate_limited = 0
+        maybe_delivered = False
         rate_limit_waited = 0.0
         started = time.monotonic()
         anchor: float | None = None
@@ -483,6 +529,8 @@ class HTTPTransport:
                 if not self._may_retry(request, transient, started, rate_limit_waited):
                     raise
                 transient += 1
+                if not isinstance(e, _UNDELIVERED_EXCEPTIONS):
+                    maybe_delivered = True
                 delay = _transient_delay(transient)
                 _note_retry(request, type(e).__name__, str(e), transient, delay)
                 time.sleep(delay)
@@ -492,12 +540,18 @@ class HTTPTransport:
                 request, transient, started, rate_limit_waited
             ):
                 transient += 1
+                maybe_delivered = True
                 delay = _transient_delay(transient)
                 _note_retry(request, cause, response.text[:120], transient, delay)
                 time.sleep(delay)
                 continue
             try:
                 self.raise_for_error(response, request.operation)
+            except NotFoundError as e:
+                if not _already_gone(request, e, maybe_delivered):
+                    raise
+                _delivered_no_earlier_than.set(anchor)
+                return request.parse(None)
             except RateLimitError as e:
                 delay = _rate_limit_delay(
                     e.retry_after, rate_limited + 1, rate_limit_waited
@@ -517,6 +571,7 @@ class HTTPTransport:
     async def acall(self, request: Request[T]) -> T:
         url, kwargs = self._kwargs(request)
         transient = rate_limited = 0
+        maybe_delivered = False
         rate_limit_waited = 0.0
         started = time.monotonic()
         anchor: float | None = None
@@ -532,6 +587,8 @@ class HTTPTransport:
                 if not self._may_retry(request, transient, started, rate_limit_waited):
                     raise
                 transient += 1
+                if not isinstance(e, _UNDELIVERED_EXCEPTIONS):
+                    maybe_delivered = True
                 delay = _transient_delay(transient)
                 _note_retry(request, type(e).__name__, str(e), transient, delay)
                 await asyncio.sleep(delay)
@@ -541,12 +598,18 @@ class HTTPTransport:
                 request, transient, started, rate_limit_waited
             ):
                 transient += 1
+                maybe_delivered = True
                 delay = _transient_delay(transient)
                 _note_retry(request, cause, response.text[:120], transient, delay)
                 await asyncio.sleep(delay)
                 continue
             try:
                 self.raise_for_error(response, request.operation)
+            except NotFoundError as e:
+                if not _already_gone(request, e, maybe_delivered):
+                    raise
+                _delivered_no_earlier_than.set(anchor)
+                return request.parse(None)
             except RateLimitError as e:
                 delay = _rate_limit_delay(
                     e.retry_after, rate_limited + 1, rate_limit_waited

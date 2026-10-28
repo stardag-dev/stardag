@@ -43,6 +43,10 @@ interface BuildOverrideSectionProps {
   // behaves like "some": withholding the warning while unsure is the one
   // direction that costs something.
   runningExecutions: "unknown" | "none" | "some";
+  // A plan-only build (sd.register) never runs and ends "registered", never
+  // "completed": the registry refuses Mark completed for it, so it is not
+  // offered. Failing or cancelling closes a registration that went wrong.
+  planOnly?: boolean;
   onChanged: (build: Build) => void;
 }
 
@@ -63,6 +67,7 @@ export function BuildOverrideSection({
   environmentId,
   buildStatus,
   runningExecutions,
+  planOnly = false,
   onChanged,
 }: BuildOverrideSectionProps) {
   const alive = useRef(true);
@@ -118,21 +123,23 @@ export function BuildOverrideSection({
 
       {chosen === null ? (
         <div className="flex flex-wrap gap-2">
-          {ACTIONS.map(({ action, label, dot }) => (
-            <button
-              key={action}
-              type="button"
-              onClick={() => {
-                setError(null);
-                setForce(false);
-                setPending(action);
-              }}
-              className="inline-flex items-center gap-2 rounded-md border border-gray-300 px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700"
-            >
-              <span className={`h-2 w-2 rounded-full ${dot}`} />
-              {label}
-            </button>
-          ))}
+          {ACTIONS.filter((a) => !(planOnly && a.action === "complete")).map(
+            ({ action, label, dot }) => (
+              <button
+                key={action}
+                type="button"
+                onClick={() => {
+                  setError(null);
+                  setForce(false);
+                  setPending(action);
+                }}
+                className="inline-flex items-center gap-2 rounded-md border border-gray-300 px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700"
+              >
+                <span className={`h-2 w-2 rounded-full ${dot}`} />
+                {label}
+              </button>
+            ),
+          )}
         </div>
       ) : (
         <div className="space-y-2 rounded-md border border-gray-300 bg-gray-50 px-3 py-2 dark:border-gray-600 dark:bg-gray-900/40">

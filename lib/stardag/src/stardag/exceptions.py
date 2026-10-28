@@ -181,6 +181,12 @@ class InstanceConflictError(StardagError):
         self.paths = paths
 
 
+class PlanOnlyUnsupportedError(StardagError):
+    """The registry does not support plan-only builds (``sd.register``,
+    ``sd.build(..., plan_only=True)``): it predates them and refused the
+    request. Upgrade the registry; nothing was registered."""
+
+
 class APIError(StardagError):
     """Error communicating with the Stardag API.
 

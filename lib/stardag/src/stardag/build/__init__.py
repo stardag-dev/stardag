@@ -67,6 +67,13 @@ from stardag.build._reactive import (
     TickSummary,
     run_tick_aio,
 )
+from stardag.build._plan_only import (
+    PlanOnlyResult,
+    RegisteredTask,
+    build_plan_only_aio,
+    register,
+    register_aio,
+)
 from stardag.build._registration import RequiresError
 from stardag.build._resident import build_aio
 from stardag.build._sequential import build_sequential, build_sequential_aio
@@ -119,7 +126,12 @@ __all__ = [
     "get_current_build_id",
     # Errors
     "DeploymentResolutionError",
+    "PlanOnlyResult",
+    "RegisteredTask",
     "RequiresError",
+    "build_plan_only_aio",
+    "register",
+    "register_aio",
     "SettingsError",
     # Reactive scheduling
     "RollOver",

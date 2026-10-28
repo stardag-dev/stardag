@@ -55,8 +55,11 @@ class Event(EnvironmentScopedMixin, Base):
     # Deferred to commit, every action has run by the time anything is
     # checked.
     __table_args__ = (
+        # Compared as text, not as ``event_type``: a migration that adds a
+        # build-level label must recreate this CHECK naming it, and Postgres
+        # refuses to use an enum label in the transaction that added it.
         CheckConstraint(
-            f"plan_id IS NULL OR event_type NOT IN ({_BUILD_EVENT_LABELS})",
+            f"plan_id IS NULL OR event_type::text NOT IN ({_BUILD_EVENT_LABELS})",
             name="ck_event_build_level_has_no_plan",
         ),
         ForeignKeyConstraint(

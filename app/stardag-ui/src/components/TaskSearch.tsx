@@ -271,6 +271,11 @@ export function TaskSearchPanel({
   const loadMore = useCallback(() => {
     if (!nextCursor || loadingMore) return;
     if (shownQuery === null) return;
+    // A first-page read has started but its render, which disables the
+    // button, has not committed yet: the rows are about to be replaced, and
+    // `abortRef` already holds the new read's controller, so a page fetched
+    // now would be appended to the new search's rows.
+    if (readInFlightRef.current) return;
     const controller = abortRef.current;
     setLoadingMore(true);
     // The next page of the rows shown, which a held search may no longer

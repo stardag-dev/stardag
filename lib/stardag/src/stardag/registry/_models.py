@@ -71,7 +71,9 @@ class RegistrationItem(BaseModel):
 # -----------------------------------------------------------------------------
 
 
-BuildStatus = Literal["pending", "running", "completed", "failed", "cancelled"]
+BuildStatus = Literal[
+    "pending", "running", "completed", "failed", "cancelled", "exit_early", "registered"
+]
 
 
 class BuildInfo(_Response):
@@ -98,6 +100,9 @@ class BuildInfo(_Response):
     #: Why the build is FAILED (its last ``BUILD_FAILED``'s message); None
     #: for any other status.
     error_message: str | None = None
+    #: Registers and runs nothing: created PENDING, ends REGISTERED. False
+    #: from a registry that does not serve it.
+    plan_only: bool = False
 
 
 class BuildListPage(_Response):

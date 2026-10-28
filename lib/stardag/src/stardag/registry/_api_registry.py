@@ -96,10 +96,16 @@ class APIRegistry(APIRegistryLedger, APIRegistryReads, RegistryABC):
         name: str | None = None,
         description: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
+        plan_only: bool = False,
     ) -> BuildInfo:
         return self.call(
             _build_create_req(
-                root_task_ids, build_id, name, description, executor_metadata
+                root_task_ids,
+                build_id,
+                name,
+                description,
+                executor_metadata,
+                plan_only,
             )
         )
 
@@ -111,10 +117,16 @@ class APIRegistry(APIRegistryLedger, APIRegistryReads, RegistryABC):
         name: str | None = None,
         description: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
+        plan_only: bool = False,
     ) -> BuildInfo:
         return await self.acall(
             _build_create_req(
-                root_task_ids, build_id, name, description, executor_metadata
+                root_task_ids,
+                build_id,
+                name,
+                description,
+                executor_metadata,
+                plan_only,
             )
         )
 
@@ -181,6 +193,12 @@ class APIRegistry(APIRegistryLedger, APIRegistryReads, RegistryABC):
 
     async def build_exit_early_aio(self, build_id: UUID) -> BuildInfo:
         return await self.acall(_build_transition_req(build_id, "exit-early"))
+
+    def build_registered(self, build_id: UUID) -> BuildInfo:
+        return self.call(_build_transition_req(build_id, "registered"))
+
+    async def build_registered_aio(self, build_id: UUID) -> BuildInfo:
+        return await self.acall(_build_transition_req(build_id, "registered"))
 
     def build_get_frontier(self, build_id: UUID) -> BuildFrontier:
         return self.call(_frontier_req(build_id))
@@ -625,6 +643,9 @@ class APIRegistry(APIRegistryLedger, APIRegistryReads, RegistryABC):
                 f"/concurrency-limits/{key}",
                 lambda _payload: None,
                 operation=f"Delete concurrency limit {key!r}",
+                # Re-sent after a lost answer, a delete that landed finds
+                # no limit: that is the delete having happened.
+                gone_code="unknown_limit",
             )
         )
 

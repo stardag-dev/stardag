@@ -193,12 +193,61 @@ describe("TaskSearch", () => {
     const box = screen.getByRole("combobox", { name: "Search tasks" });
     fireEvent.change(box, { target: { value: "trai" } });
     await waitFor(() => expect(lastSearch()).toMatchObject({ q: "trai" }));
+    const loadMore = () => screen.getByRole("button", { name: "Load more" });
+    // The pending read disables the button; wait for that render, or the
+    // wait for re-enabling below could pass on the one before it.
+    await waitFor(() => expect(loadMore()).toBeDisabled());
     // Shortened under three characters while that read is still pending.
     fireEvent.change(box, { target: { value: "tr" } });
     await waitFor(() => expect(window.location.search).toBe("?q=tr"));
-    fireEvent.click(await screen.findByRole("button", { name: "Load more" }));
+    // The URL is written before the render that holds the rows and aborts
+    // the read; only that render enables the button again. A click before
+    // it lands on a disabled button and is dropped (STA-175).
+    await waitFor(() => expect(loadMore()).toBeEnabled());
+    fireEvent.click(loadMore());
     await screen.findByText("Evaluate");
     expect(screen.queryByRole("button", { name: /Loading/ })).toBeNull();
+  });
+
+  it("ignores a Load more click once a new read has started", async () => {
+    window.history.replaceState({}, "", "/tasks?q=tra");
+    type Page = { tasks: TaskSummary[]; next_cursor: string | null };
+    const settle: Record<string, (page: Page) => void> = {};
+    const deferred = (key: string) =>
+      new Promise<Page>((resolve) => (settle[key] = resolve));
+    mocked.mockImplementation(async (_env, filters = {}) => {
+      if (filters.cursor) return deferred("page");
+      if (filters.q === "trai") {
+        // The click lands after the read has started (once this effect has
+        // returned), before the render that disables the button commits.
+        queueMicrotask(() =>
+          fireEvent.click(screen.getByRole("button", { name: "Load more" })),
+        );
+        return deferred("trai");
+      }
+      return { tasks: [task(T1)], next_cursor: "c1" };
+    });
+    render(<TaskSearch environmentId="env-1" onOpenTask={() => {}} />);
+    await screen.findByText("TrainModel");
+    fireEvent.change(screen.getByRole("combobox", { name: "Search tasks" }), {
+      target: { value: "trai" },
+    });
+    await waitFor(() => expect(settle.trai).toBeDefined());
+    act(() =>
+      settle.trai({ tasks: [task(T1, { task_name: "Trainer" })], next_cursor: null }),
+    );
+    await screen.findByText("Trainer");
+    // Had the old search's next page been asked for, it would land on the
+    // new search's rows.
+    await act(
+      async () =>
+        settle.page?.({
+          tasks: [task(T2, { task_name: "Evaluate" })],
+          next_cursor: null,
+        }),
+    );
+    expect(screen.queryByText("Evaluate")).toBeNull();
+    expect(searchCalls().filter((filters) => filters.cursor)).toEqual([]);
   });
 
   it("does not send a short q read from the URL", async () => {

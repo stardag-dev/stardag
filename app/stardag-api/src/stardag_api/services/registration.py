@@ -147,6 +147,20 @@ async def lock_build(
     return build
 
 
+def refuse_plan_only(build: Build, action: str) -> None:
+    """409 ``build_plan_only`` if ``build`` is plan-only: it registers and
+    runs nothing, so it cannot ``action`` (complete, exit early, resume,
+    be reactively scheduled)."""
+    if build.plan_only:
+        raise Conflict(
+            "build_plan_only",
+            f"build {build.id} is plan-only: it registers and runs nothing, so"
+            f" it cannot {action} (trigger a new build to run its tasks)",
+            build_id=str(build.id),
+            build_status=build.status.value,
+        )
+
+
 # ---------------------------------------------------------------------------
 # create_plan
 # ---------------------------------------------------------------------------
