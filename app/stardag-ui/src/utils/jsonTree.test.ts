@@ -7,6 +7,7 @@ import {
   findMatches,
   foldCase,
   hiddenCount,
+  indexOfChars,
   fuzzyMatch,
   MAX_FUZZY_TEXT,
   segmentsOf,
@@ -344,15 +345,24 @@ describe("copyValueText / sizeLabel", () => {
 });
 
 describe("paging wide containers", () => {
-  const nodes = indexJson({ wide: Array.from({ length: 450 }, (_, i) => i), x: 1 });
+  const nodes = indexJson({
+    wide: Array.from({ length: 450 }, (_, i) => i),
+    x: 1,
+  });
   const expanded = new Set(["$", "$.wide"]);
 
   it("draws the first page of children, then a show-more row", () => {
     const rows = visibleRows(nodes, expanded);
     expect(rows).toHaveLength(1 + PAGE_SIZE + 1 + 1);
     expect(rows[PAGE_SIZE + 1]).toBe(moreRow(1, "after"));
-    expect(moreOf(rows[PAGE_SIZE + 1])).toEqual({ parent: 1, direction: "after" });
-    expect(moreOf(moreRow(0, "before"))).toEqual({ parent: 0, direction: "before" });
+    expect(moreOf(rows[PAGE_SIZE + 1])).toEqual({
+      parent: 1,
+      direction: "after",
+    });
+    expect(moreOf(moreRow(0, "before"))).toEqual({
+      parent: 0,
+      direction: "before",
+    });
     expect(nodes[rows.at(-1)!].id).toBe("$.x");
     expect(hiddenCount(nodes, new Map(), 1, "after")).toBe(250);
     expect(hiddenCount(nodes, new Map(), 1, "before")).toBe(0);
@@ -389,5 +399,23 @@ describe("case folding", () => {
     const nodes = indexJson({ street: "ΟΔΟΣ" });
     expect(findMatches(nodes, "οδοσ")).toHaveLength(1);
     expect(findMatches(nodes, "οδος")).toHaveLength(1);
+  });
+});
+
+describe("indexOfChars", () => {
+  it("finds a substring of whole characters, or -1", () => {
+    expect(indexOfChars([..."abcabd"], [..."abd"])).toBe(3);
+    expect(indexOfChars([..."aaaab"], [..."aab"])).toBe(2);
+    expect(indexOfChars([..."abc"], [..."abd"])).toBe(-1);
+    expect(indexOfChars([..."ab😀c"], [..."😀c"])).toBe(2);
+    expect(indexOfChars([..."abc"], [])).toBe(0);
+  });
+
+  it("stays linear on a pathological long query", () => {
+    const text = [...("a".repeat(100_000) + "b")];
+    const query = [...("a".repeat(10_000) + "b")];
+    const started = performance.now();
+    expect(indexOfChars(text, query)).toBe(90_000);
+    expect(performance.now() - started).toBeLessThan(500);
   });
 });

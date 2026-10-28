@@ -526,7 +526,7 @@ const JsonRow = memo(function JsonRow({
           className={
             typeof node.key === "number"
               ? "text-gray-400 dark:text-gray-500"
-              : "text-sky-800 dark:text-sky-300"
+              : "whitespace-pre text-sky-800 dark:text-sky-300"
           }
         >
           <Highlighted text={String(node.key)} ranges={keyRanges} current={current} />

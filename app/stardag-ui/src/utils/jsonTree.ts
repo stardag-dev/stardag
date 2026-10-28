@@ -161,9 +161,15 @@ export function isMoreRow(row: number): boolean {
 }
 
 /** The container a "show more" row belongs to, and which side it is on. */
-export function moreOf(row: number): { parent: number; direction: MoreDirection } {
+export function moreOf(row: number): {
+  parent: number;
+  direction: MoreDirection;
+} {
   const n = -row - 1;
-  return { parent: Math.floor(n / 2), direction: n % 2 === 0 ? "before" : "after" };
+  return {
+    parent: Math.floor(n / 2),
+    direction: n % 2 === 0 ? "before" : "after",
+  };
 }
 
 export function windowOf(nodes: JsonNode[], windows: Windows, parent: number): Window {
@@ -490,10 +496,24 @@ function toRanges({ origin, width }: Folded, positions: number[]): Range[] {
   return ranges;
 }
 
-function indexOfChars(chars: string[], q: string[]): number {
-  outer: for (let at = 0; at + q.length <= chars.length; at++) {
-    for (let k = 0; k < q.length; k++) if (chars[at + k] !== q[k]) continue outer;
-    return at;
+/**
+ * First index of `q` in `chars` (both arrays of whole characters), or -1.
+ * Knuth-Morris-Pratt: linear in `chars.length + q.length`, so a long
+ * pasted query over a long value cannot stall the UI thread the way a
+ * naive scan (text x query comparisons) would.
+ */
+export function indexOfChars(chars: string[], q: string[]): number {
+  if (q.length === 0) return 0;
+  const fail = new Array<number>(q.length).fill(0);
+  for (let i = 1, k = 0; i < q.length; i++) {
+    while (k > 0 && q[i] !== q[k]) k = fail[k - 1];
+    if (q[i] === q[k]) k++;
+    fail[i] = k;
+  }
+  for (let i = 0, k = 0; i < chars.length; i++) {
+    while (k > 0 && chars[i] !== q[k]) k = fail[k - 1];
+    if (chars[i] === q[k]) k++;
+    if (k === q.length) return i - q.length + 1;
   }
   return -1;
 }
