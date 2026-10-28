@@ -297,9 +297,26 @@ def failure_class(error: BaseException | None) -> str:
     """
     if error is None:
         return REAL
-    if isinstance(error, RegistryContainerRecycled):
-        return RETRYABLE
-    return RETRYABLE if transport_timeout(error) is not None else REAL
+    return RETRYABLE if _retryable(error, set()) else REAL
+
+
+def _retryable(error: BaseException, groups_seen: set[int]) -> bool:
+    """One failure, or a group of independent ones, every one retryable.
+
+    A group is read member by member, as ``transport_timeout`` reads one:
+    pytest builds a group from several failing fixture finalizers, so a
+    recycle check and a cleanup that timed out can arrive together, and
+    each is retryable on its own terms. Any real member vetoes the group.
+    """
+    members = _group_members(error)
+    if members is None:
+        if isinstance(error, RegistryContainerRecycled):
+            return True
+        return transport_timeout(error) is not None
+    if id(error) in groups_seen:
+        return True
+    groups_seen.add(id(error))
+    return all(_retryable(member, groups_seen) for member in members)
 
 
 def transport_timeout(error: BaseException) -> BaseException | None:

@@ -965,6 +965,18 @@ def _wrapped_timeout() -> BaseException:
         pytest.param(
             _raised(RegistryContainerRecycled("boot id changed")), id="recycle"
         ),
+        pytest.param(
+            _raised(
+                ExceptionGroup(  # noqa: F821
+                    "teardown",
+                    [
+                        RegistryContainerRecycled("boot id changed"),
+                        httpx.ReadTimeout("timed out", request=_REQUEST),
+                    ],
+                )
+            ),
+            id="recycle-beside-a-timeout",
+        ),
     ],
 )
 def test_the_two_retryable_failures(error: BaseException) -> None:
@@ -1000,6 +1012,18 @@ def test_the_two_retryable_failures(error: BaseException) -> None:
                 )
             ),
             id="timeout-beside-a-real-failure",
+        ),
+        pytest.param(
+            _raised(
+                ExceptionGroup(  # noqa: F821
+                    "teardown",
+                    [
+                        RegistryContainerRecycled("boot id changed"),
+                        RuntimeError("cleanup failed"),
+                    ],
+                )
+            ),
+            id="recycle-beside-a-real-failure",
         ),
         pytest.param(None, id="no-exception-at-all"),
     ],
