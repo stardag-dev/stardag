@@ -17,6 +17,12 @@ from code that keeps evolving.
     - **A reference needs a registry** — the one the task was registered
       in. A pinned one is served from the local body cache after its first
       read, so it also works offline.
+    - **For pinned, long-lived instances in code** (a key dataset, a
+      trained model), prefer the
+      [committed task store](committed-task-store.md):
+      `TrainedModel.from_store(...)` loads a reviewed copy kept in the
+      repository, eagerly, with no registry. A reference is the handle for
+      ad hoc work against the current environment.
 
 ## The problem: constants that re-key
 
@@ -54,7 +60,12 @@ TrainedModel.ref("6f1c2c62-1f5c-5a0e-9b8e-3a4f0e1d2c3b", instance_id="0193b0c4-.
 
 The task's namespace is an identity, not an import path, so the CLI does not
 guess the import from it. Pass `-m my_project.models` (the module defining the
-class) to have it print the import line as well. The task detail page in the
+class), or list the project's task modules once under `[project]
+task_modules` in `.stardag/config.toml` (see
+[Import resolution](committed-task-store.md#import-resolution)), to have it
+print the import line as well. Add `--write` to copy the instance into the
+[committed task store](committed-task-store.md) and print a `from_store(...)`
+line instead. The task detail page in the
 registry UI has the same `ref(...)` line behind a copy button.
 
 Use it wherever the task would go:
@@ -184,8 +195,14 @@ loaded back.
   code, recomputes to another task id — a significant field was removed or
   renamed without a `compat_default`.
 - **A class is not imported.** Every task class in the body, nested ones
-  included, must be imported; the error names the missing namespace and
-  class.
+  included, must be imported. On the first miss in a process, the project's
+  `[project] task_modules` are imported and the lookup retried (see
+  [Import resolution](committed-task-store.md#import-resolution)); the
+  error names the missing namespace and class, and what was imported.
+
+A reference is served from the
+[committed task store](committed-task-store.md#references-consult-the-store-first)
+before the registry when the project configures one and it holds the body.
 
 ## A class with a field named `ref`
 
@@ -207,8 +224,14 @@ class whose `ref` is shadowed.
 
 ## Testing code that uses references
 
-A pinned reference names one instance of one task, so a test can serve that
-exact instance without a registry. Record the instance body next to the code
+The simplest way to test code that pins instances is to pin them in the
+[committed task store](committed-task-store.md#tests-read-the-store-offline):
+`from_store` reads it with no registry, and references are served from it
+too.
+
+To test code against a registry instead, seed an in-memory one: a pinned
+reference names one instance of one task, so a test can serve that exact
+instance without a real registry. Record the instance body next to the code
 that pins it (from `stardag tasks show <task-id> --json`, which lists the
 task's instances with their ids and bodies), then seed it into
 `stardag.testing.InMemoryRegistry` under the same ids:

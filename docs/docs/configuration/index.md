@@ -27,6 +27,17 @@ Settings are resolved in priority order (highest to lowest):
 3. **User config** (`~/.stardag/config.toml`)
 4. **Defaults**
 
+The project config may also carry a `[project]` table describing the code
+base rather than a registry profile, read even with `STARDAG_NO_REGISTRY=1`:
+
+```toml
+[project]
+task_store = "stardag-tasks"           # relative to the project root
+task_modules = ["my_project.tasks.*"]  # where the task classes live
+```
+
+See [Pin Tasks in a Committed Store](../how-to/committed-task-store.md).
+
 ## Quick Start
 
 ### Local Development

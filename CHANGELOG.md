@@ -70,7 +70,8 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   than excluding the task whose `requires()` built the reference.
 - **New: `stardag tasks ref <task-id> [--instance <id>]`** (STA-148)
   prints a `ref(...)` call for a registered task, pinned to an instance
-  (the newest by default), and the class's import when `--module` loads it.
+  (the newest by default), and the class's import when `--module` (or the
+  project's `task_modules`) loads it.
 - **Changed: `from_registry` validates a body into the class it names**
   (STA-148). A body of an unrelated class is refused by name rather than as
   a task id mismatch, `Base.from_registry(...)` returns the concrete
@@ -107,6 +108,44 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   The body is stored as is; hydration checks it. Re-seeding an instance is
   idempotent with the same body and a `ValueError` with another; an
   unpinned reference reads the most recently seeded instance.
+- **New: the committed task store** (STA-157), a reviewed,
+  registry-independent copy of the task instances a code base pins (a key
+  dataset, a trained model), kept in the repository and loaded eagerly.
+  `MyTask.from_store(task_id, instance_id=None, *, ...)` returns the real
+  task (typed `Self`; fields readable, `model_copy` works; `instance_hash=`
+  and `store=` are keyword-only), and `sd.task_from_store(MyTask, ...)` is the function
+  form for a class whose field shadows it. Writers:
+  `stardag tasks ref <task-id> --write [--store DIR]` copies a registry
+  instance after checking it rehydrates to its task id, and
+  `sd.write_to_store(tasks)` writes from task objects with no registry. The
+  format is normalized and content-addressed: one file per distinct
+  instance body at `<namespace>.<Name>/<task_id>/<instance_hash>.json`,
+  every nested task a pointer to its own file (shared upstreams stored
+  once), re-inlining to the original body byte for byte, written
+  deterministically. Each file records its class's module as an import
+  hint and where the body came from. The store is configured as
+  `[project] task_store` in `.stardag/config.toml` (relative to the
+  project root) or `STARDAG_TASK_STORE`. See the new how-to, "Pin Tasks in
+  a Committed Store".
+- **New: `[project] task_modules`** (STA-162), in `.stardag/config.toml`
+  or `STARDAG_TASK_MODULES`: the modules defining the project's task
+  classes, in the `StardagApp(task_modules=...)` pattern grammar. Any
+  rehydration that misses a class (`task_from_body`, `from_registry`,
+  `TaskRef` hydration, `from_store`) imports them once per process and
+  retries; the error, now `sd.TaskClassNotRegisteredError` (a
+  `TaskRehydrationError`), names the class, the patterns and any import
+  failure. `stardag tasks ref` uses them to print the import without
+  `--module`.
+- **New: references consult the task store first** (STA-157).
+  `TaskRef.hydrate()` and build-start hydration serve a pinned reference
+  from a body stored under its instance id, and an unpinned one when the
+  store holds exactly one body of the task, before the body cache and the
+  registry. Inside a remote container there is no store, and the registry
+  is read as before.
+- **Breaking: a task field named `from_store` now shadows the classmethod**
+  (STA-157), as a field named `ref` does: pydantic warns at class
+  definition and pyright reports an incompatible override. Use
+  `sd.task_from_store(MyTask, ...)` for such a class, or rename the field.
 - **Corrected: a worker's `retries=` does not recover a task that raises**
   (STA-154). The docs and the `FunctionSettings.retries` docstring said
   Modal's retry covers an exception raised inside the container. Under the

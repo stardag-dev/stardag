@@ -607,7 +607,8 @@ matches.
     stardag tasks list [--status S] [--limit N] [--cursor C] [--json]
     stardag tasks show <task-id> [--include-ended] [--events N] [--json]
     stardag tasks check <task-id> --module MODULE [--json]
-    stardag tasks ref <task-id> [--instance <id>] [--module MODULE] [--json]
+    stardag tasks ref <task-id> [--instance <id>] [--module MODULE]
+        [--write [--store DIR]] [--json]
     stardag tasks retry <task-id> [--build <build-id>] [--yes] [--json]
     stardag tasks cancel <task-id> [--build <build-id>] [--yes] [--json]
     stardag tasks exclude <plan-id> <task-id> --reason TEXT [--yes] [--json]
@@ -626,7 +627,8 @@ matches.
     uv run stardag tasks list [--status S] [--limit N] [--cursor C] [--json]
     uv run stardag tasks show <task-id> [--include-ended] [--events N] [--json]
     uv run stardag tasks check <task-id> --module MODULE [--json]
-    uv run stardag tasks ref <task-id> [--instance <id>] [--module MODULE] [--json]
+    uv run stardag tasks ref <task-id> [--instance <id>] [--module MODULE]
+        [--write [--store DIR]] [--json]
     uv run stardag tasks retry <task-id> [--build <build-id>] [--yes] [--json]
     uv run stardag tasks cancel <task-id> [--build <build-id>] [--yes] [--json]
     uv run stardag tasks exclude <plan-id> <task-id> --reason TEXT [--yes] [--json]
@@ -683,9 +685,15 @@ deployments`.
 - `tasks ref <task-id>` — print the code that references the task: a
   `Task.ref(...)` call, pinned to an instance (`--instance`, default the
   task's newest). Pass `--module` (repeatable), the module defining the
-  class, to also print its import; the namespace is never read as an
-  import path. Writes nothing. See
-  [Reference Existing Tasks](../how-to/reference-existing-tasks.md).
+  class, to also print its import (not needed for classes the project's
+  `[project] task_modules` cover); the namespace is never read as an
+  import path. Writes nothing, unless `--write`: then the instance body is
+  checked to rehydrate to its task id, written with every nested task's
+  body into the committed task store (`--store DIR`, default the
+  configured `[project] task_store`), and the printed line is the eager
+  `Task.from_store(...)`. See
+  [Reference Existing Tasks](../how-to/reference-existing-tasks.md) and
+  [Pin Tasks in a Committed Store](../how-to/committed-task-store.md).
 - `tasks retry` — reset a failed (or otherwise ended) task to `PENDING`
   under the build's active plan, so its next tick or driver runs it
   again. Refused on `COMPLETED` or under a live claim.
@@ -794,6 +802,8 @@ All CLI behavior can be overridden with environment variables:
 | `STARDAG_TARGET_ROOTS`       | JSON string of target roots   |
 | `STARDAG_TARGET_ROOTS__NAME` | Specific target root override |
 | `STARDAG_REGISTRY_CACHE`     | `0` turns off the body cache  |
+| `STARDAG_TASK_STORE`         | The committed task store      |
+| `STARDAG_TASK_MODULES`       | Task modules, comma-separated |
 
 ## Common Workflows
 

@@ -211,6 +211,8 @@ stardag executions list --task <task-id>
 stardag tasks list [--status running]                 # Claim column names the holding build
 stardag tasks show <task-id> [--events N]             # status, claim holder, instances, executions
 stardag tasks check <task-id> --module mypkg.tasks    # run complete() locally; writes nothing
+stardag tasks ref <task-id> [--instance <id>]         # print a pinned MyTask.ref(...) line
+stardag tasks ref <task-id> --write [--store DIR]     # copy into the committed task store
 stardag tasks retry <task-id> [--build <build-id>]    # FAILED -> PENDING (refused on COMPLETED)
 stardag tasks cancel <task-id> [--build <build-id>]   # release one claim; stops nothing
 stardag tasks exclude <plan-id> <task-id> --reason TEXT
@@ -327,6 +329,8 @@ default target root on a Modal volume, and a local SDK registry + profile named 
 | `STARDAG_ENVIRONMENT_ID` | Environment UUID          |
 | `STARDAG_API_KEY`        | API key (`sk_...`)        |
 | `STARDAG_TARGET_ROOTS`   | JSON dict of target roots |
+| `STARDAG_TASK_STORE`     | Committed task store dir  |
+| `STARDAG_TASK_MODULES`   | Task modules (comma-sep.) |
 
 ### Config File Example
 
@@ -354,6 +358,9 @@ default = "~/.stardag/local-target-roots/default/default"
 | `~/.stardag/access-token-cache/` | Token cache                  |
 | `~/.stardag/local-target-roots/` | Default local target storage |
 | `.stardag/config.toml`           | Project-level configuration  |
+
+The project config's `[project]` table (`task_store`, `task_modules`)
+describes the code base and is read even with `STARDAG_NO_REGISTRY=1`.
 
 ## Local Development Setup
 

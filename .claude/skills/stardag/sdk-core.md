@@ -102,6 +102,52 @@ replace every reference with its hydrated task before registering;
 `sd.resolve_refs(tasks)` does it outside a build. `sd.AliasTask` is
 deprecated in favour of it.
 
+### The Committed Task Store (Pinned, Long-Lived Instances)
+
+**Which handle to use:** for pinned, long-lived instances in code (a key
+dataset, a trained model), the committed task store, loaded **eagerly**; for
+ad hoc work (a notebook loading an asset already materialized in the current
+environment), `MyTask.ref(...)` / `from_registry`, with nothing saved to the
+store. For key instances, also register them in the relevant (production)
+environment so they stay searchable there with tags and descriptions: the
+registry is the record of what ran, the store a reviewed, immutable copy.
+
+```toml
+# <repo>/.stardag/config.toml
+[project]
+task_store = "stardag-tasks"           # relative to the project root, not the cwd
+task_modules = ["my_project.tasks.*"]  # imported on demand when a class is missing
+```
+
+```sh
+stardag tasks ref <task-id> --write   # copy a registry instance into the store, print the line
+```
+
+```python
+BASELINE = TrainedModel.from_store("6f1c...", instance_id="0193...")  # real task, no registry
+BASELINE.learning_rate                                # fields readable
+BASELINE.model_copy(update={"learning_rate": 1e-4})   # derivations work
+sd.write_to_store(TrainedModel(data=...))             # from a task object (not built yet is fine)
+```
+
+- Format: `<store>/<namespace>.<Name>/<task_id>/<instance_hash>.json`, one
+  file per distinct body, nested tasks as pointers
+  (`{"__stardag_task": {...}}`, by task id and instance hash; shared
+  upstreams once); lossless,
+  content-addressed, deterministic. Never edit files by hand (refused on read).
+- Each file records the class's module as an import hint, so `from_store`
+  works in a fresh process with no imports. Any rehydration miss imports
+  `[project] task_modules` once and retries. A namespace is never read as a
+  module path.
+- `ref.hydrate()` and build-start hydration look in the store first (pinned
+  ref: body stored under its instance id; unpinned: only one body stored).
+  Remote containers (Modal) have no store, so refs from `requires()` read the
+  registry there.
+- Tests: read the store with `STARDAG_NO_REGISTRY=1`, no profile, no fixtures.
+  `InMemoryRegistry.add_instance(body=, task_id=, instance_id=)` remains the
+  way to seed an in-memory registry.
+- `STARDAG_TASK_STORE` / `STARDAG_TASK_MODULES` override the config.
+
 ## Decorator API (@sd.task)
 
 ```python

@@ -25,6 +25,11 @@ Auto-generated API documentation from source code.
         - task_ref
         - clear_hydration_memo
         - task_from_body
+        - task_from_store
+        - write_to_store
+        - StoredTask
+        - TaskStoreError
+        - TaskClassNotRegisteredError
         - TaskRefHydrationError
         - TaskRefNotHydratedError
         - TaskRefRegistryUnavailableError
