@@ -34,7 +34,7 @@ with `STARDAG_NO_REGISTRY=1`:
 
 ```toml
 [tool.stardag]
-task_store = "src/my_package/stardag_tasks"   # relative to this pyproject.toml
+task_store = "src/my_package/stardag_task_store"   # relative to this pyproject.toml
 task_modules = ["my_package.tasks.*"]         # where the task classes live
 ```
 

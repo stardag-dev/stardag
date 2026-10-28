@@ -6,7 +6,7 @@ config are never read for them) and read even with ``STARDAG_NO_REGISTRY=1``::
 
     # <package>/pyproject.toml
     [tool.stardag]
-    task_store = "src/my_package/stardag_tasks"   # or "pkg:my_package/stardag_tasks"
+    task_store = "src/my_package/stardag_task_store"   # or "pkg:my_package/stardag_task_store"
     task_modules = ["my_package.tasks.*", "!my_package.tasks.deploy"]
 
 - ``task_store``: the committed task store (``MyTask.from_store``,
@@ -104,7 +104,7 @@ def resolve_store_spec(spec: str | os.PathLike[str], base: Path | None) -> Path:
         if not package:
             raise ProjectConfigError(
                 f"Malformed store spec {text!r}: expected "
-                '"pkg:<package>/<path inside it>", e.g. "pkg:my_package/stardag_tasks".'
+                '"pkg:<package>/<path inside it>", e.g. "pkg:my_package/stardag_task_store".'
             )
         try:
             files = importlib.resources.files(package)

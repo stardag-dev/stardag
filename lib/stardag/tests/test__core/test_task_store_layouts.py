@@ -111,8 +111,10 @@ def test_a_pinned_constant_reads_its_own_packages_store_from_another_package(
     repo = tmp_path / "repo"
     (repo).mkdir()
     (repo / "pyproject.toml").write_text('[project]\nname = "monorepo"\n')  # no table
-    src_a = _package(repo / "pkg_a", "pkg_a", 'task_store = "src/pkg_a/stardag_tasks"')
-    src_b = _package(repo / "pkg_b", "pkg_b", 'task_store = "stardag_tasks"')
+    src_a = _package(
+        repo / "pkg_a", "pkg_a", 'task_store = "src/pkg_a/stardag_task_store"'
+    )
+    src_b = _package(repo / "pkg_b", "pkg_b", 'task_store = "stardag_task_store"')
     model_id = _pin(tmp_path, repo / "pkg_a", src_a, "pkg_a", 3)
     (src_a / "pkg_a" / "pins.py").write_text(
         "from pkg_a.models import TrainedModel\n"
@@ -121,7 +123,7 @@ def test_a_pinned_constant_reads_its_own_packages_store_from_another_package(
     (src_b / "pkg_b" / "use.py").write_text(
         "from pkg_a.pins import BASELINE\nprint(BASELINE.data.size)\n"
     )
-    assert (repo / "pkg_a" / "src" / "pkg_a" / "stardag_tasks").is_dir()
+    assert (repo / "pkg_a" / "src" / "pkg_a" / "stardag_task_store").is_dir()
     for cwd in (repo / "pkg_b", tmp_path):
         out = _run(tmp_path, cwd, "import pkg_b.use", src_a, src_b)
         assert out == "3"
@@ -222,14 +224,16 @@ def test_an_installed_package_reads_the_store_it_ships(tmp_path):
         '[project]\nname = "consumer"\n\n[tool.stardag]\ntask_store = "decoy"\n'
     )
     build = tmp_path / "build"
-    src = _package(build, "inst_pkg", 'task_store = "src/inst_pkg/stardag_tasks"')
+    src = _package(build, "inst_pkg", 'task_store = "src/inst_pkg/stardag_task_store"')
     model_id = _pin(tmp_path, build, src, "inst_pkg", 6)
     site = repo / ".venv" / "lib" / "python3.12" / "site-packages"
     site.mkdir(parents=True)
     import shutil
 
     shutil.copytree(src / "inst_pkg", site / "inst_pkg")  # what a wheel ships
-    assert (site / "inst_pkg" / "stardag_tasks" / "stardag_task_store.toml").exists()
+    assert (
+        site / "inst_pkg" / "stardag_task_store" / "stardag_task_store.toml"
+    ).exists()
     (site / "inst_pkg" / "pins.py").write_text(
         f'from inst_pkg.models import TrainedModel\nX = TrainedModel.from_store("{model_id}")\n'
     )
@@ -240,17 +244,17 @@ def test_an_installed_package_reads_the_store_it_ships(tmp_path):
 
 def test_a_pkg_spec_names_a_store_inside_a_package(tmp_path):
     src = _package(
-        tmp_path / "pkg", "spec_pkg", 'task_store = "pkg:spec_pkg/stardag_tasks"'
+        tmp_path / "pkg", "spec_pkg", 'task_store = "pkg:spec_pkg/stardag_task_store"'
     )
     model_id = _pin(tmp_path, tmp_path / "pkg", src, "spec_pkg", 7)
-    assert (src / "spec_pkg" / "stardag_tasks").is_dir()
+    assert (src / "spec_pkg" / "stardag_task_store").is_dir()
     out = _run(
         tmp_path,
         tmp_path,
         f"""
         import stardag as sd
         from spec_pkg.models import TrainedModel
-        print(sd.task_from_store(TrainedModel, "{model_id}", store="pkg:spec_pkg/stardag_tasks").data.size)
+        print(sd.task_from_store(TrainedModel, "{model_id}", store="pkg:spec_pkg/stardag_task_store").data.size)
         """,
         src,
     )
@@ -345,10 +349,10 @@ def test_an_installed_package_uses_the_task_modules_in_its_marker(tmp_path):
     src = _package(
         build,
         "mark_pkg",
-        'task_store = "src/mark_pkg/stardag_tasks"\ntask_modules = ["mark_pkg.models"]',
+        'task_store = "src/mark_pkg/stardag_task_store"\ntask_modules = ["mark_pkg.models"]',
     )
     model_id = _pin(tmp_path, build, src, "mark_pkg", 2)
-    for path in (src / "mark_pkg" / "stardag_tasks").rglob("*.json"):
+    for path in (src / "mark_pkg" / "stardag_task_store").rglob("*.json"):
         data = json.loads(path.read_text())
         data["module"] = "moved.away"
         path.write_text(json.dumps(data))
@@ -364,7 +368,7 @@ def test_an_installed_package_uses_the_task_modules_in_its_marker(tmp_path):
 
 def test_an_explicit_store_bypasses_an_ambiguous_installed_package(tmp_path):
     build = tmp_path / "build"
-    src = _package(build, "amb_pkg", 'task_store = "src/amb_pkg/stardag_tasks"')
+    src = _package(build, "amb_pkg", 'task_store = "src/amb_pkg/stardag_task_store"')
     model_id = _pin(tmp_path, build, src, "amb_pkg", 4)
     second = src / "amb_pkg" / "other_tasks"
     second.mkdir()
@@ -373,7 +377,7 @@ def test_an_explicit_store_bypasses_an_ambiguous_installed_package(tmp_path):
     (site / "amb_pkg" / "pins.py").write_text(
         "from pathlib import Path\n"
         "from amb_pkg.models import TrainedModel\n"
-        f'X = TrainedModel.from_store("{model_id}", store=Path(__file__).parent / "stardag_tasks")\n'
+        f'X = TrainedModel.from_store("{model_id}", store=Path(__file__).parent / "stardag_task_store")\n'
     )
     out = _run(
         tmp_path, tmp_path, "import amb_pkg.pins as p; print(p.X.data.size)", site

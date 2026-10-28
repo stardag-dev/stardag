@@ -52,13 +52,13 @@ ships with the wheel and with any image the package is copied into:
 ```toml
 # my-package/pyproject.toml
 [tool.stardag]
-task_store = "src/my_package/stardag_tasks"
+task_store = "src/my_package/stardag_task_store"
 task_modules = ["my_package.tasks.*", "!my_package.tasks.deploy"]
 ```
 
 - `task_store` is a directory, created on first write. A relative path
   resolves against the directory of the `pyproject.toml` declaring it. The
-  form `"pkg:my_package/stardag_tasks"` names a directory inside an
+  form `"pkg:my_package/stardag_task_store"` names a directory inside an
   importable package instead (resolved with `importlib.resources`), which is
   the same place whether the package runs from a checkout, an installed
   wheel or a container image.
@@ -70,7 +70,7 @@ task_modules = ["my_package.tasks.*", "!my_package.tasks.deploy"]
   See [Import resolution](#import-resolution).
 - Ship the store as package data: hatchling includes every file under the
   package by default; with setuptools, add it to `package-data` (for example
-  `"my_package" = ["stardag_tasks/**/*"]`).
+  `"my_package" = ["stardag_task_store/**/*"]`).
 
 This table is read only for the store and the task modules, never for
 registry profiles, and is read even with `STARDAG_NO_REGISTRY=1`. Registry
@@ -112,7 +112,7 @@ To pin a store explicitly, relative to the module itself:
 from pathlib import Path
 
 BASELINE = TrainedModel.from_store(
-    "6f1c...", instance_hash="7a2e...", store=Path(__file__).parent / "stardag_tasks"
+    "6f1c...", instance_hash="7a2e...", store=Path(__file__).parent / "stardag_task_store"
 )
 ```
 
@@ -199,7 +199,7 @@ the result is a `TrainedModel` with that task id.
 ## The store format
 
 ```text
-src/my_package/stardag_tasks/
+src/my_package/stardag_task_store/
 ├── stardag_task_store.toml           # marker: this directory is a store
 ├── my_package.models.Dataset/
 │   └── 9c4c6f0f-.../                 # task id
@@ -344,15 +344,15 @@ For a test that needs an in-memory registry to serve an instance instead
 repo/
 ├── pyproject.toml                    # no [tool.stardag]: passed by the walk
 ├── features/
-│   ├── pyproject.toml                # task_store = "src/features/stardag_tasks"
+│   ├── pyproject.toml                # task_store = "src/features/stardag_task_store"
 │   └── src/features/
 │       ├── pins.py                   # DATASET = Dataset.from_store(...)
-│       └── stardag_tasks/
+│       └── stardag_task_store/
 └── training/
-    ├── pyproject.toml                # task_store = "src/training/stardag_tasks"
+    ├── pyproject.toml                # task_store = "src/training/stardag_task_store"
     └── src/training/
         ├── pins.py                   # BASELINE = TrainedModel.from_store(...)
-        └── stardag_tasks/
+        └── stardag_task_store/
 ```
 
 `training` may import `features.pins.DATASET`: that constant was loaded by
@@ -378,7 +378,7 @@ A process that runs your tasks remotely (a Modal worker, a reactive tick)
 reads a store only if the image has it:
 
 - **Ship the store with the package.** A store inside the package
-  (`src/my_package/stardag_tasks`, or a `pkg:` spec) is copied into the
+  (`src/my_package/stardag_task_store`, or a `pkg:` spec) is copied into the
   image with the package source and found there by the same rules.
   Otherwise, set `STARDAG_TASK_STORE` in the image.
 - **A module-level `from_store(...)` constant is evaluated at import.** If

@@ -115,7 +115,7 @@ registry is the record of what ran, the store a reviewed, immutable copy.
 ```toml
 # <package>/pyproject.toml  (one per package; registry config stays in .stardag/)
 [tool.stardag]
-task_store = "src/my_package/stardag_tasks"   # inside the package: ships with it
+task_store = "src/my_package/stardag_task_store"   # inside the package: ships with it
 task_modules = ["my_package.tasks.*", "!my_package.tasks.deploy"]  # "!" excludes
 ```
 
