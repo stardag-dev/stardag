@@ -18,6 +18,8 @@ things to different callers.
 
 from __future__ import annotations
 
+import functools
+
 import asyncio
 import collections
 import contextvars
@@ -49,6 +51,7 @@ from stardag.exceptions import (
     TokenExpiredError,
 )
 from stardag.registry._auth import StardagAPIKeyAuth, StardagTokenAuth
+from stardag.registry._instance_cache import secret_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -324,6 +327,14 @@ class HTTPTransport:
             reg.auth.api_key.get_secret_value() if reg and reg.auth.api_key else None
         )
         self._auth: httpx.Auth | None
+        # What decides which environment answers, for the instance-body
+        # cache's partition (``_instance_cache``): the key itself with
+        # API-key auth (the server reads the environment off the key, so a
+        # configured environment id may not be the one answering), the
+        # workspace and environment otherwise. Never the raw key: its
+        # fingerprint, derived lazily (``cache_identity``) since the KDF
+        # is deliberately slow and most clients never touch the cache.
+        self._cache_workspace_id: str = (reg.workspace_id if reg else "") or ""
         if resolved_api_key:
             self._auth = StardagAPIKeyAuth(resolved_api_key)
         elif reg and reg.auth.access_token:
@@ -348,6 +359,13 @@ class HTTPTransport:
         self._client: httpx.Client | None = None
         self._async_client: httpx.AsyncClient | None = None
         self._async_client_loop: asyncio.AbstractEventLoop | None = None
+
+    @functools.cached_property
+    def cache_identity(self) -> tuple[str, ...]:
+        """The instance-body cache's partition identity (see ``__init__``)."""
+        if isinstance(self._auth, StardagAPIKeyAuth):
+            return ("api-key", secret_fingerprint(self._auth.api_key))
+        return ("environment", self._cache_workspace_id, self.environment_id or "")
 
     # -- clients -----------------------------------------------------------------
 

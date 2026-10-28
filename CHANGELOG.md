@@ -6,6 +6,34 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+### SDK
+
+- **New: `sd.task_from_body(body, expected_task_id=None)`** (STA-147), the
+  public, documented way to rebuild a task from a stored instance body:
+  compat-mode validation, the task id check, and an error naming the
+  namespace and name of any task class, nested ones included, whose module
+  is not imported. Previously this needed the private `CONTEXT_MODE_KEY`.
+  `task_from_registry_data` stays, as the same function.
+- **New: `from_registry(task_id, instance_id=...)` pins an instance**
+  (STA-147). Without `instance_id` it loads the newest instance, as before;
+  with it, that instance, after checking it belongs to the task. The
+  registry client gains `task_instance_get(instance_id, *, task_id=None)`
+  (and `_aio`), reading `GET /instances/{id}`. Against a registry without
+  that route it reads the instance from `GET /tasks/{task_id}` instead, so
+  it needs no server upgrade when `task_id` is given (`from_registry` always
+  passes it). `TaskInstanceInfo` gains an optional `task_id`.
+- **New: a local cache of instance bodies** (STA-147), under
+  `~/.stardag/registry-cache/`, partitioned by registry URL and by what
+  decides the answering environment (the API key's fingerprint, or the
+  workspace and environment), so one profile never reads another's
+  entries. It holds immutable instance bodies keyed by instance id, never
+  status, `expanded_at` or "the newest instance". `task_instance_get` and a pinned
+  `from_registry` read through it, so a pinned load works offline after one
+  online read; a cached body is still checked against the task id, and an
+  unreadable or mismatching entry is discarded and re-read. Writes are
+  atomic. `stardag cache clear [--all]` empties it;
+  `STARDAG_REGISTRY_CACHE=0` turns it off.
+
 ### UI
 
 - Task parameters are shown as a collapsible, searchable tree instead of
