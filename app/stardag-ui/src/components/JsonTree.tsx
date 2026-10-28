@@ -1,7 +1,8 @@
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useStableJson } from "../hooks/useStableJson";
+import { useTreeSearch } from "../hooks/useTreeSearch";
 import {
   allContainerIds,
-  ancestorIds,
   copyValueText,
   defaultExpanded,
   findMatches,
@@ -13,30 +14,21 @@ import {
   nthChild,
   PAGE_SIZE,
   windowOf,
-  revealInPages,
+  SCALAR_CLASS,
   scalarText,
   segmentsOf,
   showMore,
   sizeLabel,
-  union,
   visibleRows,
-  type JsonMatch,
   type JsonNode,
   type Range,
   type MoreDirection,
   type Windows,
 } from "../utils/jsonTree";
+import { treeKeyDown } from "../utils/treeKeys";
 
-/** How long typing must pause before the tree is searched. */
-export const SEARCH_DEBOUNCE_MS = 150;
-
-/**
- * How many matches a search reveals at once. A one-letter query over a
- * large value matches most of it, and expanding to all of those would
- * draw the whole tree; the rest are revealed as next/previous reaches
- * them.
- */
-export const REVEAL_MATCHES = 100;
+// Re-exported: the tree's tests and callers read them from here.
+export { REVEAL_MATCHES, SEARCH_DEBOUNCE_MS } from "../hooks/useTreeSearch";
 
 interface JsonTreeProps {
   value: unknown;
@@ -49,14 +41,6 @@ interface JsonTreeProps {
   /** Shown when the value has no children. */
   emptyText?: string;
 }
-
-interface SearchState {
-  query: string;
-  matches: JsonMatch[];
-  current: number;
-}
-
-const NO_SEARCH: SearchState = { query: "", matches: [], current: 0 };
 
 /**
  * A collapsible, searchable view of a JSON value.
@@ -94,8 +78,6 @@ export function JsonTree({
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() =>
     defaultExpanded(nodes, defaultDepth),
   );
-  const [input, setInput] = useState("");
-  const [search, setSearch] = useState<SearchState>(NO_SEARCH);
   const [windows, setWindows] = useState<Windows>(() => new Map());
   // The focused row: a node index, or a "show more" row (see visibleRows).
   const [focused, setFocused] = useState(1);
@@ -110,49 +92,22 @@ export function JsonTree({
     () => visibleRows(nodes, expanded, windows),
     [nodes, expanded, windows],
   );
-  const matchByIndex = useMemo(
-    () => new Map(search.matches.map((m) => [m.index, m])),
-    [search.matches],
-  );
-  const currentMatch = search.matches[search.current];
-
-  // Search once typing pauses: reveal the matches and go to the first.
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      if (!input.trim()) {
-        setSearch((prev) => (prev.query === "" ? prev : NO_SEARCH));
-        return;
-      }
-      const matches = findMatches(nodes, input);
-      setSearch({ query: input.trim(), matches, current: 0 });
-      if (matches.length > 0) {
-        setExpanded((prev) =>
-          union(
-            prev,
-            ancestorIds(
-              nodes,
-              matches.slice(0, REVEAL_MATCHES).map((m) => m.index),
-            ),
-          ),
-        );
-        setWindows((prev) => revealInPages(nodes, prev, matches[0].index));
-        setFocused(matches[0].index);
-      }
-    }, SEARCH_DEBOUNCE_MS);
-    return () => clearTimeout(timer);
-  }, [input, nodes]);
-
-  // Bring the current match into view on every search and every
-  // next/previous, including a step that lands on the same match (a
-  // single result the user has scrolled or folded away from).
-  useEffect(() => {
-    const match = search.matches[search.current];
-    if (match === undefined) return;
-    const el = treeRef.current?.querySelector<HTMLElement>(
-      `[data-row="${match.index}"]`,
-    );
-    el?.scrollIntoView?.({ block: "nearest" });
-  }, [search]);
+  const {
+    input,
+    setInput,
+    search,
+    matchByIndex,
+    currentMatch,
+    goToMatch,
+    onSearchKeyDown,
+  } = useTreeSearch({
+    nodes,
+    find: findMatches,
+    setExpanded,
+    setWindows,
+    setFocused,
+    treeRef,
+  });
 
   // Focus a row that "show more" has just drawn.
   useEffect(() => {
@@ -209,20 +164,6 @@ export function JsonTree({
     [nodes],
   );
 
-  const goToMatch = (step: 1 | -1) => {
-    const count = search.matches.length;
-    if (count === 0) return;
-    const current = (search.current + step + count) % count;
-    const index = search.matches[current].index;
-    // A new object even when `current` is unchanged, so the scroll runs.
-    setSearch((prev) => ({ ...prev, current }));
-    // The user may have folded it away since the search ran, and it may
-    // lie past its parent's page.
-    setExpanded((prev) => union(prev, ancestorIds(nodes, [index])));
-    setWindows((prev) => revealInPages(nodes, prev, index));
-    setFocused(index);
-  };
-
   const more = useCallback(
     (row: number, focus: boolean) => {
       const { parent, direction } = moreOf(row);
@@ -246,95 +187,8 @@ export function JsonTree({
     treeRef.current?.querySelector<HTMLElement>(`[data-row="${row}"]`)?.focus();
   }, []);
 
-  const onTreeKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    const target = event.target as HTMLElement;
-    if (target.getAttribute("role") !== "treeitem") return;
-    // Leave the browser's own shortcuts (Ctrl+C on a selection, say) alone.
-    if (event.ctrlKey || event.metaKey || event.altKey) return;
-    const index = Number(target.dataset.row);
-    const row = rows.indexOf(index);
-    if (row === -1) return;
-    let handled = true;
-    if (isMoreRow(index)) {
-      const { parent } = moreOf(index);
-      switch (event.key) {
-        case "ArrowDown":
-          if (row + 1 < rows.length) focusRow(rows[row + 1]);
-          break;
-        case "ArrowUp":
-          if (row > 0) focusRow(rows[row - 1]);
-          break;
-        case "Home":
-          focusRow(rows[0]);
-          break;
-        case "End":
-          focusRow(rows[rows.length - 1]);
-          break;
-        case "ArrowLeft":
-          if (parent > 0) focusRow(parent);
-          break;
-        case "Enter":
-        case " ":
-          more(index, true);
-          break;
-        default:
-          handled = false;
-      }
-      if (handled) event.preventDefault();
-      return;
-    }
-    const node = nodes[index];
-    const open = isContainer(node) && expanded.has(node.id);
-    switch (event.key) {
-      case "ArrowDown":
-        if (row + 1 < rows.length) focusRow(rows[row + 1]);
-        break;
-      case "ArrowUp":
-        if (row > 0) focusRow(rows[row - 1]);
-        break;
-      case "Home":
-        focusRow(rows[0]);
-        break;
-      case "End":
-        focusRow(rows[rows.length - 1]);
-        break;
-      case "ArrowRight":
-        // Into the first drawn child: the next row, which may be a
-        // "show earlier" row when the page has moved past the first.
-        if (isContainer(node) && !open) toggle(index);
-        else if (open && node.size > 0 && row + 1 < rows.length)
-          focusRow(rows[row + 1]);
-        break;
-      case "ArrowLeft":
-        if (open) toggle(index);
-        else if (node.parent > 0) focusRow(node.parent);
-        break;
-      case "Enter":
-      case " ":
-        if (isContainer(node)) toggle(index);
-        break;
-      case "c":
-        void copy(index, "value");
-        break;
-      case "p":
-        void copy(index, "path");
-        break;
-      default:
-        handled = false;
-    }
-    if (handled) event.preventDefault();
-  };
-
-  const onSearchKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      goToMatch(event.shiftKey ? -1 : 1);
-    } else if (event.key === "Escape" && input) {
-      event.preventDefault();
-      event.stopPropagation(); // not the enclosing modal's Escape
-      setInput("");
-    }
-  };
+  const onTreeKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) =>
+    treeKeyDown(event, { rows, nodes, expanded, focusRow, toggle, more, copy });
 
   const searching = search.query !== "";
   const matchCount = search.matches.length;
@@ -561,10 +415,18 @@ const JsonRow = memo(function JsonRow({
         )}
       </span>
       <span className="flex shrink-0 gap-1 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100">
-        <RowCopyButton label="Copy value" onClick={() => onCopy(index, "value")}>
+        <RowCopyButton
+          label="Copy value"
+          shortcut="c"
+          onClick={() => onCopy(index, "value")}
+        >
           value
         </RowCopyButton>
-        <RowCopyButton label="Copy path" onClick={() => onCopy(index, "path")}>
+        <RowCopyButton
+          label="Copy path"
+          shortcut="p"
+          onClick={() => onCopy(index, "path")}
+        >
           path
         </RowCopyButton>
       </span>
@@ -573,7 +435,7 @@ const JsonRow = memo(function JsonRow({
 });
 
 /** The "show more" row closing a wide container's page. */
-const MoreRow = memo(function MoreRow({
+export const MoreRow = memo(function MoreRow({
   row,
   level,
   direction,
@@ -613,31 +475,6 @@ const MoreRow = memo(function MoreRow({
   );
 });
 
-/**
- * `value`, kept by identity for as long as its JSON content is unchanged.
- * A refresh that re-fetches the same body produces a new object; without
- * this it would re-index the tree and re-run the search, sending the user
- * back to the first match mid-navigation. Serialises only when identity
- * changes.
- */
-function useStableJson(value: unknown): unknown {
-  const [seen, setSeen] = useState(value);
-  const [stable, setStable] = useState(value);
-  if (value !== seen) {
-    setSeen(value);
-    if (JSON.stringify(value) !== JSON.stringify(stable)) setStable(value);
-  }
-  // React re-renders with the updated state before committing.
-  return stable;
-}
-
-const SCALAR_CLASS: Record<string, string> = {
-  string: "text-green-700 dark:text-green-400",
-  number: "text-blue-700 dark:text-blue-300",
-  boolean: "text-purple-700 dark:text-purple-300",
-  null: "text-gray-500 italic dark:text-gray-400",
-};
-
 function ScalarValue({
   node,
   ranges,
@@ -659,7 +496,7 @@ function ScalarValue({
 }
 
 /** `text` with the matched characters marked, each run of them one `<mark>`. */
-function Highlighted({
+export function Highlighted({
   text,
   ranges,
   current,
@@ -691,12 +528,15 @@ function Highlighted({
   );
 }
 
-function RowCopyButton({
+export function RowCopyButton({
   label,
+  shortcut,
   onClick,
   children,
 }: {
   label: string;
+  /** The tree key that does the same, shown in the title. */
+  shortcut: string;
   onClick: () => void;
   children: React.ReactNode;
 }) {
@@ -705,7 +545,7 @@ function RowCopyButton({
       type="button"
       tabIndex={-1}
       aria-label={label}
-      title={`${label} (${label === "Copy value" ? "c" : "p"})`}
+      title={`${label} (${shortcut})`}
       onClick={(e) => {
         // Copying must not also toggle the row.
         e.stopPropagation();
@@ -718,7 +558,7 @@ function RowCopyButton({
   );
 }
 
-function TreeButton({
+export function TreeButton({
   label,
   onClick,
   disabled = false,

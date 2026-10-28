@@ -10,10 +10,12 @@ import type { ConcurrencyLimit, ConcurrencyLimitHolder } from "../types/task";
 import { shortBuildId, shortTaskId } from "../utils/ids";
 import { formatAbsoluteTime, formatRelativeTime } from "../utils/time";
 import { TaskDetail } from "./TaskDetail";
+import type { CompareTarget } from "../utils/taskDiff";
 
 interface ConcurrencyLimitsProps {
   onSelectBuild?: (buildId: string) => void;
   onOpenTask?: (taskId: string) => void;
+  onCompareTask?: (target: CompareTarget) => void;
 }
 
 // The routes carry the key as a path segment, where a "/" (even encoded)
@@ -40,6 +42,7 @@ const SUB_HEADER =
 export function ConcurrencyLimits({
   onSelectBuild,
   onOpenTask,
+  onCompareTask,
 }: ConcurrencyLimitsProps) {
   const { activeEnvironment, activeWorkspaceRole } = useEnvironment();
   const { setItems: setBreadcrumb } = useBreadcrumb();
@@ -324,6 +327,7 @@ export function ConcurrencyLimits({
             environmentId={environmentId}
             onClose={() => setSelectedTaskId(null)}
             onOpenTaskPage={onOpenTask ? () => onOpenTask(selectedTaskId) : undefined}
+            onCompare={onCompareTask}
             // A remedy that ends the claim frees the slot: re-read the counts.
             onChanged={() => void loadLimits()}
           />

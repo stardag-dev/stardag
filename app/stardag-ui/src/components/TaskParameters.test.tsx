@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Deployment, TaskInstance } from "../types/task";
+import { tooltipOf } from "../test/tooltip";
 import { TaskParameters } from "./TaskParameters";
 
 const DEPLOYMENT: Deployment = {
@@ -133,5 +134,38 @@ describe("TaskParameters", () => {
     render(<TaskParameters instances={[]} deploymentsById={DEPLOYMENTS} />);
     expect(screen.getByText("No instance recorded.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Instance info" })).toBeNull();
+  });
+
+  it("offers Compare in the header for the shown instance, with a tooltip", () => {
+    const compare = vi.fn();
+    render(
+      <TaskParameters
+        instances={TWO}
+        deploymentsById={DEPLOYMENTS}
+        planInstanceId="i-1"
+        onCompare={compare}
+      />,
+    );
+    const button = within(box()).getByRole("button", {
+      name: "Compare",
+    });
+    expect(tooltipOf(button)).toBe("Compare with another instance of this task type");
+    fireEvent.click(button);
+    expect(compare).toHaveBeenCalledWith("i-1");
+  });
+
+  it("draws no Compare action without a handler, or without an instance", () => {
+    const { rerender } = render(
+      <TaskParameters instances={TWO} deploymentsById={DEPLOYMENTS} />,
+    );
+    expect(screen.queryByRole("button", { name: "Compare" })).toBeNull();
+    rerender(
+      <TaskParameters
+        instances={[]}
+        deploymentsById={DEPLOYMENTS}
+        onCompare={() => {}}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "Compare" })).toBeNull();
   });
 });

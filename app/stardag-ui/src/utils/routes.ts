@@ -5,6 +5,7 @@ export type View =
   | "invites"
   | "new-workspace"
   | "tasks"
+  | "task-diff"
   | "deployments"
   | "limits"
   | "build"
@@ -24,6 +25,9 @@ export function viewFromPath(path: string): View {
 
   // Tasks: /tasks[/:task_id], optionally under /:org[/:environment]
   if (/(^|\/)tasks(\/[^/]+)?$/.test(path)) return "tasks";
+
+  // Compare two task instances: /task-diff (same env-scoped forms)
+  if (/(^|\/)task-diff$/.test(path)) return "task-diff";
 
   // Deployments: /deployments (same env-scoped forms)
   if (path === "/deployments" || path.endsWith("/deployments")) return "deployments";
