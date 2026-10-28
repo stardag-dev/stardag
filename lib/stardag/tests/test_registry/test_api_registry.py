@@ -927,6 +927,29 @@ class TestAlreadyGoneAfterLostAnswer:
             _registry(script).concurrency_limit_delete("k")
         assert len(script.requests) == 2
 
+    @pytest.mark.parametrize(
+        "undelivered",
+        [
+            pytest.param(lambda: httpx.ConnectError("refused"), id="connect-error"),
+            pytest.param(lambda: httpx.ConnectTimeout("connect"), id="connect-timeout"),
+            pytest.param(lambda: httpx.PoolTimeout("pool"), id="pool-timeout"),
+        ],
+    )
+    def test_a_404_after_only_undelivered_attempts_still_raises(self, undelivered):
+        """Copilot on #528: an attempt that never connected cannot be the
+        one that deleted, so the 404 is the first delivery's answer."""
+        script = _Script(undelivered(), _unknown_limit())
+        with pytest.raises(NotFoundError):
+            _registry(script).concurrency_limit_delete("k")
+        assert len(script.requests) == 2
+
+    def test_a_lost_answer_then_a_failed_connect_then_404_succeeded(self):
+        script = _Script(
+            _body_stalls(), httpx.ConnectError("refused"), _unknown_limit()
+        )
+        _registry(script).concurrency_limit_delete("k")
+        assert len(script.requests) == 3
+
     def test_a_lost_answer_then_a_rate_limit_then_404_succeeded(self, monkeypatch):
         monkeypatch.setattr(_api_http.time, "sleep", lambda _: None)
         script = _Script(_body_cut(), _rate_limited(retry_after="0"), _unknown_limit())
@@ -961,6 +984,27 @@ class TestAlreadyGoneAfterLostAnswer:
         )
         with pytest.raises(NotFoundError):
             _registry(script).scheduler_lease_release(uuid4(), owner_id="o")
+        assert len(script.requests) == 2
+
+    async def test_the_async_path_raises_after_only_a_failed_connect(self):
+        import asyncio
+
+        from stardag.registry._api_http import Request
+
+        script = _Script(httpx.ConnectError("refused"), _unknown_limit())
+        registry = APIRegistry(api_url="https://registry.test", api_key="sk-test")
+        registry._async_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(script)
+        )
+        registry._async_client_loop = asyncio.get_running_loop()
+        request = Request(
+            "DELETE",
+            "/concurrency-limits/k",
+            lambda _p: None,
+            gone_code="unknown_limit",
+        )
+        with pytest.raises(NotFoundError):
+            await registry.acall(request)
         assert len(script.requests) == 2
 
     async def test_the_async_path_reads_it_the_same(self):
