@@ -153,6 +153,11 @@ artifact viewing (markdown, JSON) and workspace management (members, invites, AP
   searchable tree; a **Reference in code** box copying `MyTask.ref("<task_id>",
 instance_id="<instance_id>")` for a chosen instance, with no import line (a namespace is
   not an import path).
+- **Compare** (in a task's Task Parameters section) opens `/task-diff`: the right side is
+  picked from a search pre-filtered to the same task type (or another instance of the same
+  task); a structural diff with `+a −r ~c` summaries on collapsed nodes, "only differences",
+  and fuzzy search across both sides. Both sides are in the URL (shareable, e.g. when
+  reviewing a moved pin).
 - **Builds**: a plan-only build shows a `registered` badge, or "registration incomplete" while
   still `pending`.
   Only

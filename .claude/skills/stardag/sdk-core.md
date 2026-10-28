@@ -118,6 +118,8 @@ task_description="...")` (see Build Options below) — prints a pinned
    / `sd.write_to_store(task)` (store copy; prints `from_store(...)`).
 5. Use; test offline (store with `STARDAG_NO_REGISTRY=1`, or
    `InMemoryRegistry.add_instance`).
+6. Compare two instances (e.g. before moving a pin): the UI's **Compare**
+   button on a task's parameters opens `/task-diff`.
 
 **Never derive an import path from a task's namespace.** A namespace is an
 identity, not a module path, even when `auto_namespace` produced it from

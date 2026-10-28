@@ -183,11 +183,22 @@ A test suite needs no registry for either handle:
 
 ### 7. Compare
 
-<!-- STA-170 (stardag#525): describe the registry UI's "Compare" (task diff) view here once it is on main. -->
+Before moving a pin, or to see why two runs differ, compare the two
+instances in the registry UI. **Compare**, in a task's Task Parameters
+section, opens `/task-diff` with that instance on the left; the right side
+is picked with the task search, pre-filtered to the same task type
+(removable), or is another instance of the same task. The diff is
+structural:
 
-The registry UI shows each task's parameters on its task page as a
-collapsible, searchable tree, nested tasks labelled with their names, so
-what a pin points at can be read without loading it.
+- added, removed and changed values, old and new both shown, with nested
+  tasks labelled by their `namespace.Name`;
+- identical subtrees collapsed, differing ones open, and a `+a −r ~c`
+  summary (added, removed, changed) on every collapsed node;
+- **only differences** hides everything that matches, and the fuzzy search
+  of the parameter tree works across both sides.
+
+Both sides live in the URL, so a comparison can be shared, for instance in
+the review of a changed pin.
 
 ## Import resolution
 
