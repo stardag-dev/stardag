@@ -24,6 +24,52 @@ annotate <id>`, where `--tag` (or `--add-tag`) and `--remove-tag` edit
   against an older registry, annotating fails with a clear error, and a
   filtered list is refused rather than answered unfiltered (an unfiltered
   list works as before).
+
+### Server
+
+- **Added: task annotations, task search filters and an instance read**
+  (STA-149). A task (the completion) gains `tags` and `description`:
+  mutable annotations outside every hash and every registration payload,
+  set by `PATCH /tasks/{task_id}` with `{tags?, description?}`. An omitted
+  field is unchanged; `tags` replaces the set, last writer wins (no
+  server-side add/remove). Tags are trimmed, deduplicated and sorted, at
+  most 32 of at most 64 characters; a description is at most 4096. The
+  write counts against the workspace's write rate limit, like any write
+  that does not finish running work. `GET /tasks` filters by `namespace`
+  and `name` (exact), `tag` (repeatable, all of them), `id_prefix` and `q`
+  (3+ characters; case-insensitive substring of name, namespace or
+  description), and task summaries and details carry the annotations.
+  `GET /instances/{id}` returns one instance of the caller's environment:
+  `id`, `task_id`, `deployment_id`, `settings_hash`, `instance_hash`,
+  `body`, `created_at`, `expanded_at`. Migration: two columns (`tags`
+  defaults to empty, so existing tasks read as untagged) and four indexes
+  serving the listing: `(environment_id, status_at, id)` for its order
+  (the unfiltered listing no longer scans the table), a GIN index on
+  `tags`, a `pg_trgm` trigram index for `q` and a `text_pattern_ops`
+  index for `id_prefix`. **Needs the `pg_trgm` extension**, which the
+  migration creates if missing: it ships with the official Postgres images
+  and Debian's `postgresql`, and it is a trusted extension since Postgres
+  13, so the database owner can create it. The columns are added in one
+  short transaction under a 5 s `lock_timeout` (a catalog-only change);
+  the indexes are built `CONCURRENTLY`, so reads and writes to `task`
+  continue while they build, and a failed run can be re-run. Additive in
+  both directions of a rolling deploy; downgrade leaves `pg_trgm`
+  installed.
+
+## [0.29.0] — 2026-10-28
+
+SDK `0.29.0` and server `server-v0.8.0`. The SDK has three behaviour changes
+that can affect existing code (a missing `run()`, `Depends` under PEP 563, and
+run functions that delegate to a `Runner`), and the tick and worker changes
+below take effect only once a Modal app is **redeployed with the new SDK**. The
+server carries one additive migration
+(`workspaces.max_write_requests_per_minute`), and its images now install
+their dependencies from the lockfile. The SDK keeps working against a
+`server-v0.7.0` registry, but reconciliation does not: there a tick stops
+reconciling at the first unspawned claim it tries to end. See [RELEASE_NOTES.md](RELEASE_NOTES.md).
+
+### SDK
+
 - **Corrected: a worker's `retries=` does not recover a task that raises**
   (STA-154). The docs and the `FunctionSettings.retries` docstring said
   Modal's retry covers an exception raised inside the container. Under the
@@ -213,8 +259,10 @@ deploy` now **warns** about a worker with `retries` above zero (an `int`
   landed late can never run alongside its replacement. The same holds for
   a reactive worker that cannot create its lifecycle reporter, and for one
   whose call id is not readable inside its container. The conditional end
-  needs a registry that supports it; against an older one the tick leaves
-  unspawned claims to their TTL. New executor hooks:
+  needs a registry that supports it. An older one refuses it, and the tick
+  that is refused stops reconciling for the rest of its run, including the
+  probes of recorded calls, so their lost reports are left to the claim's
+  TTL as before; the next tick starts reconciling again. New executor hooks:
   `TaskExecutorABC.reconciles()` and `probe_detached()`, implemented for
   Modal. The tick summary counts `reconciled`.
 
@@ -230,34 +278,6 @@ deploy` now **warns** about a worker with `retries` above zero (an `int`
 
 ### Server
 
-- **Added: task annotations, task search filters and an instance read**
-  (STA-149). A task (the completion) gains `tags` and `description`:
-  mutable annotations outside every hash and every registration payload,
-  set by `PATCH /tasks/{task_id}` with `{tags?, description?}`. An omitted
-  field is unchanged; `tags` replaces the set, last writer wins (no
-  server-side add/remove). Tags are trimmed, deduplicated and sorted, at
-  most 32 of at most 64 characters; a description is at most 4096. The
-  write counts against the workspace's write rate limit, like any write
-  that does not finish running work. `GET /tasks` filters by `namespace`
-  and `name` (exact), `tag` (repeatable, all of them), `id_prefix` and `q`
-  (3+ characters; case-insensitive substring of name, namespace or
-  description), and task summaries and details carry the annotations.
-  `GET /instances/{id}` returns one instance of the caller's environment:
-  `id`, `task_id`, `deployment_id`, `settings_hash`, `instance_hash`,
-  `body`, `created_at`, `expanded_at`. Migration: two columns (`tags`
-  defaults to empty, so existing tasks read as untagged) and four indexes
-  serving the listing: `(environment_id, status_at, id)` for its order
-  (the unfiltered listing no longer scans the table), a GIN index on
-  `tags`, a `pg_trgm` trigram index for `q` and a `text_pattern_ops`
-  index for `id_prefix`. **Needs the `pg_trgm` extension**, which the
-  migration creates if missing: it ships with the official Postgres images
-  and Debian's `postgresql`, and it is a trusted extension since Postgres
-  13, so the database owner can create it. The columns are added in one
-  short transaction under a 5 s `lock_timeout` (a catalog-only change);
-  the indexes are built `CONCURRENTLY`, so reads and writes to `task`
-  continue while they build, and a failed run can be re-run. Additive in
-  both directions of a rolling deploy; downgrade leaves `pg_trgm`
-  installed.
 - **Changed: the writes that finish running work get their own rate-limit
   window, and a workspace can have its own limit** (STA-135). The
   per-workspace write limit (`LIMITS_MAX_REQUESTS_PER_MINUTE`) refused
@@ -313,6 +333,19 @@ deploy` now **warns** about a worker with `retries` above zero (an `int`
   the retry or name a reason not to. Comments that claimed a
   `SELECT … ORDER BY … FOR UPDATE` acquires its locks in order now say that
   Postgres does not guarantee it.
+
+- **Changed: the server images install their dependencies from
+  `app/stardag-api/uv.lock`** (STA-137). Every build of the API resolved its
+  dependencies fresh from `pyproject.toml`, so the lockfile never reached a
+  running server: two builds of one tag could ship different versions, and a
+  lockfile bump, a security fix included, did not reach the image at all.
+  `app/server.Dockerfile`, the API-only `app/stardag-api/Dockerfile` and the
+  self-host `--from-source` image now install the locked, hash-checked set.
+  Against `0.28.0`'s lock this release moves fastapi 0.141.1 → 0.162.0,
+  starlette 1.7.0 → 1.9.0, pydantic 2.13.5 → 2.14.1, pyjwt 2.14.0 → 2.15.0,
+  certifi 2026.7.22 → 2026.10.19, asyncpg 0.31.0 → 0.32.0 and alembic 1.20.0
+  → 1.20.1. The certifi bump drops the compromised emSign roots
+  (Dependabot alert 407) from the bundle the API trusts for its JWKS fetch.
 
 ### UI
 
