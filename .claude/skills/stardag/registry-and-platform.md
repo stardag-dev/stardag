@@ -143,11 +143,21 @@ sd.build(task, registry=registry)
 
 ## Registry UI
 
-The React frontend provides builds (list and detail, with the active plan's graph), a task
-explorer and task detail (status, claim holder, instances, executions, events, artifacts),
-artifact viewing (markdown, JSON) and workspace management (members, invites, API keys). Only
-its registry calls (builds, plans, tasks, executions, deployments) moved to `/api/v2`; auth,
-UI, workspace and target-root calls stay on `/api/v1`.
+The React frontend provides builds (list and detail, with the active plan's graph), task
+search and task detail (status, claim holder, instances, executions, events, artifacts),
+artifact viewing (markdown, JSON) and workspace management (members, invites, API keys).
+
+- **Task search** (`/tasks`): free text (3+ chars), a task-id prefix (or `id:<prefix>`),
+  exact name and namespace, `#tag` (all of them), status; the search is in the URL.
+- **Task page**: tags and description edited in place; parameters as a collapsible, fuzzy-
+  searchable tree; a **Reference in code** box copying `MyTask.ref("<task_id>",
+instance_id="<instance_id>")` for a chosen instance, with no import line (a namespace is
+  not an import path).
+- **Builds**: a plan-only build shows a `registered` badge, or "registration incomplete" while
+  still `pending`.
+  Only
+  its registry calls (builds, plans, tasks, executions, deployments) moved to `/api/v2`; auth,
+  UI, workspace and target-root calls stay on `/api/v1`.
 
 ## CLI Commands
 
@@ -362,6 +372,7 @@ default = "~/.stardag/local-target-roots/default/default"
 | `~/.stardag/access-token-cache/` | Token cache                  |
 | `~/.stardag/local-target-roots/` | Default local target storage |
 | `.stardag/config.toml`           | Project-level configuration  |
+| `~/.stardag/registry-cache/`     | Pinned instance-body cache   |
 
 Package settings (`task_store`, `task_modules`) are not here: they live in
 `[tool.stardag]` of each package's `pyproject.toml`, read even with

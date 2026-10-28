@@ -19,7 +19,7 @@ Claude uses this skill as background knowledge — it won't appear in the `/` me
 ```
 .claude/skills/stardag/
 ├── SKILL.md                     # Main entry point — overview, quick reference, key imports
-├── sdk-core.md                  # Tasks, dependencies, parameters and the two hashes, settings, build
+├── sdk-core.md                  # Tasks, dependencies, parameters and the two hashes, settings, build, task refs/store
 ├── sdk-targets.md               # Targets, serialization, storage, target roots
 ├── sdk-advanced.md              # Async, dynamic deps, namespaces, artifacts, cancellation, Modal
 ├── registry-and-platform.md     # Registry entities and API, CLI, config, upgrading from v1
@@ -29,14 +29,14 @@ Claude uses this skill as background knowledge — it won't appear in the `/` me
 
 ### Content Scope
 
-| File                         | Topics                                                                                                                                                  |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **SKILL.md**                 | Quick reference, core concepts, three-tier API overview, key imports                                                                                    |
-| **sdk-core.md**              | Task hierarchy, @sd.task, dependencies, build options, settings, significant/non-significant fields, the two hashes, versioning                         |
-| **sdk-targets.md**           | FileSystemTarget, serializers (JSON/pickle/pandas), target factories, target roots config, S3 integration, InMemoryTarget                               |
-| **sdk-advanced.md**          | Async, dynamic deps, namespaces, artifacts, cancellation, polymorphic types, Prefect, Modal (deployments, reactive builds, TickConfig)                  |
-| **registry-and-platform.md** | Registry entities (task, instance, plan, deployment, execution), `/api/v2`, v2 CLI, config, local dev, upgrading from v1                                |
-| **examples.md**              | Three API levels side-by-side, ML pipeline pattern, DAG composition factories, fan-out/benchmark, conditional deps, non-significant params and settings |
+| File                         | Topics                                                                                                                                                                                                                                    |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **SKILL.md**                 | Quick reference, core concepts, three-tier API overview, key imports                                                                                                                                                                      |
+| **sdk-core.md**              | Task hierarchy, @sd.task, dependencies, referring to existing tasks (`ref`, the committed task store, find/annotate/pin), build options, plan-only registration, settings, significant/non-significant fields, the two hashes, versioning |
+| **sdk-targets.md**           | FileSystemTarget, serializers (JSON/pickle/pandas), target factories, target roots config, S3 integration, InMemoryTarget                                                                                                                 |
+| **sdk-advanced.md**          | Async, dynamic deps, namespaces, artifacts, cancellation, polymorphic types, Prefect, Modal (deployments, reactive builds, TickConfig)                                                                                                    |
+| **registry-and-platform.md** | Registry entities (task, instance, plan, deployment, execution), `/api/v2`, v2 CLI, config, local dev, upgrading from v1                                                                                                                  |
+| **examples.md**              | Three API levels side-by-side, ML pipeline pattern, DAG composition factories, fan-out/benchmark, conditional deps, non-significant params and settings                                                                                   |
 
 ## How It Works
 
@@ -46,8 +46,8 @@ Claude Code [automatically discovers skills](https://code.claude.com/docs/en/ski
 
 It describes the v2 line (SDK 0.29 and `main` after it, registry server 0.8).
 
-**Last synced with `main`: 2026-10-28, at `b81f5d49`.** To bring it up to date, start from
-`git log b81f5d49..main` and the CHANGELOG's `[Unreleased]` section, then move this marker.
+**Last synced with `main`: 2026-10-28, at `372dcc0e`.** To bring it up to date, start from
+`git log 372dcc0e..main` and the CHANGELOG's `[Unreleased]` section, then move this marker.
 
 **Check it before every release**, since nothing else forces a refresh: it slipped from
 0.24 to 0.27, and again through 0.28. Update it when:
