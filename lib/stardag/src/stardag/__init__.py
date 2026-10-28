@@ -47,11 +47,15 @@ from stardag._core.base_task import (
 from stardag._core.decorator import Depends, task
 from stardag._core.hashable_set import HashableSet, HashSafeSetSerializer
 from stardag._core.rehydrate import (
+    TaskClassNotRegisteredError,
     TaskRehydrationError,
     task_from_body,
     task_from_registry_data,
 )
 from stardag._core.task import Task, get_default_relpath
+from stardag._core.task_store import task_from_store
+from stardag._core.task_store_format import TaskStoreError
+from stardag._core.task_store_write import StoredTask, write_to_store
 from stardag._core.task_ref import (
     TaskRef,
     TaskRefHydrationError,
@@ -142,6 +146,7 @@ __all__ = [
     "Task",
     "TaskRehydrationError",
     "task_from_body",
+    "TaskClassNotRegisteredError",
     "task_from_registry_data",
     "TaskRef",
     "TaskRefHydrationError",
@@ -150,6 +155,10 @@ __all__ = [
     "TaskSlug",
     "resolve_refs",
     "task_ref",
+    "StoredTask",
+    "TaskStoreError",
+    "task_from_store",
+    "write_to_store",
     "clear_hydration_memo",
     "TaskLoads",
     "TaskStruct",

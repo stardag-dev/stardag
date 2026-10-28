@@ -326,7 +326,15 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
     # -- hydration ------------------------------------------------------------
 
     def hydrate(self, registry: RegistryABC | None = None) -> TaskT:
-        """The referenced task object, read from the registry.
+        """The referenced task object, read from the project's task store
+        or the registry.
+
+        The committed task store (``[project] task_store``) is consulted
+        first: a pinned reference is served from a body recorded under its
+        instance id, an unpinned one only when the store holds exactly one
+        body of the task. A reference hydrated inside a remote container
+        (a Modal worker) has no store unless it is baked into the image,
+        and reads the registry.
 
         Pinned (``instance_id`` given), the instance's body is used and is
         served from the local body cache when present, so it works offline
@@ -349,8 +357,14 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
                 is of another class or no longer recomputes to the task id.
                 A subclass of :class:`~stardag.TaskRehydrationError`.
         """
+        from stardag._core.task_store import hydrate_from_store
         from stardag.registry import is_noop_registry, registry_provider
 
+        # The project's committed task store, when configured and holding
+        # the body, comes first: no registry, no network.
+        stored = hydrate_from_store(self)
+        if stored is not None:
+            return typing.cast(TaskT, stored)
         if registry is None:
             # The registry this very reference was last hydrated from, if
             # any: a build hydrates a reference a task yields from the
@@ -588,8 +602,11 @@ def _key_lock(registry: Any, key: Any) -> threading.Lock:
 def clear_hydration_memo() -> None:
     """Forget every hydrated reference (tests, or a long-lived process that
     wants an unpinned reference to read the newest instance again)."""
+    from stardag._core.task_store import clear_store_memo
+
     with _MEMO_LOCK:
         _MEMO.clear()
+    clear_store_memo()
 
 
 # -----------------------------------------------------------------------------

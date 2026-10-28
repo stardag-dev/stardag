@@ -59,6 +59,38 @@ class TaskRehydrationError(StardagError):
     """A task could not be reconstructed from its registry data."""
 
 
+class TaskClassNotRegisteredError(TaskRehydrationError):
+    """A stored body names a task class that is not registered in this
+    process: the module defining it was not imported.
+
+    Rehydration imports the project's ``[project] task_modules``
+    (``.stardag/config.toml``) on the first such miss in a process and
+    retries once before raising this."""
+
+
+_T = typing.TypeVar("_T")
+
+
+def _retrying_on_missing_class(attempt: typing.Callable[[], _T]) -> _T:
+    """``attempt()``; on a missing task class, import the project's
+    ``task_modules`` (once per process) and retry once. The final error
+    says what was imported, or how to configure it."""
+    from stardag._core import task_imports
+
+    try:
+        return attempt()
+    except TaskClassNotRegisteredError as first:
+        error = first
+        if task_imports.import_project_task_modules():
+            try:
+                return attempt()
+            except TaskClassNotRegisteredError as second:
+                error = second
+        raise TaskClassNotRegisteredError(
+            f"{error}{task_imports.import_note()}"
+        ) from error
+
+
 # Marker for AliasTask payloads (see BaseTask.resolve): their ``loads_type``
 # field is pickled bytes, which must never be unpickled automatically from
 # registry-supplied data.
@@ -197,6 +229,18 @@ def task_from_registry_data(
             not imported), the payload doesn't validate, or the identity
             check fails.
     """
+    return _retrying_on_missing_class(
+        lambda: _task_from_registry_data_once(
+            task_data, expected_task_id=expected_task_id
+        )
+    )
+
+
+def _task_from_registry_data_once(
+    task_data: typing.Mapping[str, typing.Any],
+    *,
+    expected_task_id: str | UUID | None,
+) -> BaseTask:
     namespace = task_data.get(NAMESPACE_KEY)
     name = task_data.get(NAME_KEY)
     if name is None or namespace is None:
@@ -224,7 +268,7 @@ def task_from_registry_data(
     try:
         BaseTask._registry().get_class(TypeId(namespace=namespace, name=name))
     except KeyError as e:
-        raise TaskRehydrationError(
+        raise TaskClassNotRegisteredError(
             f"No task class registered for namespace={namespace!r}, "
             f"name={name!r}. The module defining the task class must be "
             "imported before rehydration (task classes register at "
@@ -250,7 +294,7 @@ def task_from_registry_data(
             listed = ", ".join(
                 f"{n} (namespace {ns or '<root>'})" for ns, n in sorted(missing)
             )
-            raise TaskRehydrationError(
+            raise TaskClassNotRegisteredError(
                 f"Cannot rehydrate {_label(namespace, name)}: no task class is "
                 f"registered for {listed}, used in its parameters. Import the "
                 "module that defines each of these classes before loading "
@@ -304,7 +348,21 @@ def _validate_for(
     unpickled by validation. For loads no user asked for explicitly (a
     ``TaskRef`` hydrated at build start), as in
     :func:`task_from_registry_data`.
+
+    A task class that is not registered is retried once after importing
+    the project's ``task_modules`` (see :func:`_retrying_on_missing_class`).
     """
+    return _retrying_on_missing_class(
+        lambda: _validate_for_once(cls, body, allow_aliased=allow_aliased)
+    )
+
+
+def _validate_for_once(
+    cls: type[BaseTask],
+    body: typing.Mapping[str, typing.Any],
+    *,
+    allow_aliased: bool,
+) -> BaseTask:
     if not allow_aliased and _contains_aliased(body):
         raise TaskRehydrationError(
             "The stored body contains AliasTask ('__aliased') payloads, which "
@@ -324,7 +382,7 @@ def _validate_for(
                 TypeId(namespace=namespace, name=name)
             )
         except KeyError as e:
-            raise TaskRehydrationError(
+            raise TaskClassNotRegisteredError(
                 f"No task class registered for namespace={namespace!r}, "
                 f"name={name!r}. The module defining the task class must be "
                 "imported before rehydration (task classes register at "
@@ -344,7 +402,7 @@ def _validate_for(
         if not missing:
             raise
         listed = ", ".join(f"namespace={ns!r}, name={n!r}" for ns, n in sorted(missing))
-        raise TaskRehydrationError(
+        raise TaskClassNotRegisteredError(
             f"Failed to validate the stored body of {target.__qualname__}: no "
             f"task class registered for the nested {listed}. The module "
             "defining each task class in the body must be imported before "

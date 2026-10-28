@@ -5,6 +5,7 @@ import functools
 import inspect
 import json
 import logging
+import os
 import weakref
 from abc import abstractmethod
 from collections import abc as collections_abc
@@ -512,6 +513,55 @@ class BaseTask(
             type instead.
         """
         return _make_ref(cls, task_id, instance_id)
+
+    @classmethod
+    def from_store(
+        cls,
+        task_id: UUID | str,
+        instance_id: UUID | str | None = None,
+        *,
+        instance_hash: UUID | str | None = None,
+        store: "str | os.PathLike[str] | None" = None,
+    ) -> Self:
+        """The task of this class stored in the project's committed task
+        store, loaded eagerly: the real task object (fields readable,
+        ``model_copy`` derivations work).
+
+        The recommended handle for pinned, long-lived instances in code (a
+        key dataset, a trained model): the store is a reviewed copy in the
+        repository, read with no registry, profile or network. Write one
+        with ``stardag tasks ref <task-id> --write`` (from the registry) or
+        ``sd.write_to_store(task)`` (from a task object); both print this
+        call.
+
+        Every class in the stored tree is imported from the module recorded
+        with it, or, failing that, from the project's ``task_modules``.
+        Validated in compat mode, then checked to be an instance of this
+        class with ``task_id``.
+
+        Args:
+            task_id: The task id.
+            instance_id: Pick the body recorded as this registry instance.
+            instance_hash: Pick the body with this instance hash.
+            store: The store directory. Default: ``[project] task_store`` in
+                ``.stardag/config.toml`` (or ``STARDAG_TASK_STORE``).
+
+        Raises:
+            TaskStoreError: No store is configured; it holds no matching
+                body (or several, with neither ``instance_id`` nor
+                ``instance_hash`` given); a file is missing or was edited.
+            TaskRehydrationError: The body does not validate, is of another
+                class, or no longer recomputes to ``task_id``.
+        """
+        from stardag._core.task_store import load_from_store
+
+        return load_from_store(  # type: ignore[return-value]
+            cls,
+            task_id,
+            instance_id=instance_id,
+            instance_hash=instance_hash,
+            store=store,
+        )
 
     @classmethod
     def has_dynamic_deps(cls) -> bool:

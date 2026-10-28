@@ -9,6 +9,7 @@ under a scope ``(deployment, settings)``, with the body (design.md, D1/D2).
     stardag tasks show <task-id>                 # task, claim, executions, events
     stardag tasks check <task-id> -m <module>    # run complete() locally
     stardag tasks ref <task-id> [--instance <id>]  # print a Task.ref(...) line
+    stardag tasks ref <task-id> --write [--store DIR]  # into the task store
     stardag tasks retry <task-id> [--build <id>] [--yes]   # reset to PENDING
     stardag tasks cancel <task-id> [--build <id>] [--yes]  # release the claim
     stardag tasks exclude <plan-id> <task-id>    # give up on it in one plan
@@ -290,6 +291,15 @@ def _registered_class(namespace: str, name: str) -> type | None:
     try:
         return BaseTask._registry().get_class(TypeId(namespace=namespace, name=name))
     except KeyError:
+        pass
+    # The project's configured task modules ([project] task_modules), once.
+    from stardag._core.task_imports import import_project_task_modules
+
+    if not import_project_task_modules():
+        return None
+    try:
+        return BaseTask._registry().get_class(TypeId(namespace=namespace, name=name))
+    except KeyError:
         return None
 
 
@@ -308,7 +318,20 @@ def tasks_ref(
         "-m",
         help="Import path of a module defining the task's class, to also print "
         "its import (repeatable; patterns like 'pkg.tasks.*' are expanded). "
-        "Without it only the ref(...) line is printed.",
+        "Not needed for classes the project's [project] task_modules cover.",
+    ),
+    write: bool = typer.Option(
+        False,
+        "--write",
+        help="Write the instance body (and every nested task's) into the "
+        "project's committed task store, and print the from_store(...) line "
+        "instead of the ref(...) one.",
+    ),
+    store: Optional[str] = typer.Option(
+        None,
+        "--store",
+        help="The task store directory for --write. Default: [project] "
+        "task_store in .stardag/config.toml, or STARDAG_TASK_STORE.",
     ),
     stardag_profile: Optional[str] = _PROFILE_OPTION,
     stardag_env: Optional[str] = _ENV_OPTION,
@@ -319,12 +342,31 @@ def tasks_ref(
     names one), preceded by the class's import when ``-m`` loads it.
 
     Paste it where code should keep pointing at this exact task instead of
-    re-composing it. Reads ``GET /tasks/{id}``. Writes nothing.
+    re-composing it. Reads ``GET /tasks/{id}``; writes nothing unless
+    ``--write``.
+
+    With ``--write``, the instance body is checked to rehydrate to the task
+    id (its classes imported through ``-m`` or the project's
+    ``task_modules``), written into the committed task store with every
+    nested task's body, and the line printed is the eager reader,
+    ``Task.from_store(...)``.
     """
+    if store is not None and not write:
+        _fail(StardagError("--store is only used with --write."))
     if module:
         _import_modules(module)
+    store_root = None
+    if write:
+        from stardag._core.task_store import resolve_store
+        from stardag._core.task_store_format import TaskStoreError
+
+        try:
+            store_root = resolve_store(store)
+        except TaskStoreError as e:
+            _fail(e)
     registry = _resolve_registry(stardag_profile, stardag_env)
     pinned = None
+    stored = None
     try:
         task = registry.task_get(task_id)
         if instance is not None:
@@ -338,16 +380,25 @@ def tasks_ref(
                     f"Instance {instance} belongs to task {pinned.task_id}, "
                     f"not to task {task.task_id}."
                 )
+        if pinned is not None:
+            instance_id = str(pinned.id)
+        elif task.instances:
+            instance_id = str(task.instances[0].id)
+        else:
+            raise StardagError(f"Task {task_id} has no instance to reference.")
+        if store_root is not None:
+            from stardag._core.task_store_write import write_from_registry
+
+            stored = write_from_registry(
+                task.task_id,
+                instance_id=instance_id,
+                registry=registry,
+                store=store_root.root,
+            )
     except StardagError as e:
         _fail(e)
     finally:
         registry.close()
-    if pinned is not None:
-        instance_id = str(pinned.id)
-    elif task.instances:
-        instance_id = str(task.instances[0].id)
-    else:
-        _fail(StardagError(f"Task {task_id} has no instance to reference."))
     from stardag._core.task_ref import reference_call, reference_line
 
     cls = _registered_class(task.task_namespace, task.task_name)
@@ -356,27 +407,43 @@ def tasks_ref(
     else:
         import_line, prefix = None, task.task_name
     ref_line = reference_call(prefix, cls, task.task_id, instance_id)
+    from_store_line = stored.call if stored is not None else None
     if json_output:
-        emit_json(
-            {
-                "task_id": task.task_id,
-                "instance_id": instance_id,
-                "module": cls.__module__ if cls is not None else None,
-                "class_name": prefix,
-                "module_located": cls is not None,
-                "import": import_line,
-                "ref": ref_line,
+        payload = {
+            "task_id": task.task_id,
+            "instance_id": instance_id,
+            "module": cls.__module__ if cls is not None else None,
+            "class_name": prefix,
+            "module_located": cls is not None,
+            "import": import_line,
+            "ref": ref_line,
+        }
+        if stored is not None:
+            payload["store"] = {
+                "path": str(stored.path),
+                "instance_hash": str(stored.instance_hash),
+                "written": [str(p) for p in stored.written],
+                "from_store": from_store_line,
             }
-        )
+        emit_json(payload)
         return
     if import_line:
         typer.echo(import_line)
     elif cls is None:
         typer.echo(f"# import {prefix} from its defining module")
-    typer.echo(ref_line)
+    typer.echo(from_store_line or ref_line)
+    if stored is not None:
+        written = len(stored.written)
+        error_console.print(
+            f"[dim]Wrote {written} file(s) to the task store ({stored.path}).[/dim]"
+            if written
+            else f"[dim]Already in the task store ({stored.path}).[/dim]",
+            highlight=False,
+        )
     if cls is None:
         error_console.print(
-            f"[dim]Note: pass -m <module> (the module defining {prefix}) to "
+            f"[dim]Note: pass -m <module> (the module defining {prefix}), or "
+            "list it under [project] task_modules in .stardag/config.toml, to "
             "print its import.[/dim]",
             highlight=False,
         )

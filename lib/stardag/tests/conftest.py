@@ -135,3 +135,20 @@ def isolated_registry_cache(
         "stardag.registry._instance_cache.get_registry_cache_dir", lambda: root
     )
     return root
+
+
+@pytest.fixture(scope="function", autouse=True)
+def hermetic_project_config() -> typing.Generator[None, None, None]:
+    """No test reads a ``.stardag/config.toml`` ``[project]`` table from the
+    working directory (no task store, no task modules) unless it sets one,
+    and the once-per-process task-module import starts fresh."""
+    from stardag._core import task_imports
+    from stardag._core.task_store import clear_store_memo
+    from stardag.config.project import ProjectConfig, project_config_provider
+
+    task_imports._reset_for_tests()
+    clear_store_memo()
+    with project_config_provider.override(ProjectConfig()):
+        yield
+    task_imports._reset_for_tests()
+    clear_store_memo()
