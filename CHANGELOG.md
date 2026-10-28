@@ -15,8 +15,11 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   is not imported. Previously this needed the private `CONTEXT_MODE_KEY`.
   `task_from_registry_data` stays, as the same function.
 - **New: `from_registry(task_id, instance_id=...)` pins an instance**
-  (STA-147). Without `instance_id` it loads the newest instance, as before;
-  with it, that instance, after checking it belongs to the task. The
+  (STA-147). Without `instance_id` it loads, for a completed task, the
+  instance of the execution that completed it (from
+  `GET /tasks/{id}/executions`, read by id even when it is not among the
+  newest listed), and otherwise the newest instance, as before; with it,
+  that instance, after checking it belongs to the task. The
   registry client gains `task_instance_get(instance_id, *, task_id=None)`
   (and `_aio`), reading `GET /instances/{id}`. Against a registry without
   that route it reads the instance from `GET /tasks/{task_id}` instead, so
@@ -69,9 +72,14 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `sd.TaskRefRegistryUnavailableError`, which a reactive tick retries rather
   than excluding the task whose `requires()` built the reference.
 - **New: `stardag tasks ref <task-id> [--instance <id>]`** (STA-148)
-  prints a `ref(...)` call for a registered task, pinned to an instance
-  (the newest by default), and the class's import when `--module` (or the
-  project's `task_modules`) loads it.
+  prints a `ref(...)` call for a registered task, pinned to an instance,
+  and the class's import when `--module` (or the package's `task_modules`)
+  loads it. By default the instance is, for a completed task, the one its
+  completing execution ran, else the newest; `--instance newest` and
+  `--instance <id>` override, and the choice and its reason are printed on
+  stderr. An unpinned `TaskRef` and `from_registry` choose the same way,
+  and `stardag tasks show` names the completing execution's instance.
+  Against a registry without `GET /tasks/{id}/executions`, the newest.
 - **Changed: `from_registry` validates a body into the class it names**
   (STA-148). A body of an unrelated class is refused by name rather than as
   a task id mismatch, `Base.from_registry(...)` returns the concrete
@@ -137,7 +145,9 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   with the table from the calling module's file, then from the task
   class's module, then from the working directory, so each package of a
   repository reads its own store wherever its pins are imported from; an
-  installed package's store is found by a marker file inside it. Any
+  installed package's store is found by a marker file inside it, which
+  also carries a copy of the `task_modules` (a found `pyproject.toml`
+  always wins; a write refreshes the copy, a read warns on a mismatch). Any
   rehydration that misses a class (`task_from_body`, `from_registry`,
   `TaskRef` hydration, `from_store`) imports the applicable `task_modules`
   once per process and retries; the error, now

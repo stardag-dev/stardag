@@ -139,10 +139,25 @@ every significant field but may differ in non-significant ones (see
   hydrated task is always that construction, and it is served from the
   local body cache (`~/.stardag/registry-cache/`) after its first read, so
   hydration works offline.
-- **Unpinned**: the newest instance at hydration time, which always asks
-  the registry.
+- **Unpinned**: chosen at hydration time, which always asks the registry.
+  For a completed task, it is the instance its completing execution ran;
+  otherwise, or when no completed execution is recorded (a completion
+  observed at discovery, say), the newest instance.
 
-Pin unless you want "whatever was registered last".
+Why not simply the newest: every later build that registers a task under a
+new deployment adds an instance, whose non-significant fields reflect a
+deployment that never ran it. A completed task can hold dozens of these,
+and the instance that produced its output may not be among the newest the
+registry lists. The execution ledger records which instance ran, so the
+default follows it, and `from_registry(task_id)` does the same.
+
+`stardag tasks ref <task-id>` pins by the same rule, and says which instance
+it chose and why (on stderr). Pass `--instance newest` for the newest
+registered instance instead, or `--instance <id>` for a specific one.
+`stardag tasks show <task-id>` names the instance the completing execution
+ran, even when it is not among the instances it lists.
+
+Pin unless you want the choice made again at every hydration.
 
 ## What a build does with references
 

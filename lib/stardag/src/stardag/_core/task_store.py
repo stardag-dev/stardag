@@ -102,11 +102,13 @@ def resolve_store(
         # (an installed package with several stores) only loses the root
         # a relative path would resolve against.
         try:
-            root = project_config(anchors).root
+            config = project_config(anchors)
         except TaskStoreError:
-            root = None
+            config = None
+        root = config.root if config is not None else None
+        modules = config.task_modules if config is not None and root else None
         try:
-            return TaskStore(resolve_store_spec(store, root))
+            return TaskStore(resolve_store_spec(store, root), task_modules=modules)
         except ProjectConfigError as e:
             raise TaskStoreError(str(e)) from e
     config = project_config(anchors)

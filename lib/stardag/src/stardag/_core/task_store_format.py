@@ -80,7 +80,10 @@ FORMAT_VERSION = 1
 #: The reserved key of a pointer to a nested task's own file.
 POINTER_KEY = "__stardag_task"
 # Source fields that do not distinguish one origin from another.
-_SOURCE_STAMP_FIELDS = ("written_at", "stardag_version")
+_SOURCE_STAMP_FIELDS = ("written_at", "stardag_version", "selection")
+#: ``selection`` of a registry source whose instance is the one the task's
+#: completing execution ran (see ``stardag.registry._instance_select``).
+COMPLETED_EXECUTION = "completed_execution"
 
 
 class TaskStoreError(StardagError):
@@ -162,6 +165,12 @@ class Envelope:
     sources: list[dict[str, Any]] = field(default_factory=list)
 
     @property
+    def from_completed_execution(self) -> bool:
+        """Whether a source records this body as the instance of the
+        execution that completed the task (unverified metadata)."""
+        return any(s.get("selection") == COMPLETED_EXECUTION for s in self.sources)
+
+    @property
     def instance_ids(self) -> list[str]:
         return [s["instance_id"] for s in self.sources if s.get("instance_id")]
 
@@ -212,8 +221,27 @@ class Envelope:
 
     def with_source(self, source: dict[str, Any]) -> Envelope | None:
         """This envelope plus ``source``, or ``None`` when an equivalent
-        source is already listed (nothing to write)."""
-        if any(source_identity(s) == source_identity(source) for s in self.sources):
+        source is already listed (nothing to write). An equivalent source
+        learning that its instance is the completing execution's is
+        updated to say so."""
+        for i, s in enumerate(self.sources):
+            if source_identity(s) != source_identity(source):
+                continue
+            if (
+                source.get("selection") == COMPLETED_EXECUTION
+                and s.get("selection") != COMPLETED_EXECUTION
+            ):
+                sources = list(self.sources)
+                sources[i] = {**s, "selection": COMPLETED_EXECUTION}
+                return Envelope(
+                    task_id=self.task_id,
+                    instance_hash=self.instance_hash,
+                    namespace=self.namespace,
+                    name=self.name,
+                    module=self.module,
+                    body=self.body,
+                    sources=sources,
+                )
             return None
         return Envelope(
             task_id=self.task_id,

@@ -283,6 +283,7 @@ def write_from_registry(
     registry: RegistryABC | None = None,
     store: str | os.PathLike[str] | None = None,
     anchors: typing.Sequence[Path | None] = (),
+    selection: str | None = None,
 ) -> StoredTask:
     """Read an instance body from the registry and write its tree into the
     store (``stardag tasks ref <task-id> --write``).
@@ -294,11 +295,16 @@ def write_from_registry(
 
     Args:
         task_id: The task.
-        instance_id: The instance to write. Default: the newest.
+        instance_id: The instance to write. Default: for a completed task,
+            the instance of the execution that completed it, else the
+            newest (``stardag.registry._instance_select``).
         registry: Default: the configured registry.
         store: Default: the configured store.
         anchors: Where the store config is looked up from. Default: the
             working directory (the CLI writes into the package it runs in).
+        selection: How the caller chose ``instance_id`` (recorded in the
+            source as ``selection``): ``"completed_execution"``,
+            ``"newest"`` or ``"pinned"`` (the default when an id is given).
 
     Raises:
         TaskStoreError: The body does not rehydrate to the task id (the
@@ -318,11 +324,15 @@ def write_from_registry(
                 f"Instance {instance_id} belongs to task {instance.task_id}, "
                 f"not to task {tid}."
             )
+        selection = selection or "pinned"
     else:
-        info = registry.task_get(tid)
-        if not info.instances:
-            raise TaskStoreError(f"Task {tid} has no instance to write.")
-        instance = info.instances[0]
+        from stardag.registry._instance_select import NoInstanceError, select_instance
+
+        try:
+            selected = select_instance(registry, tid)
+        except NoInstanceError as e:
+            raise TaskStoreError(f"Task {tid} has no instance to write.") from e
+        instance, selection = selected.instance, selected.reason
     body = dict(instance.body)
     _refuse_aliased(body, tid)
     try:
@@ -338,7 +348,7 @@ def write_from_registry(
         task_store,
         task,
         body,
-        {**origin, "instance_id": str(instance.id), **stamp},
+        {**origin, "instance_id": str(instance.id), "selection": selection, **stamp},
         {**origin, **stamp},
     )
     return StoredTask(

@@ -48,6 +48,7 @@ from stardag._core.task_id import same_task_id
 from stardag.exceptions import StardagError
 from stardag._cli.executions import render_executions
 from stardag.registry import EventInfo, TaskArtifactInfo, TaskInfo
+from stardag.registry._instance_select import COMPLETED, completed_execution
 
 app = typer.Typer(help="Inspect tasks and act on one task.", no_args_is_help=True)
 app.command("check")(tasks_check)
@@ -102,6 +103,9 @@ def tasks_show(
         executions = registry.task_list_executions(task_id, include_ended=include_ended)
         log = registry.task_events(task_id, limit=EVENT_READ_LIMIT)
         artifacts = registry.task_list_artifacts(task_id)
+        completed_by = None
+        if (task.status or "").lower() == COMPLETED:
+            completed_by = completed_execution(registry, task.task_id)
     except StardagError as e:
         _fail(e)
     finally:
@@ -119,10 +123,24 @@ def tasks_show(
                 else [],
                 "structure_diverged": [e.model_dump(mode="json") for e in diverged],
                 "artifacts": [a.model_dump(mode="json") for a in artifacts],
+                # The instance the completing execution ran (also when it is
+                # not among the newest instances listed).
+                "completed_instance_id": str(completed_by.instance_id)
+                if completed_by is not None
+                else None,
             }
         )
         return
     _render_task(task, artifacts)
+    if completed_by is not None:
+        listed = any(i.id == completed_by.instance_id for i in task.instances)
+        console.print(
+            f"Completed by execution {completed_by.id}, which ran instance "
+            f"{completed_by.instance_id}"
+            + ("" if listed else " (not among the newest instances listed)")
+            + ". stardag tasks ref pins this instance by default.",
+            highlight=False,
+        )
     render_executions(
         executions,
         title=f"{'Executions' if include_ended else 'Unended executions'} "
@@ -311,7 +329,10 @@ def tasks_ref(
         None,
         "--instance",
         "-i",
-        help="Pin this instance (default: the task's newest).",
+        help="Pin this instance, or 'newest' for the newest registered one. "
+        "Default: for a completed task, the instance of the execution that "
+        "completed it; otherwise (or with no completed execution recorded) "
+        "the newest.",
     ),
     module: list[str] = typer.Option(
         [],
@@ -401,9 +422,21 @@ def _tasks_ref(
     registry = _resolve_registry(stardag_profile, stardag_env)
     pinned = None
     stored = None
+    selection = "pinned"
+    why = ""
     try:
         task = registry.task_get(task_id)
-        if instance is not None:
+        if instance is None:
+            from stardag.registry._instance_select import select_instance
+
+            chosen = select_instance(registry, task.task_id, info=task)
+            pinned, selection, why = chosen.instance, chosen.reason, chosen.explanation
+        elif instance == "newest":
+            if not task.instances:
+                raise StardagError(f"Task {task_id} has no instance to reference.")
+            pinned, selection = task.instances[0], "newest"
+            why = f"newest instance {pinned.id} (--instance newest)"
+        else:
             # Read the instance itself: ``task_get`` serves only the newest
             # few, so an older one is not necessarily among them.
             pinned = registry.task_instance_get(instance, task_id=task.task_id)
@@ -414,12 +447,8 @@ def _tasks_ref(
                     f"Instance {instance} belongs to task {pinned.task_id}, "
                     f"not to task {task.task_id}."
                 )
-        if pinned is not None:
-            instance_id = str(pinned.id)
-        elif task.instances:
-            instance_id = str(task.instances[0].id)
-        else:
-            raise StardagError(f"Task {task_id} has no instance to reference.")
+            why = f"instance {pinned.id} (--instance)"
+        instance_id = str(pinned.id)
         if store_root is not None:
             from stardag._core.task_store_write import write_from_registry
 
@@ -428,6 +457,7 @@ def _tasks_ref(
                 instance_id=instance_id,
                 registry=registry,
                 store=store,
+                selection=selection,
             )
     except StardagError as e:
         _fail(e)
@@ -451,6 +481,8 @@ def _tasks_ref(
             "module_located": cls is not None,
             "import": import_line,
             "ref": ref_line,
+            "selection": selection,
+            "chosen": why,
         }
         if stored is not None:
             payload["store"] = {
@@ -466,6 +498,7 @@ def _tasks_ref(
     elif cls is None:
         typer.echo(f"# import {prefix} from its defining module")
     typer.echo(from_store_line or ref_line)
+    error_console.print(f"[dim]Pinned to {why}.[/dim]", highlight=False)
     if stored is not None:
         written = len(stored.written)
         error_console.print(

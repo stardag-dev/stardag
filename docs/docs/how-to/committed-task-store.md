@@ -101,7 +101,13 @@ there, the store is the directory inside the package holding a
 walk never leaves an installed package, so a virtualenv inside another
 repository does not pick up that repository's store.
 
-`task_modules` follow the same order (without the explicit argument).
+`task_modules` follow the same order (without the explicit argument). The
+marker also records a copy of the package's `task_modules`, for an
+installed copy or a container image without the `pyproject.toml`. A found
+`[tool.stardag]` table always wins over that copy: the marker's list is
+used only when no `pyproject.toml` is found. Every write refreshes the copy
+when the two differ, and a read that finds both differing logs a warning
+naming both.
 
 The **CLI** resolves from the working directory: run
 `stardag tasks ref --write` in the package you write to.
@@ -130,7 +136,9 @@ from my_package.models import TrainedModel
 TrainedModel.from_store("6f1c2c62-...", instance_hash="7a2e...")
 ```
 
-The command reads the instance body (the newest, or `--instance <id>`),
+The command reads the instance body (for a completed task, the instance
+its completing execution ran; otherwise the newest; or `--instance <id>` /
+`--instance newest`), records how it was chosen,
 checks that it rehydrates to its task id under today's code, writes it and
 every nested task's body into the store, and prints the import and the
 reader line. A body that no longer rehydrates is not written, and the error
@@ -308,6 +316,12 @@ does not import every task class by hand:
    the error names it, the patterns and any module that failed to import.
    No lock is held while the modules import, so a module whose own import
    rehydrates a body cannot deadlock it.
+
+Imports are cached per module list (`import_task_modules`), and a module
+already imported in the process imports again without error. So a test
+that checks "every declared module imports" should assert that the
+reported failures are a **subset** of the ones it knows about, not equal
+to them: a module another test already imported reports none.
 
 `stardag tasks ref` uses the same `task_modules` to print a class's import
 without `--module`.

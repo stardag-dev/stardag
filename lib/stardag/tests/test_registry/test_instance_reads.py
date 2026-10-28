@@ -472,6 +472,8 @@ class TestFromRegistryPinned:
                 ("GET", f"/api/v2/tasks/{model.id}"): _task_payload(
                     str(model.id), [_instance_payload(newer, uuid4())]
                 ),
+                # An older registry without the route: the newest instance.
+                ("GET", f"/api/v2/tasks/{model.id}/executions"): _route_missing(),
             }
         )
         registry = _registry(server)
@@ -664,3 +666,54 @@ def test_pinned_load_through_the_in_memory_registry(model):
     assert loaded == model
     with pytest.raises(NotFoundError):
         registry.task_instance_get(uuid4())
+
+
+class TestUnpinnedSelection:
+    """Unpinned, a completed task resolves to the instance its completing
+    execution ran, read by id even when it is not among those listed."""
+
+    def _execution(self, task_id, instance_id, outcome):
+        return {
+            "id": str(uuid4()),
+            "task_id": task_id,
+            "instance_id": str(instance_id),
+            "outcome": outcome,
+            "started_at": "2026-10-27T00:00:00Z",
+        }
+
+    def test_the_completed_executions_instance_not_the_newest(self, model):
+        iid = uuid4()
+        newer = model.model_copy(update={"notes": "re-registered later"})
+        tid = str(model.id)
+        server = _Server(
+            {
+                ("GET", f"/api/v2/tasks/{tid}"): _task_payload(
+                    tid, [_instance_payload(newer, uuid4())]
+                ),
+                ("GET", f"/api/v2/tasks/{tid}/executions"): {
+                    "executions": [
+                        self._execution(tid, uuid4(), "failed"),
+                        self._execution(tid, iid, "completed"),
+                    ]
+                },
+                ("GET", f"/api/v2/instances/{iid}"): _instance_payload(model, iid),
+            }
+        )
+        loaded = TrainedModel.from_registry(model.id, registry=_registry(server))
+        assert isinstance(loaded, TrainedModel) and loaded.notes == "first run"
+
+    def test_no_completed_execution_falls_back_to_the_newest(self, model):
+        newer = model.model_copy(update={"notes": "re-registered later"})
+        tid = str(model.id)
+        server = _Server(
+            {
+                ("GET", f"/api/v2/tasks/{tid}"): _task_payload(
+                    tid, [_instance_payload(newer, uuid4())]
+                ),
+                ("GET", f"/api/v2/tasks/{tid}/executions"): {"executions": []},
+            }
+        )
+        loaded = TrainedModel.from_registry(model.id, registry=_registry(server))
+        assert (
+            isinstance(loaded, TrainedModel) and loaded.notes == "re-registered later"
+        )

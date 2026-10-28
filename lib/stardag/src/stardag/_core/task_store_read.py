@@ -309,7 +309,9 @@ def hydrate_from_store(ref: Any) -> BaseTask | None:
     """A ``TaskRef``'s task from the store that applies to it, when that
     store holds the body: for a pinned reference, a body recorded under its
     instance id (``sources``, unverified metadata); for an unpinned one,
-    the only body of the task. ``None`` otherwise. Memoized per process.
+    the only body of the task, or among several the one written as the
+    instance of the execution that completed it. ``None`` otherwise.
+    Memoized per process.
 
     Raises:
         TaskRefHydrationError: The store holds the body but it cannot be
@@ -339,7 +341,18 @@ def hydrate_from_store(ref: Any) -> BaseTask | None:
                 instance_id=None if ref.instance_id is None else str(ref.instance_id),
             )
         except AmbiguousStoredTaskError:
-            return None  # several bodies stored: not "exactly one"
+            # Several bodies stored: the one written as the instance of the
+            # execution that completed the task, if exactly one says so.
+            completed = [
+                e
+                for e in (
+                    task_store.read(p) for p in task_store.paths_of(str(ref.task_id))
+                )
+                if e.from_completed_execution
+            ]
+            if len(completed) != 1:
+                return None
+            envelope = completed[0]
         if envelope is None:
             return None
         with anchored(*anchors):

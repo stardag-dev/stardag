@@ -33,7 +33,10 @@ so in a repository of several packages each one's pins read its own store
    never leaves an installed package: a file under ``site-packages`` /
    ``dist-packages`` is resolved inside its top-level package, where the
    store is the one directory holding a ``stardag_task_store.toml`` marker
-   (written by every store writer);
+   (written by every store writer), and ``task_modules`` are the copy the
+   marker records. A found ``pyproject.toml`` always wins over that copy;
+   every write refreshes it when the two differ, and a read that finds
+   both differing logs a warning;
 3. the same walk from the working directory.
 
 The anchors are, for ``from_store`` / ``write_to_store``, the calling
@@ -45,6 +48,7 @@ module (:mod:`stardag._core.anchor`).
 from __future__ import annotations
 
 import importlib.resources
+import logging
 import os
 import threading
 import tomllib
@@ -53,6 +57,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 TOOL_TABLE = "stardag"
 TASK_STORE_ENV = "STARDAG_TASK_STORE"
@@ -144,6 +150,36 @@ def _read_tool_table(pyproject: Path) -> dict[str, typing.Any] | None:
     return table if isinstance(table, dict) else None
 
 
+def _marker_modules(store: Path) -> tuple[str, ...] | None:
+    try:
+        text = (store / STORE_MARKER).read_text("utf-8")
+    except OSError:
+        return None
+    try:
+        return tuple(str(m) for m in tomllib.loads(text).get("task_modules", ()))
+    except tomllib.TOMLDecodeError:
+        return None
+
+
+def _warn_on_marker_drift(config: ProjectConfig) -> None:
+    """The ``pyproject.toml`` always wins over the store marker's copy of
+    ``task_modules``; say so when they differ (the next write refreshes the
+    marker)."""
+    if config.task_store is None:
+        return
+    marker = _marker_modules(config.task_store)
+    if marker is not None and marker != config.task_modules:
+        logger.warning(
+            "%s declares task_modules %s, but the task store's marker %s records "
+            "%s. The pyproject.toml wins; the marker (used only by an installed "
+            "copy without it) is refreshed on the next write to the store.",
+            config.config_path,
+            list(config.task_modules),
+            config.task_store / STORE_MARKER,
+            list(marker),
+        )
+
+
 def _from_table(table: dict[str, typing.Any], pyproject: Path) -> ProjectConfig:
     root = pyproject.parent
     store = table.get("task_store")
@@ -225,6 +261,7 @@ def discover_project_config(start: Path) -> ProjectConfig | None:
                 table = _read_tool_table(pyproject)
                 if table is not None:
                     found = _from_table(table, pyproject)
+                    _warn_on_marker_drift(found)
                     break
     with _CACHE_LOCK:
         _DIR_CACHE[start] = found

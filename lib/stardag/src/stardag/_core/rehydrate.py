@@ -425,13 +425,32 @@ def load_from_registry(
     """``BaseTask.from_registry``: see there. ``allow_aliased=False``
     refuses ``AliasTask`` payloads (see :func:`_validate_for`)."""
     if instance_id is None:
-        info = registry.task_get(str(task_id))
-        if info.body is None:
+        # Not simply the newest: for a completed task, the instance of the
+        # execution that completed it (``select_instance``).
+        from stardag.registry._instance_select import (
+            COMPLETED_EXECUTION,
+            NoInstanceError,
+            select_instance,
+        )
+
+        try:
+            selected = select_instance(registry, str(task_id))
+        except NoInstanceError as e:
             raise TaskRehydrationError(
                 f"The registry holds no instance body for task {task_id}."
+            ) from e
+        if selected.reason == COMPLETED_EXECUTION:
+            return load_from_registry(
+                cls,
+                task_id,
+                registry,
+                instance_id=selected.instance.id,
+                allow_aliased=allow_aliased,
             )
         try:
-            task = _validate_for(cls, info.body, allow_aliased=allow_aliased)
+            task = _validate_for(
+                cls, selected.instance.body, allow_aliased=allow_aliased
+            )
             rehydrated_id = task.id
         except TaskRehydrationError:
             raise
@@ -439,7 +458,7 @@ def load_from_registry(
             # As on the pinned path: one error family for a body that does
             # not validate (a field since made required, say).
             raise TaskRehydrationError(
-                f"Failed to rehydrate the newest instance of task {task_id}: {e}"
+                f"Failed to rehydrate {selected.explanation} of task {task_id}: {e}"
             ) from e
         if rehydrated_id != task_id:
             raise _id_mismatch(task, task_id)

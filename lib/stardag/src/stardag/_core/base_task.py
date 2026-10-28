@@ -503,7 +503,8 @@ class BaseTask(
             task_id: The referenced task id.
             instance_id: Pin one instance (recommended: its non-significant
                 fields are then fixed, and it is served from the local body
-                cache, offline). Default: the newest at hydration time.
+                cache, offline). Default: chosen at hydration time, the instance of
+                the execution that completed the task, else the newest.
 
         Returns:
             A ``TaskRef[Self, Any]``: for a class with no declared loaded
@@ -692,8 +693,10 @@ class BaseTask(
           (``~/.stardag/registry-cache/``): a pinned load works offline
           after one online read, and its non-significant fields are the
           same on every load;
-        - without, the newest instance's body (``TaskInfo`` orders them
-          newest first), which always asks the registry.
+        - without, for a completed task the instance of the execution that
+          completed it (read by id, so found even when it is not among the
+          newest listed), and otherwise, or when no completed execution is
+          recorded, the newest instance. Always asks the registry.
 
         Validated in compat mode, same as :func:`stardag.task_from_body`:
         the recomputed task id is checked against the requested one, so a
@@ -705,8 +708,8 @@ class BaseTask(
             id: The UUID (or string representation) of the task to load.
             registry: An optional registry instance to use for loading metadata. If not
                 provided, the default registry from `registry_provider` will be used.
-            instance_id: The instance to load, pinned. Defaults to the
-                newest.
+            instance_id: The instance to load, pinned. Default: the
+                completed execution's instance, else the newest (see above).
 
         Returns:
             The reconstructed task object.
@@ -828,7 +831,8 @@ class LoadableTask(BaseTask, abc.ABC, Generic[LoadedT_co]):
             task_id: The referenced task id.
             instance_id: Pin one instance (recommended: its non-significant
                 fields are then fixed, and it is served from the local body
-                cache, offline). Default: the newest at hydration time.
+                cache, offline). Default: chosen at hydration time, the instance of
+                the execution that completed the task, else the newest.
 
         Returns:
             A ``TaskRef[Self, LoadedT]``, accepted wherever an

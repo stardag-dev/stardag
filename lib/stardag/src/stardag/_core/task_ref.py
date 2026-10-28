@@ -149,8 +149,10 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
         task_class: The referenced task class. The hydrated task is an
             instance of it (or of a subclass).
         task_id: The referenced task id: this reference's :attr:`id`.
-        instance_id: The pinned instance, or ``None`` for the newest one
-            at hydration time (which always asks the registry).
+        instance_id: The pinned instance, or ``None`` to choose one at
+            hydration time (which always asks the registry): for a completed
+            task the instance of the execution that completed it, else the
+            newest.
     """
 
     __stardag_abstract__: ClassVar[bool] = True
@@ -352,13 +354,14 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
 
         Pinned (``instance_id`` given), the instance's body is used and is
         served from the local body cache when present, so it works offline
-        after one online read. Unpinned, the newest instance's body is
-        read, which always asks the registry. Either way the result is
-        checked to be an instance of :attr:`task_class` with this
+        after one online read. Unpinned, the registry chooses: for a
+        completed task the instance of the execution that completed it,
+        else the newest instance; this always asks the registry. Either
+        way the result is checked to be an instance of :attr:`task_class` with this
         reference's task id.
 
         Memoized per process and registry: hydrating the same reference
-        twice reads once (for an unpinned reference, the newest instance
+        twice reads once (for an unpinned reference, the instance chosen
         at the first hydration is kept).
 
         Args:
@@ -636,7 +639,7 @@ def _key_lock(registry: Any, key: Any) -> threading.Lock:
 
 def clear_hydration_memo() -> None:
     """Forget every hydrated reference (tests, or a long-lived process that
-    wants an unpinned reference to read the newest instance again)."""
+    wants an unpinned reference to choose its instance again)."""
     from stardag._core.task_store_read import clear_store_memo
 
     with _MEMO_LOCK:

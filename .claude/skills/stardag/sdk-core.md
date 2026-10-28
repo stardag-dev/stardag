@@ -121,6 +121,8 @@ task_modules = ["my_package.tasks.*", "!my_package.tasks.deploy"]  # "!" exclude
 
 ```sh
 stardag tasks ref <task-id> --write   # run in the package dir; copies a registry instance, prints the line
+# default instance: a completed task's completing-execution instance, else the newest;
+# `--instance newest` / `--instance <id>` override (the choice is printed on stderr)
 ```
 
 ```python

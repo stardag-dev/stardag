@@ -828,3 +828,32 @@ def test_the_marker_records_the_packages_task_modules(tmp_path):
         sd.write_to_store(Dataset(size=3))
     marker = (tmp_path / "s" / "stardag_task_store.toml").read_text()
     assert 'task_modules = ["a.*"]' in marker
+
+
+def test_the_pyproject_wins_over_a_stale_marker_and_warns(tmp_path, caplog):
+    import logging
+
+    from stardag.config.project import (
+        clear_project_config_cache,
+        discover_project_config,
+    )
+
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.stardag]\ntask_store = "pins"\ntask_modules = ["new.*"]\n'
+    )
+    (tmp_path / "pins").mkdir()
+    (tmp_path / "pins" / "stardag_task_store.toml").write_text(
+        'format = 1\ntask_modules = ["old.*"]\n'
+    )
+    clear_project_config_cache()
+    with caplog.at_level(logging.WARNING, logger="stardag.config.project"):
+        found = discover_project_config(tmp_path)
+    assert found is not None and found.task_modules == ("new.*",)
+    assert "['new.*']" in caplog.text and "['old.*']" in caplog.text
+    # The next write through the package settings refreshes the marker.
+    with project_config_override(found):
+        sd.write_to_store(Dataset(size=1))
+    assert (
+        'task_modules = ["new.*"]'
+        in (tmp_path / "pins" / "stardag_task_store.toml").read_text()
+    )

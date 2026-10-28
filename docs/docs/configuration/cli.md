@@ -607,7 +607,7 @@ matches.
     stardag tasks list [--status S] [--limit N] [--cursor C] [--json]
     stardag tasks show <task-id> [--include-ended] [--events N] [--json]
     stardag tasks check <task-id> --module MODULE [--json]
-    stardag tasks ref <task-id> [--instance <id>] [--module MODULE]
+    stardag tasks ref <task-id> [--instance <id>|newest] [--module MODULE]
         [--write [--store DIR]] [--json]
     stardag tasks retry <task-id> [--build <build-id>] [--yes] [--json]
     stardag tasks cancel <task-id> [--build <build-id>] [--yes] [--json]
@@ -627,7 +627,7 @@ matches.
     uv run stardag tasks list [--status S] [--limit N] [--cursor C] [--json]
     uv run stardag tasks show <task-id> [--include-ended] [--events N] [--json]
     uv run stardag tasks check <task-id> --module MODULE [--json]
-    uv run stardag tasks ref <task-id> [--instance <id>] [--module MODULE]
+    uv run stardag tasks ref <task-id> [--instance <id>|newest] [--module MODULE]
         [--write [--store DIR]] [--json]
     uv run stardag tasks retry <task-id> [--build <build-id>] [--yes] [--json]
     uv run stardag tasks cancel <task-id> [--build <build-id>] [--yes] [--json]
@@ -683,8 +683,10 @@ deployments`.
   a message saying to trigger a build instead, because there is no route
   for a bare observation outside a build's discovery.
 - `tasks ref <task-id>` — print the code that references the task: a
-  `Task.ref(...)` call, pinned to an instance (`--instance`, default the
-  task's newest). Pass `--module` (repeatable), the module defining the
+  `Task.ref(...)` call, pinned to an instance: by default, for a completed
+  task, the instance of the execution that completed it, else the newest;
+  `--instance newest` or `--instance <id>` to override. Which one was
+  chosen, and why, is printed on stderr. Pass `--module` (repeatable), the module defining the
   class, to also print its import; it is not needed for classes covered by
   the `[tool.stardag] task_modules` of the package you run it in. The
   namespace is never read as an import path. Writes nothing, unless
