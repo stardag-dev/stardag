@@ -299,9 +299,14 @@ performs.
 The price of that is that the container holding the database must not be
 replaced mid-run, because a recycle loses the whole database rather than some
 rows — and every scenario then fails in ways that read as scheduling bugs.
-`min_containers=1` and an explicit CPU/memory request are the prevention; the
-boot nonce on `/_harness/boot` is the detection, checked after every scenario,
-so a recycle is one sentence naming the cause instead of a debugging session.
+`min_containers=1`, an explicit CPU/memory request and `nonpreemptible=True`
+are the prevention; the boot nonce on `/_harness/boot` is the detection,
+checked after every scenario, so a recycle is one sentence naming the cause
+instead of a debugging session. The last of the three came from reading the
+container's log: every recycle of 2026-10-28 was Modal _preempting_ it, which
+no resource request prevents (STA-168). Only the registry is non-preemptible;
+the workers stay preemptible, since surviving preemption is part of what the
+scenarios test.
 
 **A lost answer is retried where it happens, first.** The registry answers in
 well under a second, and yet a call from the runner or a worker sometimes gets
@@ -314,13 +319,27 @@ Those retries are counted, and CI annotates the count on every run, green or
 red (`Registry exchanges retried`), so the class stays measured after it
 stopped failing scenarios.
 
-**A recycled container is retried, once, and nothing else is.** CI re-runs
-the failed scenarios — re-provisioning first, since the replacement
-container's database is empty — when and only when that boot nonce changed. A
-scenario that failed on its own merits is never retried. Locally the marker is
-not written and the assertion message tells you to provision again. The
+**A recycled container is retried, and nothing else is.** CI re-runs the
+failed scenarios — re-provisioning first, since the replacement container's
+database is empty — when and only when that boot nonce changed. A scenario
+that failed on its own merits is never retried. Locally the marker is not
+written and the assertion message tells you to provision again. The
 alternative, PGDATA on a Modal Volume, was considered and rejected;
 `record_recycle` in `_harness.py` carries the reasoning.
+
+The recovery covers each place a recycle can land, because each once ended a
+run red with the recycle already identified (STA-168):
+
+- **During provisioning**, `provision up` compares the boot id read when the
+  registry first answers with the one at the end, or at a failure, and
+  provisions again if it changed — up to three times in all, and for no
+  other failure. The symptom it replaces is a proxy 500 ("function was
+  terminated by signal") and then `InvalidAPIKeyError` from a deploy's
+  activation call, before any scenario ran.
+- **During the first attempt**, the retry described above.
+- **During that retry**, one more re-provision and re-run of what failed
+  again, keyed on the retry's own marker. A transport fault is still retried
+  once only.
 
 **A transport fault that survives the client's retries is the second
 retryable failure, and the list ends there.** A request that never received a

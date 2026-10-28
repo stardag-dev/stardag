@@ -26,6 +26,7 @@ from uuid import UUID
 
 from stardag import BaseTask, TaskStruct, flatten_task_struct
 from stardag._core.instance import extend_path
+from stardag._core.task_ref import resolve_refs_aio
 from stardag.build._base import (
     BuildContext,
     BuildExitStatus,
@@ -175,6 +176,9 @@ async def build_aio(
                 f"Invalid task at index {index}: {task} (must be BaseTask)"
             )
     registry = registry if registry is not None else registry_provider.get()
+    # Every reference in the DAG becomes its hydrated task before anything
+    # is walked, registered or run.
+    roots = await resolve_refs_aio(roots, registry)
     try:
         checked_settings = await resolve_settings_aio(
             registry, resume_build_id, settings
@@ -282,6 +286,7 @@ class _ResidentEngine:
             # registered without a registry.
             check_stability=self.session.enabled,
             register_all=self.register_all,
+            registry=self.session.registry,
         )
         self.walk = walk
         self._add_walk(walk)
@@ -298,13 +303,16 @@ class _ResidentEngine:
             seen=self.walk.seen,
             prior=self.walk,
             root_path=parent_path,
+            registry=self.session.registry,
         )
         known = {t.id for t in self.walk.order}
         _merge(self.walk, walk)
         self._add_walk(walk)
+        # ``walk.roots``, not ``deps``: the yielded tasks with any reference
+        # hydrated.
         return yield_batches(
             walk,
-            deps,
+            walk.roots,
             suspend=self.executor.supports_detached(parent),
             known=known,
         )

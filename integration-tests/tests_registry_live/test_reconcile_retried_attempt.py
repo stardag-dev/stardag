@@ -23,7 +23,7 @@ execution, holds on a gate.
 
 **From the failure on,** the scenario probes the call itself, with the
 very method a tick uses, and requires ``"running"`` on every read: through
-the gap before Modal's retry (the app stretches Modal's retry delay to 20s
+the gap before Modal's retry (the app stretches Modal's retry delay to 30s
 so that gap can be probed at all, and several reads must land well after
 the attempt has raised), and while the retry holds. On every read it also
 requires the ledger to show that one execution, unended, with no second
@@ -48,8 +48,11 @@ and the task re-driven while its retry runs.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 import uuid
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 
@@ -91,10 +94,12 @@ RETRY_TIMEOUT_SECONDS = 180
 # app's retry delay (``reconcile_app.RETRY_DELAY_SECONDS``) and this
 # interval, several land in it even when the failure is noticed late.
 MIN_GAP_PROBES = 3
-# A gap read counts towards that only this long after the first attempt
-# recorded itself: it records itself *before* raising, so the earliest
-# reads may still find it running.
-GAP_PROBE_AFTER_SECONDS = 5.0
+# A gap read counts towards that only this long after the scenario saw the
+# first attempt's record. The record is written before the attempt raises,
+# so seeing it means only that the raise is imminent; the margin keeps a
+# read of the attempt still running out of the gap's count. The gap's other
+# end is the retry's own recorded start, not when the scenario noticed it.
+GAP_PROBE_AFTER_SECONDS = 3.0
 # How long the retry is held while the call is probed: several of the
 # lingering tick's reconcile rounds, and at least this many probes of the
 # scenario's own.
@@ -128,7 +133,74 @@ def _probe(executor_ref: str) -> str:
     return asyncio.run(executor.probe_detached(MODAL_EXECUTOR_NAME, executor_ref))
 
 
-@pytest.mark.budget(170)
+class _Prober:
+    """Probes the call once a ``PROBE_INTERVAL_SECONDS``, on its own thread.
+
+    Each read is stamped with the wall clock, so the scenario can place it
+    against the attempts' own recorded times (``FailsOnceUnreported``). A
+    probe that raises is recorded as such and ends the probing: it is a
+    fault of the probe, which the scenario reports rather than reads as a
+    state.
+    """
+
+    def __init__(self, executor_ref: str) -> None:
+        self.executor_ref = executor_ref
+        self.reads: list[tuple[float, str]] = []
+        self.slowest = 0.0
+        self.error: BaseException | None = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=60)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            started = time.monotonic()
+            try:
+                state = _probe(self.executor_ref)
+            except BaseException as error:  # reported by the scenario
+                self.error = error
+                return
+            self.slowest = max(self.slowest, time.monotonic() - started)
+            self.reads.append((time.time(), state))
+            if state != "running":
+                return
+            self._stop.wait(PROBE_INTERVAL_SECONDS)
+
+    def count_since(self, at: float) -> int:
+        return sum(1 for when, _ in list(self.reads) if when >= at)
+
+    def between(self, start: float, end: float) -> list[str]:
+        return [state for when, state in list(self.reads) if start <= when < end]
+
+    def raise_if_not_running(self, context: Callable[[], str]) -> None:
+        if self.error is not None:
+            raise AssertionError(
+                f"Probing call {self.executor_ref!r} raised: {self.error!r}\n"
+                + context()
+            ) from self.error
+        bad = [(when, state) for when, state in list(self.reads) if state != "running"]
+        if bad:
+            when, state = bad[0]
+            raise AssertionError(
+                f"Probe of call {self.executor_ref!r} read {state!r} at "
+                f"{when:.1f}; a call Modal is retrying must read 'running' "
+                f"(all reads {[s for _, s in self.reads]}). A reconciling tick "
+                "would act on this -- unless the retry itself failed, which "
+                "its container log shows.\n" + context()
+            )
+
+
+def _context(build_id: Any, ledger_text: Callable[[], str]) -> str:
+    return f"{describe(build_id)}\n{ledger_text()}"
+
+
+@pytest.mark.budget(180)
 def test_a_retried_attempt_is_not_reconciled_as_failed(
     deployment: Deployment, gates: GateSet
 ) -> None:
@@ -172,7 +244,11 @@ def test_a_retried_attempt_is_not_reconciled_as_failed(
     assert executor_ref is not None, _ledger_text()
 
     # Probe the call, and read the ledger, from the failure on: through the
-    # gap before Modal's retry, and for as long as the retry holds.
+    # gap before Modal's retry, and for as long as the retry holds. The
+    # probes run on their own thread, at their own cadence: the loop below
+    # reads the registry, and one slow read there (a 10s read timeout and
+    # its retry) used to stall the probing with it, so a loaded run could
+    # land only two probes in a 20s gap (STA-168).
     from stardag_integration_tests.registry_live.reconcile_app import (
         RETRY_DELAY_SECONDS,
     )
@@ -180,74 +256,79 @@ def test_a_retried_attempt_is_not_reconciled_as_failed(
     from stardag.registry import registry_provider
 
     registry = registry_provider.get()
-    gap_reads: list[str] = []
-    late_gap_reads = 0
+    # The first attempt's record is visible, so its upload has returned and
+    # it raises next: a safe, if late, lower bound on the failure.
+    noticed_failure_at = time.time()
+    probes = _Prober(executor_ref)
+    probes.start()
     notifies = 0
     last_notify: float | None = None
-    retry_reads: list[str] = []
-    retry_seen_at: float | None = None
+    retry_started_at: float | None = None
+    retry_seen_at = 0.0
     failed_at = time.monotonic()
-    while True:
-        now = time.monotonic()
-        if retry_seen_at is None:
-            retry = task_artifact(deployment, leaf.id, RETRY_ATTEMPT_ARTIFACT_NAME)
-            if retry is not None:
-                assert str(retry["execution_id"]) == execution_id, (
-                    "Modal's retry should run under the failed attempt's "
-                    f"call, and so its execution.\n{_ledger_text()}"
-                )
-                retry_seen_at = now
-            else:
-                assert now - failed_at < RETRY_TIMEOUT_SECONDS, (
-                    f"Modal did not retry the failed attempt within "
-                    f"{RETRY_TIMEOUT_SECONDS}s.\n{describe(build_id)}\n"
-                    f"{_ledger_text()}"
-                )
-        elif (
-            len(retry_reads) >= MIN_RETRY_PROBES and now - retry_seen_at >= HOLD_SECONDS
-        ):
-            break
-        if last_notify is None or now - last_notify >= NOTIFY_INTERVAL_SECONDS:
-            # Flag only: the lingering tick is the one meant to pass.
-            registry.build_notify(build_id, can_spawn=False)
-            notifies += 1
-            last_notify = now
-        reads = gap_reads if retry_seen_at is None else retry_reads
-        state = _probe(executor_ref)
-        reads.append(state)
-        if retry_seen_at is None and now - failed_at >= GAP_PROBE_AFTER_SECONDS:
-            late_gap_reads += 1
-        phase = "before its retry" if retry_seen_at is None else "into its retry"
-        assert state == "running", (
-            f"Probe of call {executor_ref!r}, {now - failed_at:.0f}s after its "
-            f"first attempt failed ({phase}), read {state!r}; a call Modal is "
-            f"retrying must read 'running' (gap reads {gap_reads}, retry "
-            f"reads {retry_reads}). A reconciling tick would act on this -- "
-            "unless the retry itself failed, which its container log shows.\n"
-            f"{describe(build_id)}\n{_ledger_text()}"
-        )
-        rows = executions_of(deployment, leaf.id, build_id)
-        assert len(rows) == 1 and rows[0].get("ended_at") is None, (
-            "While Modal retries the call, its execution must be the only one "
-            f"and must not be ended.\n{describe(build_id)}\n{_ledger_text()}"
-        )
-        time.sleep(PROBE_INTERVAL_SECONDS)
-    assert retry_seen_at is not None
-    assert retry_seen_at - failed_at >= RETRY_DELAY_SECONDS / 2, (
-        f"The retry started {retry_seen_at - failed_at:.0f}s after the failure, "
-        f"against Modal's {RETRY_DELAY_SECONDS:.0f}s retry delay: this was "
-        "not the gap the scenario means to probe."
+    try:
+        while True:
+            now = time.monotonic()
+            probes.raise_if_not_running(lambda: _context(build_id, _ledger_text))
+            if retry_started_at is None:
+                retry = task_artifact(deployment, leaf.id, RETRY_ATTEMPT_ARTIFACT_NAME)
+                if retry is not None:
+                    assert str(retry["execution_id"]) == execution_id, (
+                        "Modal's retry should run under the failed attempt's "
+                        f"call, and so its execution.\n{_ledger_text()}"
+                    )
+                    retry_started_at = float(retry["at"])
+                    retry_seen_at = now
+                else:
+                    assert now - failed_at < RETRY_TIMEOUT_SECONDS, (
+                        f"Modal did not retry the failed attempt within "
+                        f"{RETRY_TIMEOUT_SECONDS}s.\n{describe(build_id)}\n"
+                        f"{_ledger_text()}"
+                    )
+            elif (
+                probes.count_since(retry_started_at) >= MIN_RETRY_PROBES
+                and now - retry_seen_at >= HOLD_SECONDS
+            ):
+                break
+            if last_notify is None or now - last_notify >= NOTIFY_INTERVAL_SECONDS:
+                # Flag only: the lingering tick is the one meant to pass.
+                registry.build_notify(build_id, can_spawn=False)
+                notifies += 1
+                last_notify = now
+            rows = executions_of(deployment, leaf.id, build_id)
+            assert len(rows) == 1 and rows[0].get("ended_at") is None, (
+                "While Modal retries the call, its execution must be the only "
+                f"one and must not be ended.\n{describe(build_id)}\n"
+                f"{_ledger_text()}"
+            )
+            time.sleep(PROBE_INTERVAL_SECONDS)
+    finally:
+        probes.stop()
+    probes.raise_if_not_running(lambda: _context(build_id, _ledger_text))
+    assert retry_started_at is not None
+    assert retry_started_at - float(failed["at"]) >= RETRY_DELAY_SECONDS / 2, (
+        f"The retry started {retry_started_at - float(failed['at']):.0f}s after "
+        f"the failure, against Modal's {RETRY_DELAY_SECONDS:.0f}s retry delay: "
+        "this was not the gap the scenario means to probe."
     )
-    assert late_gap_reads >= MIN_GAP_PROBES, (
-        f"Only {late_gap_reads} probe(s) landed between the failed attempt and "
-        f"its retry, {GAP_PROBE_AFTER_SECONDS:.0f}s or more after the failure; "
-        f"the scenario needs {MIN_GAP_PROBES} to say anything about that gap."
+    gap_from = noticed_failure_at + GAP_PROBE_AFTER_SECONDS
+    gap_reads = probes.between(gap_from, retry_started_at)
+    retry_reads = probes.between(retry_started_at, float("inf"))
+    assert len(gap_reads) >= MIN_GAP_PROBES, (
+        f"Only {len(gap_reads)} probe(s) landed between the failed attempt and "
+        f"its retry ({retry_started_at - gap_from:.1f}s from "
+        f"{GAP_PROBE_AFTER_SECONDS:.0f}s after the failure was seen to the "
+        f"retry starting; {len(probes.reads)} probes in all, "
+        f"{probes.slowest:.1f}s the slowest); the scenario needs "
+        f"{MIN_GAP_PROBES} to say anything about that gap. Every read was "
+        "'running', so nothing failed -- the gap was too short to probe: "
+        "raise reconcile_app.RETRY_DELAY_SECONDS."
     )
     print(
-        f"[harness] build {build_id}: {len(gap_reads)} probes before the retry "
-        f"({late_gap_reads} of them {GAP_PROBE_AFTER_SECONDS:.0f}s+ after the "
-        f"failure) and {len(retry_reads)} during it, all 'running'; the build "
-        f"flagged {notifies} times"
+        f"[harness] build {build_id}: {len(gap_reads)} probes in the gap "
+        f"before the retry ({retry_started_at - gap_from:.1f}s of it probed) "
+        f"and {len(retry_reads)} during it, all 'running'; the build flagged "
+        f"{notifies} times"
     )
 
     held.release()
