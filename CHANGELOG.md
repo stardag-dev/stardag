@@ -6,8 +6,49 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+### UI
+
+- Task parameters are shown as a collapsible, searchable tree instead of
+  raw JSON (STA-151): expand/collapse per node or all at once, sizes on
+  collapsed containers, nested task bodies labelled with their task name,
+  and copy value / copy JSON path per node. The search fuzzy-matches keys
+  and values in the manner of an editor's quick-open filter (characters
+  in order, case-insensitive, word starts and contiguous runs preferred),
+  highlights the matched characters, opens their ancestors and steps
+  through the matches best first. Keyboard: arrows move and fold, `c`
+  copies the focused value and `p` its path.
+
+## [0.29.0] — 2026-10-28
+
+SDK `0.29.0` and server `server-v0.8.0`. The SDK has three behaviour changes
+that can affect existing code (a missing `run()`, `Depends` under PEP 563, and
+run functions that delegate to a `Runner`), and the tick and worker changes
+below take effect only once a Modal app is **redeployed with the new SDK**. The
+server carries one additive migration
+(`workspaces.max_write_requests_per_minute`), and its images now install
+their dependencies from the lockfile. The SDK keeps working against a
+`server-v0.7.0` registry, but reconciliation does not: there a tick stops
+reconciling at the first unspawned claim it tries to end. See [RELEASE_NOTES.md](RELEASE_NOTES.md).
+
 ### SDK
 
+- **Corrected: a worker's `retries=` does not recover a task that raises**
+  (STA-154). The docs and the `FunctionSettings.retries` docstring said
+  Modal's retry covers an exception raised inside the container. Under the
+  default `Runner` the worker records that exception `FAILED`, which ends
+  the execution, and the retry stops at its start-of-attempt checkpoint:
+  a container start that runs nothing. A retry re-runs the task only when
+  the attempt recorded nothing — an exception before the failure report
+  (in `setup()`, or a report that never landed), or a function timeout the
+  task did not catch. Retry transient errors inside the task, and a real
+  failure with `stardag tasks retry` or a re-trigger. `stardag modal
+deploy` now **warns** about a worker with `retries` above zero (an `int`
+  or a `modal.Retries`) whose run function reports its own lifecycle. A
+  warning, not a refusal, since the cases above are still covered. No
+  behaviour change otherwise.
+- **`FunctionSettings.retries` accepts a `modal.Retries`** as well as a count
+  (STA-146). It was always passed through to Modal unchanged; only the type
+  said `int`, so setting the retry backoff took a type ignore.
 - **Fixed: a detached claim could record no executor** (STA-90). The
   claiming start of a detached execution (a reactive tick's spawn, or a
   resident build's Modal-routed task) carried only the best-effort executor
@@ -180,10 +221,22 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   landed late can never run alongside its replacement. The same holds for
   a reactive worker that cannot create its lifecycle reporter, and for one
   whose call id is not readable inside its container. The conditional end
-  needs a registry that supports it; against an older one the tick leaves
-  unspawned claims to their TTL. New executor hooks:
+  needs a registry that supports it. An older one refuses it, and the tick
+  that is refused stops reconciling for the rest of its run, including the
+  probes of recorded calls, so their lost reports are left to the claim's
+  TTL as before; the next tick starts reconciling again. New executor hooks:
   `TaskExecutorABC.reconciles()` and `probe_detached()`, implemented for
   Modal. The tick summary counts `reconciled`.
+
+- **Docs: the bundled agent skill (`.claude/skills/stardag/`) is brought up
+  to date** (STA-153). It had not changed since 0.27.0, so it was missing
+  everything since: tasks sent to Modal as instance bodies, the reactive
+  pre-flight, reconciliation and the worker rule, `reports_lifecycle`,
+  worker timeouts and claim TTLs, the new `TickConfig` defaults and knobs,
+  `builds tick` / `builds stalled`, the CLI's own wake-ups, transport and
+  rate-limit retries, the per-workspace rate limit, and the second-signal
+  checkpoint recipe. Its README now records the commit it was last synced
+  at.
 
 ### Server
 
@@ -243,21 +296,25 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `SELECT … ORDER BY … FOR UPDATE` acquires its locks in order now say that
   Postgres does not guarantee it.
 
+- **Changed: the server images install their dependencies from
+  `app/stardag-api/uv.lock`** (STA-137). Every build of the API resolved its
+  dependencies fresh from `pyproject.toml`, so the lockfile never reached a
+  running server: two builds of one tag could ship different versions, and a
+  lockfile bump, a security fix included, did not reach the image at all.
+  `app/server.Dockerfile`, the API-only `app/stardag-api/Dockerfile` and the
+  self-host `--from-source` image now install the locked, hash-checked set.
+  Against `0.28.0`'s lock this release moves fastapi 0.141.1 → 0.162.0,
+  starlette 1.7.0 → 1.9.0, pydantic 2.13.5 → 2.14.1, pyjwt 2.14.0 → 2.15.0,
+  certifi 2026.7.22 → 2026.10.19, asyncpg 0.31.0 → 0.32.0 and alembic 1.20.0
+  → 1.20.1. The certifi bump drops the compromised emSign roots
+  (Dependabot alert 407) from the bundle the API trusts for its JWKS fetch.
+
 ### UI
 
 - The build stop panel mirrors `stardag builds stop`'s reasons (STA-90):
   an in-process execution is shown as running in its driver's own process,
   and the "no executor recorded" reason now says it comes from an older
   SDK.
-- Task parameters are shown as a collapsible, searchable tree instead of
-  raw JSON (STA-151): expand/collapse per node or all at once, sizes on
-  collapsed containers, nested task bodies labelled with their task name,
-  and copy value / copy JSON path per node. The search fuzzy-matches keys
-  and values in the manner of an editor's quick-open filter (characters
-  in order, case-insensitive, word starts and contiguous runs preferred),
-  highlights the matched characters, opens their ancestors and steps
-  through the matches best first. Keyboard: arrows move and fold, `c`
-  copies the focused value and `p` its path.
 
 ## [0.28.0] — 2026-10-08
 

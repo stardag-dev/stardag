@@ -148,8 +148,12 @@ each other and from it:
 - **An exception _inside_ your task.** The worker reports it `FAILED`
   itself, and the tick never retries a `FAILED` task automatically — the
   build's `fail_mode` decides, and only `stardag tasks retry` or a
-  re-trigger (not Modal's own `retries=`, which never touches registry
-  state) moves it back to `PENDING`.
+  re-trigger moves it back to `PENDING`. Modal's own `retries=` does not
+  help here: its retry finds the execution ended and stops before running
+  anything. A transient error is retried inside the task, around the call
+  that fails — see [Task retries](../how-to/integrate-modal.md#task-retries),
+  which also covers the attempts Modal's retry _does_ re-run (an uncaught
+  timeout, a lost failure report) and why they can overlap a takeover.
 
 A task past its `timeout` that caught the interruption, checkpointed and
 raised `ResumableInterruption` is recorded `INTERRUPTED` and resumed, up to
