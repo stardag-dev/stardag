@@ -374,17 +374,19 @@ the line that pins the registered instance:
 ```python
 import stardag as sd
 
-(registered,) = sd.register(trained_model)
+(model_ref,) = sd.register(trained_model, tags=["baseline"])
 # Registered build 0193... (nothing was run):
 #   from my_project.models import TrainedModel
 #   TrainedModel.ref("<task_id>", instance_id="<instance_id>")
-registered.instance_id  # also .task_id, .ref_line
+evaluation = Evaluate(model=model_ref)  # same task id as with the real model
 ```
 
-It returns one handle per root, carrying its `task_id`, `instance_id` and
-the printed `ref_line`. A class defined in the script being run
-(`__main__`) gets a note instead of an import line, since other code cannot
-import it from there. `sd.build(tasks, plan_only=True)` does the same and
+It returns one `TaskRef` per root, pinned to the instance it registered, so
+it can be passed wherever the task goes (see
+[Reference existing tasks](../how-to/reference-existing-tasks.md)); a root given as a reference is hydrated
+first. `tags=` and `task_description=` annotate every root. A class defined
+in the script being run (`__main__`) gets a note instead of an import line,
+since other code cannot import it from there. `sd.build(tasks, plan_only=True)` does the same and
 returns a `BuildSummary` whose status is `REGISTERED`. Pass
 `app_name=` to `sd.register` (or a Modal `task_executor` to `sd.build`) to
 register under a deployed app's current deployment, the scope its reactive

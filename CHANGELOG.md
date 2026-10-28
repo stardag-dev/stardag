@@ -192,18 +192,18 @@ annotate <id>`, where `--tag` (or `--add-tag`) and `--remove-tag` edit
   tasks without running them** (STA-150). The roots and their whole static
   closure, complete tasks expanded too, are registered under the build's
   scope as a build's static phase registers them, and nothing is claimed or
-  executed. `sd.register` prints, per root, the import line and
-  `Cls.ref("<task_id>", instance_id="<instance_id>")`, and returns one
-  `RegisteredTask` per root (`task_id`, `instance_id`, `ref_line`);
-  `app_name=` registers under a deployed app's current deployment.
-  `sd.build(..., plan_only=True)` returns a summary with the new
-  `BuildExitStatus.REGISTERED`, which reads `Registered: N`. A plan-only build never carries on without
-  the registry (`on_registry_failure` does not apply), and an older registry
-  that does not know plan-only builds is reported as
-  `PlanOnlyUnsupportedError` rather than worked around. `tags=` and
-  `task_description=` on `sd.register` are reserved for annotating the
-  roots and raise `NotImplementedError` until the registry supports it. Registry
-  client: `build_create(plan_only=)` (sent only when set) and
+  executed. A root given as a reference, or holding one, is hydrated first,
+  as a build does. `sd.register` returns one `TaskRef` per root, pinned to
+  the registered instance, and prints the import line and
+  `Cls.ref("<task_id>", instance_id="<instance_id>")` for it (the same line
+  `stardag tasks ref` prints). `tags=` and `task_description=` annotate
+  every root. `app_name=` registers under a deployed app's current
+  deployment. `sd.build(..., plan_only=True)` returns a summary with the new
+  `BuildExitStatus.REGISTERED`, which reads `Registered: N`. A plan-only
+  build never carries on without the registry (`on_registry_failure` does
+  not apply), and an older registry that does not know plan-only builds is
+  reported as `PlanOnlyUnsupportedError` rather than worked around.
+  Registry client: `build_create(plan_only=)` (sent only when set) and
   `build_registered()`; `BuildInfo.plan_only`. **Needs a registry with
   plan-only builds** (this release's server); every other feature is
   unaffected against an older one.

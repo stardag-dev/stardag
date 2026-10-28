@@ -161,6 +161,22 @@ ran, even when it is not among the instances it lists.
 
 Pin unless you want the choice made again at every hydration.
 
+### Get a reference by registering
+
+A task that is not registered yet has no instance to pin. `sd.register`
+records it — and its static dependencies — without running anything, and
+returns the pinned reference, printing the line to paste:
+
+```python
+(model_ref,) = sd.register(TrainedModel(data=Dataset(size=3)), tags=["baseline"])
+# Registered build 0193... (nothing was run):
+#   from my_project.models import TrainedModel
+#   TrainedModel.ref("<task_id>", instance_id="<instance_id>")
+```
+
+See [Registering without
+running](../concepts/build-execution.md#registering-without-running-plan-only-builds).
+
 ## What a build does with references
 
 At build start, every reference anywhere in the DAG — a root, a nested

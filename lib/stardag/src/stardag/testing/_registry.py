@@ -41,6 +41,7 @@ from stardag.registry import (
     TaskInstanceInfo,
     TransitionResult,
 )
+from stardag.exceptions import APIError
 from stardag.registry._models import DeploymentKind, StopOutcome
 from stardag.testing._registry_exclusion import ExclusionMixin
 from stardag.testing._registry_plans import plan_info
@@ -350,7 +351,8 @@ class InMemoryRegistry(
         # A ``build_terminal`` refusal is recorded (its unapplied event
         # kept), as the server commits it with the refusal.
         with self.transaction(
-            keep=lambda e: getattr(e, "code", None) == "build_terminal"
+            keep=lambda e: getattr(e, "code", None)
+            in ("build_terminal", "instance_conflict")
         ):
             build = self.build(build_id)
             if build.status == "registered":
@@ -361,7 +363,15 @@ class InMemoryRegistry(
             plan = self.active_plan(build_id)
             if plan is None or plan.sealed_at is None:
                 raise refuse("plan_incomplete", reason="not_sealed")
-            self._closure(plan)
+            try:
+                self._closure(plan)
+            except APIError as e:
+                if e.code != "instance_conflict":
+                    raise
+                # As the server's closure step: the conflict fails the build
+                # (committed, with its BUILD_FAILED) and refuses the call.
+                self._terminal(build_id, "failed", f"instance conflict: {e}")
+                raise
             build.status = "registered"
             build.last_active_at = self.now()
             self.log(Event("BUILD_REGISTERED", build_id=build_id))
