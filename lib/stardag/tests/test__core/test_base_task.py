@@ -638,6 +638,7 @@ def test_from_registry(default_in_memory_fs_target):
     task.run()
 
     mock_registry = Mock(spec=RegistryABC)
+    mock_registry.task_list_executions.return_value = []
     mock_registry.task_get.return_value = TaskInfo(
         task_id=str(task.id),
         task_namespace=task.get_namespace(),
@@ -684,6 +685,7 @@ def test_from_registry_rejects_a_body_whose_recomputed_id_moves(
     assert stale_id != task.id
 
     mock_registry = Mock(spec=RegistryABC)
+    mock_registry.task_list_executions.return_value = []
     mock_registry.task_get.return_value = TaskInfo(
         task_id=str(stale_id),
         task_namespace=task.get_namespace(),

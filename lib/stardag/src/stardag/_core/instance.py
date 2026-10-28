@@ -459,7 +459,13 @@ def canonical_instance_body_json(task: "BaseTask") -> str:
     Raises:
         UnstableSerializationError: The body holds a ``NaN`` or an infinity,
             which is not JSON and could not be stored.
+        TaskRefNotHydratedError: ``task`` is, or holds, an unhydrated
+            ``TaskRef``: a registry stores real bodies only.
     """
+    from stardag._core.task_ref import contains_refs, unhydrated_ref_error
+
+    if contains_refs(task):
+        raise unhydrated_ref_error(task)
     body = task.model_dump(mode="json", context={CONTEXT_MODE_KEY: "registry"})
     try:
         return canonical_body_json(body)

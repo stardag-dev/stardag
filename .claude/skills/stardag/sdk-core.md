@@ -84,17 +84,83 @@ class CustomTarget(sd.TargetTask[LoadableSaveableFileSystemTarget[dict]]):
 
 Use when: custom output paths, non-standard serializers, or S3/remote targets.
 
-### AliasTask[T] (Reference Remote Outputs)
+### Task.ref (Reference Registered Tasks)
 
-Reference a task output that was produced elsewhere:
+Reference a task the registry already holds, by id, instead of
+re-composing it (`stardag tasks ref <task-id>` prints the line):
 
 ```python
-remote_task = sd.AliasTask[pd.DataFrame].from_registry(
-    id="abc123...",  # a task id, str or UUID
-    registry=registry,  # optional; default is the configured registry
-)
-data = remote_task.load()
+model = TrainedModel.ref("6f1c...", instance_id="0193...")  # no registry call
+evaluation = Evaluate(model=model)  # same id as with the real task
+sd.build(evaluation)                # hydrates `model` from the registry first
+model.hydrate()                     # -> TrainedModel; model.load() delegates
 ```
+
+`TrainedModel.ref(...)` is a `TaskRef[TrainedModel, LoadedT]`, a
+`Task[LoadedT]`: pyright accepts it as `sd.TaskLoads[LoadedT]`. Builds
+replace every reference with its hydrated task before registering;
+`sd.resolve_refs(tasks)` does it outside a build. `sd.AliasTask` is
+deprecated in favour of it.
+
+### The Committed Task Store (Pinned, Long-Lived Instances)
+
+**Which handle to use:** for pinned, long-lived instances in code (a key
+dataset, a trained model), the committed task store, loaded **eagerly**; for
+ad hoc work (a notebook loading an asset already materialized in the current
+environment), `MyTask.ref(...)` / `from_registry`, with nothing saved to the
+store. For key instances, also register them in the relevant (production)
+environment so they stay searchable there with tags and descriptions: the
+registry is the record of what ran, the store a reviewed, immutable copy.
+
+```toml
+# <package>/pyproject.toml  (one per package; registry config stays in .stardag/)
+[tool.stardag]
+task_store = "src/my_package/stardag_task_store"   # inside the package: ships with it
+task_modules = ["my_package.tasks.*", "!my_package.tasks.deploy"]  # "!" excludes
+```
+
+```sh
+stardag tasks ref <task-id> --write   # run in the package dir; copies a registry instance, prints the line
+# default instance: a completed task's completing-execution instance, else the newest;
+# `--instance newest` / `--instance <id>` override (the choice is printed on stderr)
+```
+
+```python
+BASELINE = TrainedModel.from_store("6f1c...", instance_hash="7a2e...")
+BASELINE.learning_rate                                # real task, fields readable
+BASELINE.model_copy(update={"learning_rate": 1e-4})   # derivations work
+sd.write_to_store(TrainedModel(data=...))             # from a task object (not built yet is fine)
+```
+
+- **Which store**: explicit `store=` (relative: against the package root;
+  or `"pkg:<package>/<dir>"`), then `STARDAG_TASK_STORE`, then the nearest
+  `pyproject.toml` with `[tool.stardag]` walking up from the calling
+  module's file (stardag-internal frames skipped), then from the task
+  class's module, then from the CWD. So a pin reads its own package's store
+  wherever it is imported from (monorepos, scripts, notebooks). Installed
+  packages: the store dir holding the `stardag_task_store.toml` marker. The
+  CLI resolves from the CWD.
+- Format: `<store>/<namespace>.<Name>/<task_id>/<instance_hash>.json`, one
+  file per distinct body, nested tasks as pointers
+  (`{"__stardag_task": {"task", "task_id", "instance_hash"}}`; shared
+  upstreams once); lossless, content-addressed, deterministic. Only `body`
+  is verified; `sources` (instance ids) is metadata, so pass
+  `instance_hash=` too (the printed lines do). Never edit files by hand.
+- Each file records the class's module as an import hint, so `from_store`
+  works in a fresh process with no imports. Any rehydration miss imports the
+  applicable `task_modules` once and retries. A namespace is never read as a
+  module path. A store is code: only read stores you trust.
+- A root id mismatch names the deepest nested task whose id moved.
+- `ref.hydrate()` and build-start hydration look in the store of the code
+  that created the ref first (pinned: body stored under its instance id;
+  unpinned: only one body stored); `hydrate(registry=...)` skips it.
+- Remote containers have a store only if the image has it: keep the store
+  inside the package. A module-level `from_store(...)` in a module a
+  deployed app's `task_modules` match is imported in every tick container.
+- Tests: read the store with `STARDAG_NO_REGISTRY=1`, no profile, no fixtures.
+  `InMemoryRegistry.add_instance(body=, task_id=, instance_id=)` remains the
+  way to seed an in-memory registry.
+- `STARDAG_TASK_STORE` / `STARDAG_TASK_MODULES` override the config.
 
 ## Decorator API (@sd.task)
 

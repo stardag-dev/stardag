@@ -203,6 +203,8 @@ class Metrics(ExamplesMLPipelineBase[dict[str, float]]):
         return [
             MarkdownArtifact(  # type: ignore
                 markdown=markdown,
+                # TODO: sd.TaskSlug once the examples pin an SDK that has it
+                # (sd.TaskRef.from_task still works there, deprecated).
                 key=format_key(f"{sd.TaskRef.from_task(self).slug}-result"),
                 description="Metrics",
             )
@@ -258,6 +260,8 @@ class Benchmark(ExamplesMLPipelineBase[list[dict[str, Any]]]):
         return [
             TableArtifact(  # type: ignore
                 table=rows,
+                # TODO: sd.TaskSlug once the examples pin an SDK that has it
+                # (sd.TaskRef.from_task still works there, deprecated).
                 key=format_key(f"{sd.TaskRef.from_task(self).slug}-result"),
                 description="Metrics by model parameters",
             )

@@ -215,6 +215,8 @@ stardag tasks list --tag best --namespace ml -s baseline    # discovery filters 
 stardag tasks show <task-id> [--events N]             # status, claim holder, tags, instances, executions
 stardag tasks annotate <task-id> --tag best -d "Tuned baseline"   # adds a tag; --set-tags replaces; never re-keys
 stardag tasks check <task-id> --module mypkg.tasks    # run complete() locally; writes nothing
+stardag tasks ref <task-id> [--instance <id>]         # print a pinned MyTask.ref(...) line
+stardag tasks ref <task-id> --write [--store DIR]     # copy into the committed task store
 stardag tasks retry <task-id> [--build <build-id>]    # FAILED -> PENDING (refused on COMPLETED)
 stardag tasks cancel <task-id> [--build <build-id>]   # release one claim; stops nothing
 stardag tasks exclude <plan-id> <task-id> --reason TEXT
@@ -331,6 +333,8 @@ default target root on a Modal volume, and a local SDK registry + profile named 
 | `STARDAG_ENVIRONMENT_ID` | Environment UUID          |
 | `STARDAG_API_KEY`        | API key (`sk_...`)        |
 | `STARDAG_TARGET_ROOTS`   | JSON dict of target roots |
+| `STARDAG_TASK_STORE`     | Committed task store dir  |
+| `STARDAG_TASK_MODULES`   | Task modules (comma-sep.) |
 
 ### Config File Example
 
@@ -358,6 +362,10 @@ default = "~/.stardag/local-target-roots/default/default"
 | `~/.stardag/access-token-cache/` | Token cache                  |
 | `~/.stardag/local-target-roots/` | Default local target storage |
 | `.stardag/config.toml`           | Project-level configuration  |
+
+Package settings (`task_store`, `task_modules`) are not here: they live in
+`[tool.stardag]` of each package's `pyproject.toml`, read even with
+`STARDAG_NO_REGISTRY=1`.
 
 ## Local Development Setup
 

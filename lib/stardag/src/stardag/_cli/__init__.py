@@ -62,6 +62,8 @@ Usage:
     stardag tasks annotate <task-id> [--tag T] [--remove-tag T]
         [--set-tags T] [--clear-tags] [--description D] [--json]
     stardag tasks check <task-id> --module <import path> [--json]
+    stardag tasks ref <task-id> [--instance <id>] [--module <import path>]
+        [--write [--store <dir>]] [--json]
     stardag tasks retry <task-id> [--build <build-id>] [--yes] [--json]
     stardag tasks cancel <task-id> [--build <build-id>] [--yes] [--json]
     stardag tasks exclude <plan-id> <task-id> --reason R [--yes] [--json]

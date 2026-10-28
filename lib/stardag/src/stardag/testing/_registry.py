@@ -10,7 +10,11 @@ each write is all-or-nothing, and the frontier is computed from the same
 rows the transitions write.
 
 Time is ``registry.clock`` (UTC-aware ``datetime``), replaceable so a test
-can let a claim lapse. Every call is recorded (:meth:`calls_to`) for
+can let a claim lapse. ``add_deployment`` and ``add_instance`` seed rows a
+build would otherwise have written. ``add_instance`` is how a test serves a
+pinned ``Task.ref``: seed the instance body recorded next to the code
+(``stardag tasks show <task-id> --json``) under its real task and instance
+ids, and the reference hydrates from it with no registry. Every call is recorded (:meth:`calls_to`) for
 assertions.
 """
 
@@ -28,7 +32,6 @@ from stardag.registry import (
     BuildNotifyResult,
     ConcurrencyLimitHolderInfo,
     ConcurrencyLimitInfo,
-    DeploymentInfo,
     ExecutionInfo,
     PlanRoots,
     RegistryABC,
@@ -43,20 +46,22 @@ from stardag.registry import (
     TransitionResult,
     WakeCandidate,
 )
+from stardag.registry._api_reads import _tag_list
 from stardag.registry._models import DeploymentKind, StopOutcome
+from stardag.testing._registry_deployments import DeploymentsMixin
 from stardag.testing._registry_exclusion import ExclusionMixin
 from stardag.testing._registry_plans import plan_info
-from stardag.registry._api_reads import _tag_list
 from stardag.testing._registry_reads import ReadsMixin
 from stardag.testing._registry_state import (
+    MAX_DESCRIPTION_LENGTH,
+    MAX_TAGS,
     TERMINAL_BUILD_STATUSES,
     WAKE_HANDOUT_WINDOW,
     ArtifactRow,
     BuildRow,
-    DeploymentRow,
-    MAX_DESCRIPTION_LENGTH,
-    MAX_TAGS,
     Event,
+    InstanceRow,
+    TaskRow,
     normalise_tags,
     refuse,
     settings_hash,
@@ -68,7 +73,9 @@ if TYPE_CHECKING:
     from stardag.artifact import Artifact
 
 
-class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
+class InMemoryRegistry(
+    YieldMixin, ExclusionMixin, ReadsMixin, DeploymentsMixin, RegistryABC
+):
     """See the module docstring."""
 
     # -- setup helpers for tests ----------------------------------------------------
@@ -92,6 +99,75 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
         if activated and kind == "modal":
             self.deployment_activate(row.id)
         return row.id
+
+    def add_instance(
+        self,
+        *,
+        body: Mapping[str, Any],
+        task_id: str | UUID,
+        instance_id: str | UUID,
+    ) -> TaskInstanceInfo:
+        """Seed one instance, as a registry holding it would serve it,
+        without a build, a deployment or a class import.
+
+        The intended use: code pins ``MyTask.ref("<task-id>",
+        instance_id="<instance-id>")`` to a real instance, its body is
+        recorded next to the code (``stardag tasks show <task-id> --json``),
+        and a test seeds it under the same ids, so the pinned reference
+        hydrates offline::
+
+            registry = InMemoryRegistry()
+            for rec in recorded:  # {task_id, instance_id, body}
+                registry.add_instance(
+                    body=rec.body, task_id=rec.task_id, instance_id=rec.instance_id
+                )
+            with test_harness(registry=registry):
+                assert MyTask.ref(task_id, instance_id=instance_id).hydrate()
+
+        ``task_id`` and ``instance_id`` are used exactly as given (never
+        minted: a pinned reference names the instance id). The body is
+        stored as is and **not validated**: whether it rebuilds into a task
+        with ``task_id`` is checked by hydration, as against a real
+        registry, so a test can also seed a mismatch on purpose.
+
+        An unpinned reference (``task_get``) reads the most recently seeded
+        instance of the task. Seeding the same instance again is a no-op
+        with the same body and task id, and a ``ValueError`` otherwise. The
+        task row is created when missing; a later registration of the task
+        fills in its output URI, which seeding cannot know.
+        """
+        from stardag._core.task_id import canonical_body_json, instance_hash_of_body
+        from stardag.polymorphic import NAME_KEY, NAMESPACE_KEY
+
+        tid, iid = str(task_id), UUID(str(instance_id))
+        body = dict(body)
+        existing = self.instances.get(iid)
+        if existing is not None:
+            if existing.task_id != tid or existing.body != body:
+                raise ValueError(
+                    f"Instance {iid} is already seeded with a different "
+                    f"{'task id' if existing.task_id != tid else 'body'}."
+                )
+            return self.task_instance_get(iid)
+        if tid not in self.tasks:
+            self.tasks[tid] = TaskRow(
+                tid,
+                str(body.get(NAMESPACE_KEY, "")),
+                str(body.get(NAME_KEY, "")),
+                body.get("version"),
+                None,
+                status_at=self.now(),
+                seeded=True,
+            )
+        self.instances[iid] = InstanceRow(
+            iid,
+            new_id(),
+            settings_hash({}),
+            str(instance_hash_of_body(canonical_body_json(body))),
+            tid,
+            body,
+        )
+        return self.task_instance_get(iid)
 
     def status_of(self, task_id: object) -> str:
         return self.task(str(task_id)).status
@@ -435,149 +511,6 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
         self.artifacts[task_id] = list(by_key.values())
 
     # -- deployments and settings -------------------------------------------------------
-
-    def _deployment_info(
-        self, row: DeploymentRow, *, created: bool = False
-    ) -> DeploymentInfo:
-        current = self.current_deployment(row.kind, row.app_name)
-        return DeploymentInfo(
-            id=row.id,
-            kind=row.kind,
-            app_name=row.app_name,
-            code_id=row.code_id,
-            image_id=row.image_id,
-            modal_app_id=row.modal_app_id,
-            generation=row.generation,
-            deployed_at=row.deployed_at,
-            activated_at=row.activated_at,
-            is_current=current is not None and current.id == row.id,
-            created=created,
-        )
-
-    def deployment_create(
-        self,
-        *,
-        kind: DeploymentKind,
-        code_id: str,
-        deployment_id: UUID | None = None,
-        app_name: str | None = None,
-        image_id: str | None = None,
-        modal_app_id: str | None = None,
-    ) -> DeploymentInfo:
-        self._record(
-            "deployment_create",
-            kind=kind,
-            code_id=code_id,
-            deployment_id=deployment_id,
-            app_name=app_name,
-        )
-        now = self.now()
-        if kind == "local":
-            app_name = app_name or "local"
-            for row in self.deployments.values():
-                if row.kind == "local" and row.code_id == code_id:
-                    if row.app_name != app_name:
-                        raise refuse("local_deployment_conflict")
-                    return self._deployment_info(row)
-        else:
-            if deployment_id is None:
-                raise refuse("deployment_id_required", status=400)
-            if not app_name:
-                raise refuse("app_name_required", status=400)
-            existing = self.deployments.get(deployment_id)
-            if existing is not None:
-                if (existing.kind, existing.app_name, existing.code_id) != (
-                    kind,
-                    app_name,
-                    code_id,
-                ):
-                    raise refuse("deployment_id_conflict")
-                return self._deployment_info(existing)
-        generation = 1 + max(
-            (
-                d.generation
-                for d in self.deployments.values()
-                if d.kind == kind and d.app_name == app_name
-            ),
-            default=0,
-        )
-        row = DeploymentRow(
-            id=deployment_id or new_id(),
-            kind=kind,
-            app_name=app_name,
-            code_id=code_id,
-            generation=generation,
-            deployed_at=now,
-            activated_at=now if kind == "local" else None,
-            image_id=image_id,
-            modal_app_id=modal_app_id,
-        )
-        self.deployments[row.id] = row
-        return self._deployment_info(row, created=True)
-
-    def deployment_activate(
-        self,
-        deployment_id: UUID,
-        *,
-        modal_app_id: str | None = None,
-        image_id: str | None = None,
-    ) -> DeploymentInfo:
-        self._record(
-            "deployment_activate",
-            deployment_id=deployment_id,
-            modal_app_id=modal_app_id,
-            image_id=image_id,
-        )
-        row = self.deployments.get(deployment_id)
-        if row is None:
-            raise refuse("unknown_deployment", status=404)
-        # A given value fills a NULL or must match (the server's rule):
-        # 409 `deployment_activation_conflict` with every clashing field,
-        # nothing written (services/deployments.py, activate_deployment).
-        given = {"modal_app_id": modal_app_id, "image_id": image_id}
-        clashing = sorted(
-            column
-            for column, value in given.items()
-            if value is not None and getattr(row, column) not in (None, value)
-        )
-        if clashing:
-            raise refuse("deployment_activation_conflict", fields=clashing)
-        for column, value in given.items():
-            if value is not None:
-                setattr(row, column, value)
-        if row.activated_at is None:
-            row.activated_at = self.now()
-        return self._deployment_info(row)
-
-    def deployment_list(
-        self,
-        *,
-        kind: DeploymentKind | None = None,
-        app_name: str | None = None,
-        current: bool = False,
-        limit: int = 100,
-    ) -> list[DeploymentInfo]:
-        self._record(
-            "deployment_list",
-            kind=kind,
-            app_name=app_name,
-            current=current,
-            limit=limit,
-        )
-        rows = sorted(
-            (
-                d
-                for d in self.deployments.values()
-                if (kind is None or d.kind == kind)
-                and (app_name is None or d.app_name == app_name)
-            ),
-            key=lambda d: d.deployed_at,
-            reverse=True,
-        )
-        infos = [self._deployment_info(d) for d in rows]
-        if current:
-            infos = [i for i in infos if i.is_current]
-        return infos[:limit]
 
     def settings_get(self, settings_hash: str) -> SettingsInfo:
         body = self.settings.get(settings_hash)

@@ -25,6 +25,34 @@ behaviour changes can affect existing code; each has its own section below.
   leaves is left to the claim's TTL, as in 0.28.0. Self-hosted deployments upgrade with
   `stardag self-host upgrade`, which now defaults to `0.8.0`.
 
+### `stardag.TaskRef` is now the typed task reference; the old one is `TaskSlug`
+
+`stardag.TaskRef` used to be a small frozen dataclass of a task's `name`,
+`version` and `id`, with a `slug`. That name now belongs to the typed task
+reference returned by `MyTask.ref(task_id, instance_id=...)` (see the
+"Reference Existing Tasks" how-to). The dataclass is unchanged under its new
+name, `stardag.TaskSlug`.
+
+- `sd.TaskRef.from_task(task)` keeps working: it returns a `TaskSlug`, with
+  a `DeprecationWarning`.
+- `sd.TaskRef(name=..., version=..., id=...)` raises a `TypeError` naming
+  `sd.TaskSlug`.
+- `isinstance(x, sd.TaskRef)` no longer matches the dataclass.
+
+**Migration:** replace `sd.TaskRef` with `sd.TaskSlug` wherever the
+name/version/id record is meant:
+
+```{.python notest}
+slug = sd.TaskSlug.from_task(task).slug  # was: sd.TaskRef.from_task(task).slug
+```
+
+### `AliasTask` is deprecated in favour of `Task.ref`
+
+`AliasTask` keeps working and warns once per process when constructed.
+Replace `sd.AliasTask[Model].from_registry(task_id)` with
+`MyTask.ref(task_id, instance_id=...)`, which is typed by the referenced
+class and hydrated from the registry at build start.
+
 ### A missing `run()` is reported at construction, not class definition
 
 A task class implementing neither `run()` nor `run_aio()` still raises
