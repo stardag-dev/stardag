@@ -108,7 +108,7 @@ sd.Task[T]              # Main task base class
 sd.LoadableTask[T]      # Task with load() but no filesystem target
 sd.TargetTask[T]        # Task with explicit target control
 sd.BaseTask             # Abstract base (rarely used directly)
-MyTask.from_store(task_id, instance_id=...)  # Eager load from the committed task store (pinned instances)
+MyTask.from_store(task_id, instance_hash=...)  # Eager load from the committed task store (pinned instances)
 sd.task_from_store(MyTask, task_id)   # Same, for a class whose field shadows from_store
 sd.write_to_store(tasks)              # Write task trees into the store (no registry needed)
 MyTask.ref(task_id, instance_id=...)  # Typed reference to a registered task (ad hoc work)

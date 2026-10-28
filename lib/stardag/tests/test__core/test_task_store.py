@@ -401,8 +401,7 @@ def test_write_from_registry_records_the_instance(tmp_path):
         stored = write_from_registry(model.id, registry=registry)
     assert stored.instance_id == instance_id
     assert stored.call == (
-        f'TrainedModel.from_store("{model.id}", instance_id="{instance_id}", '
-        f'instance_hash="{model.instance_hash}")'
+        f'TrainedModel.from_store("{model.id}", instance_hash="{model.instance_hash}")'
     )
     root = json.loads(stored.path.read_text())
     (source,) = root["sources"]

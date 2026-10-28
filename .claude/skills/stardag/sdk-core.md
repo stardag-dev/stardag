@@ -124,7 +124,7 @@ stardag tasks ref <task-id> --write   # run in the package dir; copies a registr
 ```
 
 ```python
-BASELINE = TrainedModel.from_store("6f1c...", instance_id="0193...", instance_hash="7a2e...")
+BASELINE = TrainedModel.from_store("6f1c...", instance_hash="7a2e...")
 BASELINE.learning_rate                                # real task, fields readable
 BASELINE.model_copy(update={"learning_rate": 1e-4})   # derivations work
 sd.write_to_store(TrainedModel(data=...))             # from a task object (not built yet is fine)

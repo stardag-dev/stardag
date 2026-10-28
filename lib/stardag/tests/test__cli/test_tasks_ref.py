@@ -153,7 +153,7 @@ def test_write_stores_the_tree_and_prints_the_reader(
     result = invoke("tasks", "ref", root.id, "--write", "--store", "pins")
     assert result.exit_code == 0, result.output
     expected = (
-        f'SyncOnlyTask.from_store("{root.id}", instance_id="{newest}", '
+        f'SyncOnlyTask.from_store("{root.id}", '
         f'instance_hash="{root.instance_hash}", store="pins")'
     )
     # The store is printed as given: relative, not this machine's path.

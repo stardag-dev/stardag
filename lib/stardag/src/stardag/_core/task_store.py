@@ -4,7 +4,7 @@ task instances a code base pins.
 For pinned, long-lived instances in code (a key dataset, a trained model),
 the recommended handle is a body stored with the package, loaded eagerly::
 
-    MODEL = TrainedModel.from_store("6f1c...", instance_id="0193...", instance_hash="7a2e...")
+    MODEL = TrainedModel.from_store("6f1c...", instance_hash="7a2e...")
 
 The store is a directory in the package (``[tool.stardag] task_store`` in
 its ``pyproject.toml``, see :mod:`stardag.config.project`), holding one

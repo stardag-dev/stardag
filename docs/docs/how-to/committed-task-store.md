@@ -127,7 +127,7 @@ stardag tasks ref 6f1c2c62-1f5c-5a0e-9b8e-3a4f0e1d2c3b --write
 
 ```{.python notest}
 from my_package.models import TrainedModel
-TrainedModel.from_store("6f1c2c62-...", instance_id="0193b0c4-...", instance_hash="7a2e...")
+TrainedModel.from_store("6f1c2c62-...", instance_hash="7a2e...")
 ```
 
 The command reads the instance body (the newest, or `--instance <id>`),
@@ -162,7 +162,6 @@ from my_package.models import TrainedModel
 
 BASELINE_MODEL = TrainedModel.from_store(
     "6f1c2c62-1f5c-5a0e-9b8e-3a4f0e1d2c3b",
-    instance_id="0193b0c4-...",
     instance_hash="7a2e...",
 )
 
@@ -178,10 +177,11 @@ in compat mode (see [Evolve a DAG Safely](evolve-dags.md)) and checks that
 the result is a `TrainedModel` with that task id.
 
 - **Picking a body.** `instance_hash=` picks the body with that hash, which
-  is verified (it is the file's address). `instance_id=` picks the body
-  recorded as that registry instance, which is matched against the file's
-  `sources`, unverified metadata. Given both, as the printed lines do, the
-  body must match both, so an edited `sources` cannot select another body.
+  is verified (it is the file's address); the printed lines pin by it
+  alone. `instance_id=` is an alternative for an id copied from the
+  registry UI or a `ref(...)` line: it picks the body recorded as that
+  registry instance, matched against the file's `sources`, which is
+  unverified metadata. Given both, the body must match both.
   With neither, the store must hold exactly one body of the task; with
   several, the error lists them.
 - **The function form.** Every task class has `from_store`, so a class with

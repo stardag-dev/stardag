@@ -80,18 +80,19 @@ def reader_call(
     instance_hash: str | None,
     store: str | None = None,
 ) -> str:
-    """``Prefix.from_store("<task-id>", instance_id=..., instance_hash=...)``,
-    pinned to the registry instance when known and always to the instance
-    hash (the verified one); or
+    """``Prefix.from_store("<task-id>", instance_hash=...)``, or
     ``sd.task_from_store(Prefix, ...)`` for a class whose ``from_store``
-    is shadowed by a field."""
-    # Both when known: the instance id is matched against unverified
-    # metadata (``sources``); the hash is the file's verified address.
+    is shadowed by a field.
+
+    Pinned by the instance hash alone: it is the file's verified address
+    and the same whether the body came from a registry or from task
+    objects. The registry instance id stays in the file's ``sources`` as
+    provenance; it is printed only when no hash is known."""
     pinned = ""
-    if instance_id is not None:
-        pinned += f', instance_id="{instance_id}"'
     if instance_hash is not None:
         pinned += f', instance_hash="{instance_hash}"'
+    elif instance_id is not None:
+        pinned += f', instance_id="{instance_id}"'
     if store is not None:
         pinned += f", store={json.dumps(store)}"
     fields = getattr(task_class, "model_fields", None) or {}
