@@ -135,3 +135,81 @@ def test_an_instance_of_another_task_is_refused(fake_registry, running_build):
     result = invoke("tasks", "ref", running_build.leaf.id, "--instance", root_instance)
     assert result.exit_code == 1
     assert "belongs to task" in result.output
+
+
+# -----------------------------------------------------------------------------
+# --write: into the committed task store
+# -----------------------------------------------------------------------------
+
+
+def test_write_stores_the_tree_and_prints_the_reader(
+    fake_registry, running_build, tmp_path
+):
+    import stardag as sd
+
+    root = running_build.root
+    (newest, *_) = _instances_of(fake_registry, str(root.id))
+    result = invoke("tasks", "ref", root.id, "--write", "--store", tmp_path)
+    assert result.exit_code == 0, result.output
+    assert result.stdout.splitlines() == [
+        "from stardag.utils.testing.helper_tasks import SyncOnlyTask",
+        f'SyncOnlyTask.from_store("{root.id}", instance_id="{newest}")',
+    ]
+    assert "Wrote 2 file(s)" in result.stderr
+    loaded = sd.task_from_store(
+        sd.BaseTask, root.id, instance_id=newest, store=tmp_path
+    )
+    assert loaded == root
+    again = invoke("tasks", "ref", root.id, "--write", "--store", tmp_path, "--json")
+    payload = json.loads(again.stdout)
+    assert payload["store"]["written"] == []
+    assert payload["store"]["from_store"] == (
+        f'SyncOnlyTask.from_store("{root.id}", instance_id="{newest}")'
+    )
+
+
+def test_write_uses_the_configured_store(fake_registry, running_build, tmp_path):
+    from stardag.config.project import ProjectConfig, project_config_provider
+
+    leaf = running_build.leaf
+    with project_config_provider.override(ProjectConfig(task_store=tmp_path)):
+        result = invoke("tasks", "ref", leaf.id, "--write")
+    assert result.exit_code == 0, result.output
+    assert list(tmp_path.rglob(f"{leaf.instance_hash}.json"))
+
+
+def test_write_without_a_store_is_refused(fake_registry, running_build):
+    result = invoke("tasks", "ref", running_build.leaf.id, "--write")
+    assert result.exit_code == 1
+    assert "No task store configured" in result.output
+
+
+def test_store_without_write_is_refused(fake_registry, running_build, tmp_path):
+    result = invoke("tasks", "ref", running_build.leaf.id, "--store", tmp_path)
+    assert result.exit_code == 1
+    assert "--store is only used with --write" in result.output
+
+
+def test_write_refuses_a_body_that_does_not_rehydrate(fake_registry, tmp_path):
+    task_id = str(uuid4())
+    fake_registry.tasks[task_id] = TaskRow(
+        task_id=task_id,
+        task_namespace="some_project.models",
+        task_name="TrainedModel",
+        version="",
+        output_uri=None,
+    )
+    instance_id = uuid4()
+    fake_registry.instances[instance_id] = InstanceRow(
+        id=instance_id,
+        deployment_id=uuid4(),
+        settings_hash="s",
+        instance_hash="h",
+        task_id=task_id,
+        body={"__namespace": "some_project.models", "__name": "TrainedModel"},
+    )
+    result = invoke("tasks", "ref", task_id, "--write", "--store", tmp_path)
+    assert result.exit_code == 1
+    assert "does not rehydrate" in result.output
+    assert "TrainedModel" in result.output
+    assert list(tmp_path.rglob("*.json")) == []
