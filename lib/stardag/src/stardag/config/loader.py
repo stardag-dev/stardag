@@ -130,6 +130,7 @@ def load_config(
         return StardagConfig(
             registry=None,
             target=TargetConfig(roots=target_roots),
+            registry_cache=env_settings.registry_cache,
         )
 
     # 2. Load user and project TOML configs
@@ -320,6 +321,7 @@ def load_config(
             profile=profile_name,
             registry_name=registry_name,
         ),
+        registry_cache=env_settings.registry_cache,
     )
 
 

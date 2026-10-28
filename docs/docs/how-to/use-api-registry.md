@@ -142,6 +142,62 @@ task = process(data=fetch_data(source="production"))
 sd.build(task, registry=registry)
 ```
 
+## Loading a task from the registry
+
+Every task the registry has seen is stored as one or more **instances**:
+the full body of the task as it was constructed, one per deployment and
+build settings it ran under. `from_registry` rebuilds the task object from
+one of them:
+
+```python
+import stardag as sd
+
+from my_project.models import TrainedModel  # the class must be imported
+
+# The newest instance of the task:
+model = TrainedModel.from_registry("2f4c...")
+
+# A specific instance, pinned:
+model = TrainedModel.from_registry("2f4c...", instance_id="9a1e...")
+```
+
+Both rebuild the body in compat mode and check that it recomputes to the
+requested task id, so a significant field the class no longer declares
+fails loudly instead of returning a different task. `stardag tasks show
+<task-id>` lists a task's instances and their ids.
+
+Pin the instance whenever the exact object matters. Its non-significant
+fields are then the same on every load, and since an instance never
+changes, its body is cached on disk after the first read, so a pinned load
+works offline:
+
+- The cache lives under `~/.stardag/registry-cache/`, one directory per
+  registry, workspace and environment, so one profile never reads another
+  profile's entries. It holds instance bodies only, never status.
+- A cached body is still checked against the task id on every load. An
+  entry that is unreadable, or no longer matches, is discarded and read
+  again from the registry.
+- `stardag cache clear` empties the active profile's partition (`--all`
+  for every partition). `STARDAG_REGISTRY_CACHE=0` turns the cache off.
+
+`registry.task_instance_get(instance_id)` reads one instance directly (also
+through the cache). Against a registry that predates the instance route,
+pass `task_id=` as well and it reads the instance from its task instead.
+
+### Validating a stored body
+
+To rebuild a task from a body you hold yourself, for example the output of
+`stardag tasks show <task-id> --json` or a saved `task.instance_body()`,
+use `sd.task_from_body`. It applies the same compat-mode rules and, given
+`expected_task_id`, the same identity check:
+
+```python
+task = sd.task_from_body(body, expected_task_id="2f4c...")
+```
+
+Every task class in the body, nested ones included, must be imported
+first; a missing one is reported by namespace and name.
+
 ## Offline Support
 
 The SDK caches target roots locally. You can read task outputs without API connectivity, but registering new builds requires connection.

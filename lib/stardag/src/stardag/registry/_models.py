@@ -337,9 +337,17 @@ class ExecutionInfo(_Response):
 
 class TaskInstanceInfo(_Response):
     """One instance of a completion: its body under one scope
-    (``deployment_id`` and ``settings_hash``) — a task id may hold several."""
+    (``deployment_id`` and ``settings_hash``) — a task id may hold several.
+
+    Immutable once registered, which is what lets ``task_instance_get``
+    serve it from the local body cache."""
 
     id: UUID
+    #: The completion the instance belongs to. Served by
+    #: ``GET /instances/{id}``; absent from the instances nested in a
+    #: ``TaskInfo`` (their parent carries it), and filled in by
+    #: ``task_instance_get`` when it reads one from there.
+    task_id: str | None = None
     deployment_id: UUID
     settings_hash: str
     instance_hash: str

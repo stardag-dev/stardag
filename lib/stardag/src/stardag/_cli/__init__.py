@@ -66,6 +66,8 @@ Usage:
     Each of these registry-backed commands takes -p/--stardag-profile and
     -e/--stardag-env (`stardag build` takes -p only).
 
+    stardag cache clear [--all] [-p profile]
+
     stardag modal deploy <app_ref> [--name name] [-e env] [--stream-logs] [--tag tag] [-m]
     stardag modal deployments [--app name] [--current] [--json]
     stardag modal stardag-api-key create [--modal-env env] [-w workspace] [-e env] [-p profile]
@@ -97,6 +99,7 @@ import typer
 from stardag._cli import (
     auth,
     builds,
+    cache,
     config,
     deployments,
     environment,
@@ -124,6 +127,7 @@ app.add_typer(plans.app, name="plans")
 app.add_typer(deployments.app, name="deployments")
 app.add_typer(tasks.app, name="tasks")
 app.add_typer(limits.app, name="concurrency-limits")
+app.add_typer(cache.app, name="cache")
 app.command("build")(build_command)
 
 # Add modal subcommand only if modal is installed

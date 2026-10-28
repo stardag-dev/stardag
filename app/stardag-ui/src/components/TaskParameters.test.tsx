@@ -47,7 +47,9 @@ describe("TaskParameters", () => {
         planInstanceId="i-1"
       />,
     );
-    expect(within(box()).getByText(/"log": "info"/)).toBeInTheDocument();
+    expect(
+      within(box()).getByRole("treeitem", { name: "log: info, string" }),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/__name/)).not.toBeInTheDocument();
     expect(screen.getByText("2 instances")).toBeInTheDocument();
     // One expand icon, on the parameters box; no per-instance cards.
@@ -58,7 +60,9 @@ describe("TaskParameters", () => {
 
   it("shows the newest instance outside a plan", () => {
     render(<TaskParameters instances={TWO} deploymentsById={DEPLOYMENTS} />);
-    expect(within(box()).getByText(/"log": "debug"/)).toBeInTheDocument();
+    expect(
+      within(box()).getByRole("treeitem", { name: "log: debug, string" }),
+    ).toBeInTheDocument();
   });
 
   it("opens the instance's scope and the other instances from the info icon", () => {
@@ -105,7 +109,9 @@ describe("TaskParameters", () => {
     expect(rows).toHaveLength(2);
     expect(rows[1]).toHaveAttribute("aria-selected", "true");
     expect(within(rows[1]).getByText("in this plan")).toBeInTheDocument();
-    expect(within(dialog).getByText(/"log": "info"/)).toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("treeitem", { name: "log: info, string" }),
+    ).toBeInTheDocument();
 
     fireEvent.click(rows[0]);
     expect(rows[0]).toHaveAttribute("aria-selected", "true");
@@ -115,8 +121,12 @@ describe("TaskParameters", () => {
     expect(rows[1]).toHaveAttribute("aria-selected", "true");
     fireEvent.keyDown(rows[0], { key: " " });
     expect(rows[0]).toHaveAttribute("aria-selected", "true");
-    expect(within(dialog).getByText(/"log": "debug"/)).toBeInTheDocument();
-    expect(within(dialog).queryByText(/"log": "info"/)).not.toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("treeitem", { name: "log: debug, string" }),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole("treeitem", { name: "log: info, string" }),
+    ).not.toBeInTheDocument();
   });
 
   it("says when no instance is recorded", () => {
