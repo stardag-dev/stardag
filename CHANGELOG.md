@@ -14,6 +14,17 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   namespace and name of any task class, nested ones included, whose module
   is not imported. Previously this needed the private `CONTEXT_MODE_KEY`.
   `task_from_registry_data` stays, as the same function.
+- **New: `from_registry(task_id, instance_id=...)` pins an instance**
+  (STA-147). Without `instance_id` it loads, for a completed task, the
+  instance of the execution that completed it (from
+  `GET /tasks/{id}/executions`, read by id even when it is not among the
+  newest listed), and otherwise the newest instance, as before; with it,
+  that instance, after checking it belongs to the task. The
+  registry client gains `task_instance_get(instance_id, *, task_id=None)`
+  (and `_aio`), reading `GET /instances/{id}`. Against a registry without
+  that route it reads the instance from `GET /tasks/{task_id}` instead, so
+  it needs no server upgrade when `task_id` is given (`from_registry` always
+  passes it). `TaskInstanceInfo` gains an optional `task_id`.
 - **New: a local cache of instance bodies** (STA-147), under
   `~/.stardag/registry-cache/`, partitioned by registry URL and by what
   decides the answering environment (the API key's fingerprint, or the
@@ -38,33 +49,6 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   unaffected: the release build checks out only the pushed tag. The version
   lookup now considers `v*` tags only; the server's version
   (`scripts/server-version.sh`) already considered only `server-v*`.
-- **Added: task annotations and task search** (STA-149).
-  `registry.task_annotate(task_id, tags=..., description=...)` sets a
-  task's tags and description: an omitted argument is left unchanged,
-  `tags=[]` clears the tags and `description=None` the description.
-  `registry.task_list(...)` takes `namespace`, `name`, `tags` (all of
-  them), `id_prefix` and `q` (at least 3 characters; case-insensitive
-  substring of name, namespace or description). `TaskInfo` gains `tags`
-  and `description`, empty against an older registry. CLI: `stardag tasks
-annotate <id>`, where `--tag` (or `--add-tag`) and `--remove-tag` edit
-  the tags, `--set-tags` replaces them, `--clear-tags` empties them and
-  `--description` sets the description; `stardag tasks list` gains
-  `--tag`, `--name`, `--namespace`, `--id-prefix` and `--search`/`-s`;
-  `tasks show` and `tasks list` show the tags. Needs the matching server:
-  against an older registry, annotating fails with a clear error, and a
-  filtered list is refused rather than answered unfiltered (an unfiltered
-  list works as before).
-- **New: `from_registry(task_id, instance_id=...)` pins an instance**
-  (STA-147). Without `instance_id` it loads, for a completed task, the
-  instance of the execution that completed it (from
-  `GET /tasks/{id}/executions`, read by id even when it is not among the
-  newest listed), and otherwise the newest instance, as before; with it,
-  that instance, after checking it belongs to the task. The
-  registry client gains `task_instance_get(instance_id, *, task_id=None)`
-  (and `_aio`), reading `GET /instances/{id}`. Against a registry without
-  that route it reads the instance from `GET /tasks/{task_id}` instead, so
-  it needs no server upgrade when `task_id` is given (`from_registry` always
-  passes it). `TaskInstanceInfo` gains an optional `task_id`.
 - **New: `Task.ref(task_id, instance_id=None)`, a typed reference to a
   registered task** (STA-148). Code can point at a task the registry
   already holds (a trained model, a dataset) by id, instead of re-composing
@@ -201,6 +185,22 @@ annotate <id>`, where `--tag` (or `--add-tag`) and `--remove-tag` edit
   (STA-157), as a field named `ref` does: pydantic warns at class
   definition and pyright reports an incompatible override. Use
   `sd.task_from_store(MyTask, ...)` for such a class, or rename the field.
+- **Added: task annotations and task search** (STA-149).
+  `registry.task_annotate(task_id, tags=..., description=...)` sets a
+  task's tags and description: an omitted argument is left unchanged,
+  `tags=[]` clears the tags and `description=None` the description.
+  `registry.task_list(...)` takes `namespace`, `name`, `tags` (all of
+  them), `id_prefix` and `q` (at least 3 characters; case-insensitive
+  substring of name, namespace or description). `TaskInfo` gains `tags`
+  and `description`, empty against an older registry. CLI: `stardag tasks
+annotate <id>`, where `--tag` (or `--add-tag`) and `--remove-tag` edit
+  the tags, `--set-tags` replaces them, `--clear-tags` empties them and
+  `--description` sets the description; `stardag tasks list` gains
+  `--tag`, `--name`, `--namespace`, `--id-prefix` and `--search`/`-s`;
+  `tasks show` and `tasks list` show the tags. Needs the matching server:
+  against an older registry, annotating fails with a clear error, and a
+  filtered list is refused rather than answered unfiltered (an unfiltered
+  list works as before).
 - **Added: `sd.register(tasks)` and `sd.build(..., plan_only=True)` register
   tasks without running them** (STA-150). The roots and their whole static
   closure, complete tasks expanded too, are registered under the build's

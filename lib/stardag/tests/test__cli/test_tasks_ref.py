@@ -217,3 +217,41 @@ def test_write_refuses_a_body_that_does_not_rehydrate(fake_registry, tmp_path):
     assert "does not rehydrate" in result.output
     assert "TrainedModel" in result.output
     assert list(tmp_path.rglob("*.json")) == []
+
+
+def test_the_function_form_is_printed_with_the_sd_import(fake_registry):
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+
+        class Checkout(sd.Task[str]):
+            ref: str = "main"  # pyright: ignore[reportIncompatibleMethodOverride]
+
+            def run(self):
+                self._save(self.ref)
+
+    task = Checkout()
+    fake_registry.tasks[str(task.id)] = TaskRow(
+        task_id=str(task.id),
+        task_namespace=task.get_namespace(),
+        task_name=task.get_name(),
+        version=task.version,
+        output_uri=None,
+    )
+    instance_id = uuid4()
+    fake_registry.instances[instance_id] = InstanceRow(
+        id=instance_id,
+        deployment_id=uuid4(),
+        settings_hash="s",
+        instance_hash="h",
+        task_id=str(task.id),
+        body=task.instance_body(),
+    )
+    result = invoke("tasks", "ref", task.id)
+    assert result.exit_code == 0, result.output
+    lines = result.stdout.splitlines()
+    assert lines[0] == "import stardag as sd"
+    assert lines[-1].startswith("sd.task_ref(")
+    payload = json.loads(invoke("tasks", "ref", task.id, "--json").stdout)
+    assert payload["imports"][0] == "import stardag as sd"

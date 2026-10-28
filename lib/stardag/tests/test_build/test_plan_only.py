@@ -453,6 +453,27 @@ class TestRegister:
         assert handle.ref_line.startswith('Boxed.ref("')
         assert handle.ref.task_class is Boxed
 
+    def test_a_shadowed_ref_prints_the_function_form_with_the_sd_import(self):
+        """A class whose field named ``ref`` shadows the method is printed
+        as ``sd.task_ref(...)``, which needs ``import stardag as sd``, as
+        ``stardag tasks ref`` prints it."""
+        import warnings
+
+        from stardag.build._plan_only import RegisteredTask
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+
+            class Checkout(sd.Task[str]):
+                ref: str = "main"  # pyright: ignore[reportIncompatibleMethodOverride]
+
+                def run(self):
+                    self._save(self.ref)
+
+        handle = RegisteredTask.of(Checkout(), new_id())
+        assert handle.ref_line.startswith("sd.task_ref(Checkout, ")
+        assert handle.import_line.startswith("import stardag as sd\n")
+
     async def test_a_refused_registered_is_recorded(
         self, default_in_memory_fs_target: Target
     ):

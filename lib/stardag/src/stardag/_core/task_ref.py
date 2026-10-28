@@ -28,6 +28,7 @@ A reference is a **driver-side placeholder**:
 from __future__ import annotations
 
 import asyncio
+import collections
 import dataclasses
 import threading
 import typing
@@ -680,7 +681,7 @@ def _contains(value: Any, seen: set[int]) -> bool:
         )
     if isinstance(value, Mapping):
         return any(_contains(v, seen) for v in value.values())
-    if isinstance(value, (list, tuple, set, frozenset)):
+    if isinstance(value, (list, tuple, set, frozenset, collections.deque)):
         return any(_contains(v, seen) for v in value)
     return False
 
@@ -787,7 +788,7 @@ def _resolve(value: Any, registry: Any, memo: dict[int, Any]) -> Any:
                     changes[f.name] = replaced
             if changes:
                 result = dataclasses.replace(value, **changes)
-    elif isinstance(value, (list, tuple, set, frozenset)):
+    elif isinstance(value, (list, tuple, set, frozenset, collections.deque)):
         items = [_resolve(v, registry, memo) for v in value]
         if any(new is not old for new, old in zip(items, value)):
             result = _rebuilt(value, items)
@@ -813,6 +814,8 @@ def _rebuilt(original: Any, items: Any) -> Any:
     kind = type(original)
     if kind in (list, tuple, set, frozenset, dict):
         return kind(items)
+    if isinstance(original, collections.deque):
+        return kind(items, maxlen=original.maxlen)
     try:
         return kind(items)
     except Exception as e:

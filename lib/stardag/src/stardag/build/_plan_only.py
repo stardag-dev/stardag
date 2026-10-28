@@ -97,11 +97,17 @@ class RegisteredTask:
                 f"# {prefix} is defined in {where}: move it to a module to "
                 "reference it from other code"
             )
+        ref_line = reference_call(prefix, task_class, str(task.id), str(instance_id))
+        if ref_line.startswith("sd."):
+            # The function form (``sd.task_ref``, for a class whose field
+            # shadows ``ref``) needs ``sd`` in the pasted module too, as
+            # ``stardag tasks ref`` prints it.
+            importable = f"import stardag as sd\n  {importable}"
         return cls(
             task=task,
             task_id=str(task.id),
             instance_id=instance_id,
-            ref_line=reference_call(prefix, task_class, str(task.id), str(instance_id)),
+            ref_line=ref_line,
             import_line=importable,
         )
 
