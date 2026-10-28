@@ -40,6 +40,7 @@ from uuid import UUID
 import uuid6
 
 from stardag._core.base_task import BaseTask, TaskStruct, flatten_task_struct
+from stardag._core.task_ref import resolve_refs_aio
 from stardag._core.instance import (
     SeenInstances,
     check_serialization_stability,
@@ -247,6 +248,7 @@ async def walk_aio(
     prior: Walk | None = None,
     root_path: str | None = None,
     check_stability: bool = True,
+    registry: RegistryABC | None = None,
 ) -> Walk:
     """Walk ``roots``' DAG under the current scope; see the module docstring.
 
@@ -265,6 +267,10 @@ async def walk_aio(
             (a yielding parent), for conflict messages.
         check_stability: Run the serialization round trip once per distinct
             instance.
+        registry: Where a ``TaskRef`` among the roots, or returned by a
+            ``requires()``, is hydrated from. Default: the configured
+            registry. The walk's ``roots`` are the hydrated tasks: a caller
+            holding references reads them from there.
 
     Raises:
         InstanceConflictError: Two constructions of one task id differ.
@@ -277,7 +283,11 @@ async def walk_aio(
     # Every completion answered below must be at least as fresh as this
     # walk (see ``stardag.target._freshness``).
     begin_observation()
-    root_list = flatten_task_struct(roots)
+    # References (``Task.ref``) become their hydrated tasks before anything
+    # is observed: every driver walks real tasks only. The build entry
+    # points hydrate theirs already (with the build's registry); this
+    # covers the other walkers, and a reference a ``requires()`` builds.
+    root_list = await resolve_refs_aio(flatten_task_struct(roots), registry)
     walk = Walk(roots=root_list, seen=seen if seen is not None else SeenInstances())
     lock = asyncio.Lock()
     visited: set[UUID] = set()
@@ -310,6 +320,7 @@ async def walk_aio(
                 deps = flatten_task_struct(task.requires())
             except Exception as e:
                 raise RequiresError(task, e) from e
+            deps = await resolve_refs_aio(deps, registry)
         walk.deps[task.id] = deps
         await run_concurrently([partial(visit, dep, path) for dep in deps])
 

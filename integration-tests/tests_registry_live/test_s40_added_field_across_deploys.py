@@ -17,6 +17,13 @@ build, and exits: it is the D1 tick that claims the root, under D1's plan,
 and spawns it. Two facts are read back to show that path was taken rather
 than assumed: the root's execution belongs to D1's plan (no rollover ran
 first), and its body ran D2's code (it recorded the variant it saw).
+
+**Which container runs the root is held too.** The spawn reaching D2's code
+is not implied by the spawn being issued after D2 serves: Modal routes a new
+input to a warm container of the previous deploy, and the D1 container that
+ran the upstream on ``default`` is warm at exactly that moment. So the root
+runs on the app's ``alt`` worker, on which nothing under D1 ever started a
+container (``AddedFieldRoot.worker``); its first container is D2's.
 """
 
 from __future__ import annotations
@@ -145,7 +152,8 @@ def test_s40_a_task_built_under_d1_runs_under_d2_with_the_added_field_defaulted(
         assert seen is not None and seen.get("variant") == "added", (
             "The root's run() did not run D2's code, so the D1 spawn reached a "
             "D1 container: the scenario did not reach the cross-deployment "
-            "path.\n" + context
+            f"path. The root runs on the {root.worker!r} worker so that no D1 "
+            "container of it exists; did something under D1 start one?\n" + context
         )
         assert seen == {"variant": "added", "base": 1, "added": ADDED_FIELD_DEFAULT}, (
             context

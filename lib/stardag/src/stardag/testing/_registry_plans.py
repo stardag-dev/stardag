@@ -83,6 +83,11 @@ class PlansMixin(TransitionsMixin):
                 item.version,
                 item.output_uri,
             )
+            if task is not None and task.seeded and task.output_uri is None:
+                # A row ``add_instance`` seeded: the registration knows the
+                # output URI it could not. (Test-double only.)
+                task.output_uri = item.output_uri
+                task.seeded = False
             if task is None:
                 task = TaskRow(item.task_id, *identity, status_at=now)
                 self.tasks[item.task_id] = task

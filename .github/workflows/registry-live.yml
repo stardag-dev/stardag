@@ -300,6 +300,10 @@ jobs:
 
       # A separate step from the run below, so a provisioning failure reads
       # as one rather than as a scenario failing for reasons of its own.
+      # A registry recycle *during* provisioning is retried inside
+      # `provision up` itself, off the same boot id the scenarios' check
+      # reads, and annotated as `Registry container recycled at
+      # provisioning` (STA-168).
       - name: Provision the registry and the scenario app
         run: |
           uv run --project integration-tests --python 3.12 \
@@ -325,6 +329,9 @@ jobs:
       #    nonce the container generates at boot. Its retry re-provisions
       #    first, because the replacement's database is empty -- the run's
       #    workspace, target root and API key were in the one that went.
+      #    The one case retried twice: a recycle identified *during the
+      #    retry* re-provisions and re-runs once more (see the end of the
+      #    step), since it explains that attempt's failures the same way.
       #
       # 2. **A transport timeout**: a request that received *no HTTP
       #    response at all*, from a scenario's body or from a fixture at
@@ -419,6 +426,12 @@ jobs:
           # unrun. See `registry_live/_stop_early.py`.
           STOP_EARLY: ${{ inputs.pr && '1' || '' }}
         run: |
+          # `set +e` explicitly: Actions runs this with `bash -e`, and the
+          # branches below read each attempt's exit status and markers after a
+          # failed tox run. Under errexit a failed retry pipeline ended the step
+          # on the spot, skipping its reporting and any recovery after it
+          # (STA-168).
+          set +e
           set -uo pipefail
           diag="$STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR"
           rm -rf "$diag"
@@ -633,6 +646,39 @@ jobs:
 
           tox -e registry-modal-live $retry_args 2>&1 \
             | tee "$diag/pytest-attempt-2.log"
+          rc=$?
+          report_inconclusive "$inconclusive"
+          report_retries "$retries"
+          if [ "$rc" -eq 0 ] || [ ! -f "$STARDAG_REGISTRY_LIVE_RECYCLE_MARKER" ]
+          then
+            exit $rc
+          fi
+
+          # **A recycle during the retry gets a recovery of its own.** The
+          # retry is a second run against the same kind of container, and
+          # it can lose its database the same way: on 2026-10-28 a transport
+          # fault's retry was preempted three minutes in, and the run ended
+          # red on a scenario that had passed before -- with the recycle
+          # identified and its marker written, because only attempt 1 read
+          # it (STA-168). The marker at the top level is attempt 2's own
+          # (attempt 1's was moved aside above), so this is the same
+          # identification the first branch keys on, applied once more, and
+          # nothing else is retried a second time.
+          echo "::warning title=Registry container recycled::$(cat \
+            "$STARDAG_REGISTRY_LIVE_RECYCLE_MARKER") -- during the retry;" \
+            "the database went with it. Re-provisioning and re-running the" \
+            "scenarios that failed again."
+          mkdir -p "$diag/attempt-2"
+          find "$diag" -maxdepth 1 -type f -exec mv {} "$diag/attempt-2/" \;
+          if ! uv run --project integration-tests --python 3.12 \
+                 python -m stardag_integration_tests.registry_live.provision up
+          then
+            echo "Re-provisioning failed after a recycle; not re-running" \
+                 "the tier against a stack that was not rebuilt."
+            exit 1
+          fi
+          tox -e registry-modal-live $RETRY_POSARGS 2>&1 \
+            | tee "$diag/pytest-attempt-3.log"
           rc=$?
           report_inconclusive "$inconclusive"
           report_retries "$retries"

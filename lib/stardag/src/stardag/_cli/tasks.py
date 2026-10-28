@@ -8,6 +8,8 @@ under a scope ``(deployment, settings)``, with the body (design.md, D1/D2).
     stardag tasks list [--status S] [--cursor C]  # most recent change first
     stardag tasks show <task-id>                 # task, claim, executions, events
     stardag tasks check <task-id> -m <module>    # run complete() locally
+    stardag tasks ref <task-id> [--instance <id>]  # print a Task.ref(...) line
+    stardag tasks ref <task-id> --write [--store DIR]  # into the task store
     stardag tasks retry <task-id> [--build <id>] [--yes]   # reset to PENDING
     stardag tasks cancel <task-id> [--build <id>] [--yes]  # release the claim
     stardag tasks exclude <plan-id> <task-id>    # give up on it in one plan
@@ -33,22 +35,28 @@ from stardag._cli._registry_ctx import (
     _fail,
     _resolve_registry,
     console,
+    error_console,
 )
 from stardag._cli.tasks_actions import (
+    _import_modules,
     tasks_cancel,
     tasks_check,
     tasks_exclude,
     tasks_retry,
 )
+from stardag._core.task_id import same_task_id
 from stardag.exceptions import StardagError
 from stardag._cli.executions import render_executions
 from stardag.registry import EventInfo, TaskArtifactInfo, TaskInfo
+from stardag.registry._instance_select import COMPLETED, completed_execution
 
 app = typer.Typer(help="Inspect tasks and act on one task.", no_args_is_help=True)
 app.command("check")(tasks_check)
 app.command("retry")(tasks_retry)
 app.command("cancel")(tasks_cancel)
 app.command("exclude")(tasks_exclude)
+
+SD_IMPORT = "import stardag as sd"
 
 _TASK_ID = typer.Argument(..., help="Task ID (the completion hash)")
 
@@ -97,6 +105,11 @@ def tasks_show(
         executions = registry.task_list_executions(task_id, include_ended=include_ended)
         log = registry.task_events(task_id, limit=EVENT_READ_LIMIT)
         artifacts = registry.task_list_artifacts(task_id)
+        completed_by = None
+        if (task.status or "").lower() == COMPLETED:
+            completed_by = completed_execution(
+                registry, task.task_id, completed_at=task.completed_at
+            )
     except StardagError as e:
         _fail(e)
     finally:
@@ -114,10 +127,24 @@ def tasks_show(
                 else [],
                 "structure_diverged": [e.model_dump(mode="json") for e in diverged],
                 "artifacts": [a.model_dump(mode="json") for a in artifacts],
+                # The instance the completing execution ran (also when it is
+                # not among the newest instances listed).
+                "completed_instance_id": str(completed_by.instance_id)
+                if completed_by is not None
+                else None,
             }
         )
         return
     _render_task(task, artifacts)
+    if completed_by is not None:
+        listed = any(i.id == completed_by.instance_id for i in task.instances)
+        console.print(
+            f"Completed by execution {completed_by.id}, which ran instance "
+            f"{completed_by.instance_id}"
+            + ("" if listed else " (not among the newest instances listed)")
+            + ". stardag tasks ref pins this instance by default.",
+            highlight=False,
+        )
     render_executions(
         executions,
         title=f"{'Executions' if include_ended else 'Unended executions'} "
@@ -268,3 +295,234 @@ def tasks_list(
     console.print(table)
     if page.next_cursor:
         console.print(f"[dim]Next page: --cursor {page.next_cursor}[/dim]")
+
+
+# -----------------------------------------------------------------------------
+# ref
+# -----------------------------------------------------------------------------
+
+
+def _registered_class(namespace: str, name: str) -> type | None:
+    """The task class registered in this process under ``namespace`` and
+    ``name`` (``-m`` imports it), or ``None``. The namespace is never read
+    as a module path: a task's namespace is an identity, not an import
+    location."""
+    from stardag._core.base_task import BaseTask
+    from stardag.polymorphic import TypeId
+
+    try:
+        return BaseTask._registry().get_class(TypeId(namespace=namespace, name=name))
+    except KeyError:
+        pass
+    # The package's configured task modules ([tool.stardag] task_modules in
+    # the pyproject.toml found from the working directory), once.
+    from stardag._core.task_imports import import_project_task_modules
+
+    if not import_project_task_modules():
+        return None
+    try:
+        return BaseTask._registry().get_class(TypeId(namespace=namespace, name=name))
+    except KeyError:
+        return None
+
+
+@app.command("ref")
+def tasks_ref(
+    task_id: str = _TASK_ID,
+    instance: Optional[str] = typer.Option(
+        None,
+        "--instance",
+        "-i",
+        help="Pin this instance, or 'newest' for the newest registered one. "
+        "Default: for a completed task, the instance of the execution that "
+        "completed it; otherwise (or with no completed execution recorded) "
+        "the newest.",
+    ),
+    module: list[str] = typer.Option(
+        [],
+        "--module",
+        "-m",
+        help="Import path of a module defining the task's class, to also print "
+        "its import (repeatable; patterns like 'pkg.tasks.*' are expanded). "
+        "Not needed for classes the [tool.stardag] task_modules of the "
+        "package you run it in cover.",
+    ),
+    write: bool = typer.Option(
+        False,
+        "--write",
+        help="Write the instance body (and every nested task's) into the "
+        "project's committed task store, and print the from_store(...) line "
+        "instead of the ref(...) one.",
+    ),
+    store: Optional[str] = typer.Option(
+        None,
+        "--store",
+        help="The task store directory for --write (relative paths resolve "
+        "against the package root, as in the printed line), or "
+        "'pkg:<package>/<dir>'. Default: [tool.stardag] task_store in the "
+        "pyproject.toml found from the working directory, or "
+        "STARDAG_TASK_STORE.",
+    ),
+    stardag_profile: Optional[str] = _PROFILE_OPTION,
+    stardag_env: Optional[str] = _ENV_OPTION,
+    json_output: bool = JSON_OPTION,
+) -> None:
+    """Print the code referencing a registered task: a ``Task.ref(...)``
+    call, always pinned to an instance (the newest unless ``--instance``
+    names one), preceded by the class's import when ``-m`` loads it.
+
+    Paste it where code should keep pointing at this exact task instead of
+    re-composing it. Reads ``GET /tasks/{id}``; writes nothing unless
+    ``--write``.
+
+    With ``--write``, the instance body is checked to rehydrate to the task
+    id (its classes imported through ``-m`` or the package's
+    ``task_modules``), written into the committed task store with every
+    nested task's body, and the line printed is the eager reader,
+    ``Task.from_store(...)``.
+
+    The package settings (store, task modules) are those of the
+    ``pyproject.toml`` found from the working directory: run it in the
+    package you write to.
+    """
+    from stardag._core.anchor import anchored
+
+    with anchored():
+        _tasks_ref(
+            task_id,
+            instance,
+            module,
+            write,
+            store,
+            stardag_profile,
+            stardag_env,
+            json_output,
+        )
+
+
+def _tasks_ref(
+    task_id: str,
+    instance: Optional[str],
+    module: list[str],
+    write: bool,
+    store: Optional[str],
+    stardag_profile: Optional[str],
+    stardag_env: Optional[str],
+    json_output: bool,
+) -> None:
+    if store is not None and not write:
+        _fail(StardagError("--store is only used with --write."))
+    if module:
+        _import_modules(module)
+    store_root = None
+    if write:
+        from stardag._core.task_store import resolve_store
+        from stardag._core.task_store_format import TaskStoreError
+
+        try:
+            store_root = resolve_store(store)
+        except TaskStoreError as e:
+            _fail(e)
+    registry = _resolve_registry(stardag_profile, stardag_env)
+    pinned = None
+    stored = None
+    selection = "pinned"
+    why = ""
+    try:
+        task = registry.task_get(task_id)
+        if instance is None:
+            from stardag.registry._instance_select import select_instance
+
+            chosen = select_instance(registry, task.task_id, info=task)
+            pinned, selection, why = chosen.instance, chosen.reason, chosen.explanation
+        elif instance == "newest":
+            if not task.instances:
+                raise StardagError(f"Task {task_id} has no instance to reference.")
+            pinned, selection = task.instances[0], "newest"
+            why = f"newest instance {pinned.id} (--instance newest)"
+        else:
+            # Read the instance itself: ``task_get`` serves only the newest
+            # few, so an older one is not necessarily among them.
+            pinned = registry.task_instance_get(instance, task_id=task.task_id)
+            if pinned.task_id is not None and not same_task_id(
+                pinned.task_id, task.task_id
+            ):
+                raise StardagError(
+                    f"Instance {instance} belongs to task {pinned.task_id}, "
+                    f"not to task {task.task_id}."
+                )
+            why = f"instance {pinned.id} (--instance)"
+        instance_id = str(pinned.id)
+        if store_root is not None:
+            from stardag._core.task_store_write import write_from_registry
+
+            stored = write_from_registry(
+                task.task_id,
+                instance_id=instance_id,
+                registry=registry,
+                store=store,
+                selection=selection,
+            )
+    except StardagError as e:
+        _fail(e)
+    finally:
+        registry.close()
+    from stardag._core.task_ref import reference_call, reference_line
+
+    cls = _registered_class(task.task_namespace, task.task_name)
+    if cls is not None:
+        import_line, prefix = reference_line(cls)
+    else:
+        import_line, prefix = None, task.task_name
+    ref_line = reference_call(prefix, cls, task.task_id, instance_id)
+    from_store_line = stored.call if stored is not None else None
+    printed = from_store_line or ref_line
+    # The function forms (sd.task_ref / sd.task_from_store, for a class
+    # whose field shadows the method) need ``sd`` in the pasted module.
+    sd_import = SD_IMPORT if printed.startswith("sd.") else None
+    if json_output:
+        payload = {
+            "task_id": task.task_id,
+            "instance_id": instance_id,
+            "module": cls.__module__ if cls is not None else None,
+            "class_name": prefix,
+            "module_located": cls is not None,
+            "import": import_line,
+            "imports": [line for line in (sd_import, import_line) if line],
+            "ref": ref_line,
+            "selection": selection,
+            "chosen": why,
+        }
+        if stored is not None:
+            payload["store"] = {
+                "path": str(stored.path),
+                "instance_hash": str(stored.instance_hash),
+                "written": [str(p) for p in stored.written],
+                "from_store": from_store_line,
+            }
+        emit_json(payload)
+        return
+    if sd_import:
+        typer.echo(sd_import)
+    if import_line:
+        typer.echo(import_line)
+    elif cls is None:
+        typer.echo(f"# import {prefix} from its defining module")
+    typer.echo(printed)
+    error_console.print(f"[dim]Pinned to {why}.[/dim]", highlight=False)
+    if stored is not None:
+        written = len(stored.written)
+        error_console.print(
+            f"[dim]Wrote {written} file(s) to the task store ({stored.path}).[/dim]"
+            if written
+            else f"[dim]Already in the task store ({stored.path}).[/dim]",
+            highlight=False,
+        )
+    if cls is None:
+        error_console.print(
+            f"[dim]Note: pass -m <module> (the module defining {prefix}), or "
+            "list it under [tool.stardag] task_modules in the package's "
+            "pyproject.toml, to "
+            "print its import.[/dim]",
+            highlight=False,
+        )

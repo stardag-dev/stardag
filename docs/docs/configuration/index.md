@@ -27,6 +27,20 @@ Settings are resolved in priority order (highest to lowest):
 3. **User config** (`~/.stardag/config.toml`)
 4. **Defaults**
 
+These configure the registry and profiles. Settings that describe a
+**package** rather than a registry live apart from them, in the
+`[tool.stardag]` table of the package's `pyproject.toml`, and are read even
+with `STARDAG_NO_REGISTRY=1`:
+
+```toml
+[tool.stardag]
+task_store = "src/my_package/stardag_task_store"   # relative to this pyproject.toml
+task_modules = ["my_package.tasks.*"]         # where the task classes live
+```
+
+Each package of a repository has its own. See
+[Pin Tasks in a Committed Store](../how-to/committed-task-store.md).
+
 ## Quick Start
 
 ### Local Development

@@ -670,3 +670,42 @@ class TestDeclarationHygiene:
 
         assert declared_task_module_patterns() == ()
         assert _warned_classes == set()
+
+
+# =============================================================================
+# Exclusions: "!pattern"
+# =============================================================================
+
+
+class TestExclusions:
+    def test_an_excluded_subtree_is_not_expanded(self, make_package):
+        pkg = make_package()
+        modules = expand_task_module_patterns(
+            [f"{pkg.name}.*", f"!{pkg.name}.reporting.*"]
+        )
+        assert f"{pkg.name}.ingest.raw" in modules
+        assert not any(m.startswith(f"{pkg.name}.reporting") for m in modules)
+
+    def test_an_excluded_module_is_not_expanded_whatever_the_order(self, make_package):
+        pkg = make_package(broken_module=True)
+        modules = expand_task_module_patterns([f"!{pkg.name}.broken", f"{pkg.name}.*"])
+        assert f"{pkg.name}.broken" not in modules
+        assert f"{pkg.name}._tasks" in modules
+
+    def test_coverage_honours_exclusions(self):
+        patterns = ["a.*", "!a.deploy", "!a.scripts.*"]
+        assert module_is_covered("a.tasks", patterns)
+        assert not module_is_covered("a.deploy", patterns)
+        assert not module_is_covered("a.scripts.run", patterns)
+        assert module_is_covered("a.deployment", patterns)
+
+    @pytest.mark.parametrize("bad", ["!", "!*", "!a.*.b", "!!a"])
+    def test_a_malformed_exclusion_is_refused(self, bad):
+        with pytest.raises(TaskModulesError):
+            validate_task_module_patterns([bad])
+
+    def test_a_fully_excluded_wildcard_root_is_never_imported(self, make_package):
+        pkg = make_package()
+        root = f"{pkg.name}.reporting"
+        assert expand_task_module_patterns([f"{root}.*", f"!{root}.*"]) == []
+        assert root not in sys.modules

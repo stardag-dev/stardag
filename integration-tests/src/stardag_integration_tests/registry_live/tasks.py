@@ -27,6 +27,7 @@ from typing import Annotated
 import stardag as sd
 
 from ._gates import hold, observe
+from .selectors import ALT_WORKER
 
 # The setting ``ScopedUpstreams`` reads its structure from. Named here so the
 # scenario that sets it and the task that reads it cannot drift apart.
@@ -720,12 +721,25 @@ class AddedFieldRoot(sd.Task[dict]):
 
     ``gate`` is handed to the upstream ``Slow`` (see ``_gates``); ``seconds``
     is then its upper bound.
+
+    ``worker`` routes the root to the app's *other* worker function (read by
+    ``selectors.registry_live_worker``), and that is what makes the scenario
+    deterministic rather than a race with Modal's scale-down. Modal routes a
+    new input to a warm container of the previous deploy, and its short
+    ``scaledown_window`` does not bound how long one stays warm (see
+    ``_rollover.wait_until_the_deploy_serves``). The upstream and its leaf run
+    on ``default`` under D1, and the upstream finishes the moment before the
+    root is spawned, so a root on ``default`` could land in the very D1
+    container that ran its upstream -- and did, on four PR branches in two
+    days (STA-168). Nothing under D1 ever starts a container of ``alt``, so
+    the first one starts after D2 is serving, from D2's image.
     """
 
     salt: str
     params: AddedFieldParams = AddedFieldParams()
     seconds: int = 240
     gate: str = ""
+    worker: str = ALT_WORKER
 
     def requires(self):
         return slow(
