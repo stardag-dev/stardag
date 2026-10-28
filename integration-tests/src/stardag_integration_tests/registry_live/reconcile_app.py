@@ -35,8 +35,11 @@ APP_NAME = "registry-live-reconcile"
 # One retry is enough: the question is what a probe reads after a failed
 # attempt -- between it and the next one, and while the next one runs. The
 # delay is Modal's backoff before the retry, stretched from its default of
-# a second so the gap is wide enough to probe several times.
-RETRY_DELAY_SECONDS = 20.0
+# a second so the gap is wide enough to probe several times. 30s rather
+# than the 20s it was: the scenario probes on its own thread now, so the
+# gap is no longer eaten by slow registry reads, but a late-noticed failure
+# still shortens the part of it that is probed (STA-168).
+RETRY_DELAY_SECONDS = 30.0
 RETRYING_WORKER_RETRIES = modal.Retries(
     max_retries=1, initial_delay=RETRY_DELAY_SECONDS, backoff_coefficient=1.0
 )

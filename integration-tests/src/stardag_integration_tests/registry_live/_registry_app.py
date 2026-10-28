@@ -27,7 +27,8 @@ Two properties are load-bearing and neither is incidental:
 
 A recycle has since happened, three minutes into a run, which rules
 ``scaledown_window`` out as the explanation -- it was already half an hour.
-What the resource request below addresses is the remaining plausible cause,
+The container's own log later named the cause: Modal *preemption* (STA-168),
+which ``nonpreemptible=True`` below addresses. The resource request stays,
 and what the harness's recycle marker addresses is the rest: a run that
 loses its database is retried rather than reported as a failure of whatever
 change happened to be under test. The alternative -- PGDATA on a Modal
@@ -241,6 +242,16 @@ def build_registry_app(
         # container, which takes the database with it.
         cpu=2.0,
         memory=2048,
+        # **Not preemptible.** Both recycles on 2026-10-28 were logged by
+        # Modal as "Container terminated due to preemption" -- one during
+        # provisioning, one mid-run -- so the cause the resource request
+        # above was aimed at turned out to be Modal reclaiming the host,
+        # which no request prevents. A preemptible container is cheaper
+        # because it can be taken away; this one holds the run's whole
+        # database, so it is the one container in the tier that must not
+        # be. Workers stay preemptible, on purpose: surviving preemption is
+        # part of what the scenarios test (STA-168).
+        nonpreemptible=True,
         scaledown_window=scaledown_window,
         timeout=900,
         name="web",
