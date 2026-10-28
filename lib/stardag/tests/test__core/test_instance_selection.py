@@ -79,7 +79,7 @@ def test_without_a_completed_execution_the_newest_is_selected():
     registry, _, later = _registry(executed=False)
     chosen = select_instance(registry, str(RAN.id))
     assert chosen.instance.id == later
-    assert "no completed execution recorded" in chosen.explanation
+    assert "no execution recorded for its current completion" in chosen.explanation
 
 
 def test_a_rejected_late_completion_report_is_not_the_completing_execution():
@@ -88,7 +88,7 @@ def test_a_rejected_late_completion_report_is_not_the_completing_execution():
     registry, _, later = _registry(claim_outcome="taken_over")
     chosen = select_instance(registry, str(RAN.id))
     assert chosen.instance.id == later
-    assert "no completed execution recorded" in chosen.explanation
+    assert "no execution recorded for its current completion" in chosen.explanation
 
 
 def test_a_task_not_completed_selects_the_newest():
@@ -168,3 +168,39 @@ def test_an_unpinned_ref_prefers_the_stored_completing_instance(tmp_path):
         write_from_registry(RAN.id, registry=registry)  # chooses `ran`
         sd.clear_hydration_memo()
         assert Model.ref(RAN.id).hydrate().notes == RAN.notes
+
+
+def test_a_completion_observed_after_an_invalidation_is_not_the_old_executions():
+    """The task was invalidated and then observed complete at discovery:
+    its completed_at is later than the old execution's end, which did not
+    produce the current output. The newest instance is used, and tasks show
+    names no completing execution."""
+    from datetime import timedelta
+
+    registry, _, later = _registry()
+    (execution,) = registry.executions.values()
+    assert execution.ended_at is not None
+    registry.tasks[str(RAN.id)].completed_at = execution.ended_at + timedelta(hours=1)
+    chosen = select_instance(registry, str(RAN.id))
+    assert chosen.instance.id == later
+    assert "no execution recorded for its current completion" in chosen.explanation
+
+
+def test_the_completing_execution_matches_its_completion_time():
+    registry, ran, _ = _registry()
+    (execution,) = registry.executions.values()
+    registry.tasks[str(RAN.id)].completed_at = execution.ended_at
+    assert select_instance(registry, str(RAN.id)).instance.id == ran
+
+
+def test_a_pinned_load_keeps_the_missing_class_error_type():
+    """A body naming an unimported class, loaded by instance id: the
+    TaskClassNotRegisteredError subtype survives the wrapping."""
+    import pytest
+
+    registry = InMemoryRegistry()
+    iid = uuid4()
+    body = {**RAN.instance_body(), "__name": "NotImported"}
+    registry.add_instance(body=body, task_id=RAN.id, instance_id=iid)
+    with pytest.raises(sd.TaskClassNotRegisteredError):
+        Model.from_registry(RAN.id, registry=registry, instance_id=iid)

@@ -327,6 +327,8 @@ def test_the_function_form_reads_a_class_shadowing_the_classmethod(tmp_path):
     (stored,) = sd.write_to_store(task, store=tmp_path)
     assert sd.task_from_store(Shadowing, task.id, store=tmp_path) == task
     assert stored.call.startswith("sd.task_from_store(Shadowing, ")
+    # The printed lines import sd for the function form.
+    assert str(stored).splitlines()[0] == "import stardag as sd"
 
 
 def test_the_printed_lines(tmp_path):

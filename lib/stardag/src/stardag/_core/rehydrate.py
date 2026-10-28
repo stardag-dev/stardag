@@ -504,9 +504,14 @@ def _load_from_registry(
             task = _validate_for(cls, instance.body, allow_aliased=allow_aliased)
             rehydrated_id = task.id
         except Exception as e:
-            error = TaskRehydrationError(
-                f"Failed to rehydrate instance {iid} of task {task_id}: {e}"
+            # A missing class keeps its own type (callers catch it), through
+            # the stale-cache retry too.
+            kind = (
+                TaskClassNotRegisteredError
+                if isinstance(e, TaskClassNotRegisteredError)
+                else TaskRehydrationError
             )
+            error = kind(f"Failed to rehydrate instance {iid} of task {task_id}: {e}")
             error.__cause__ = e
         else:
             if rehydrated_id == task_id:

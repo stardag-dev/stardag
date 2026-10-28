@@ -56,6 +56,8 @@ app.command("retry")(tasks_retry)
 app.command("cancel")(tasks_cancel)
 app.command("exclude")(tasks_exclude)
 
+SD_IMPORT = "import stardag as sd"
+
 _TASK_ID = typer.Argument(..., help="Task ID (the completion hash)")
 
 # How ``tasks show`` reads the event log: the server serves at most 500 of
@@ -105,7 +107,9 @@ def tasks_show(
         artifacts = registry.task_list_artifacts(task_id)
         completed_by = None
         if (task.status or "").lower() == COMPLETED:
-            completed_by = completed_execution(registry, task.task_id)
+            completed_by = completed_execution(
+                registry, task.task_id, completed_at=task.completed_at
+            )
     except StardagError as e:
         _fail(e)
     finally:
@@ -472,6 +476,10 @@ def _tasks_ref(
         import_line, prefix = None, task.task_name
     ref_line = reference_call(prefix, cls, task.task_id, instance_id)
     from_store_line = stored.call if stored is not None else None
+    printed = from_store_line or ref_line
+    # The function forms (sd.task_ref / sd.task_from_store, for a class
+    # whose field shadows the method) need ``sd`` in the pasted module.
+    sd_import = SD_IMPORT if printed.startswith("sd.") else None
     if json_output:
         payload = {
             "task_id": task.task_id,
@@ -480,6 +488,7 @@ def _tasks_ref(
             "class_name": prefix,
             "module_located": cls is not None,
             "import": import_line,
+            "imports": [line for line in (sd_import, import_line) if line],
             "ref": ref_line,
             "selection": selection,
             "chosen": why,
@@ -493,11 +502,13 @@ def _tasks_ref(
             }
         emit_json(payload)
         return
+    if sd_import:
+        typer.echo(sd_import)
     if import_line:
         typer.echo(import_line)
     elif cls is None:
         typer.echo(f"# import {prefix} from its defining module")
-    typer.echo(from_store_line or ref_line)
+    typer.echo(printed)
     error_console.print(f"[dim]Pinned to {why}.[/dim]", highlight=False)
     if stored is not None:
         written = len(stored.written)

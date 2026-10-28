@@ -197,6 +197,12 @@ def _fields_given_a_task_ref(data: Any) -> list[str]:
 _RUN_CHECKED_CLASSES: "weakref.WeakSet[type[BaseTask]]" = weakref.WeakSet()
 
 
+# Pydantic error types for "not an instance of this model class".
+_MODEL_TYPE_ERRORS = frozenset(
+    {"model_type", "model_attributes_type", "is_instance_of"}
+)
+
+
 @total_ordering
 class BaseTask(
     PolymorphicRoot,
@@ -268,7 +274,21 @@ class BaseTask(
         try:
             return handler(data)
         except ValidationError as e:
-            fields = _fields_given_a_task_ref(data)
+            given = set(_fields_given_a_task_ref(data))
+            # Only a concrete model-type rejection of a field given a
+            # reference earns the hint; any other failure (an unrelated
+            # field, a reference in a TaskLoads field that is fine) is
+            # re-raised unchanged.
+            fields = sorted(
+                {
+                    err["loc"][0]
+                    for err in e.errors()
+                    if err["loc"]
+                    and err["loc"][0] in given
+                    and err["type"] in _MODEL_TYPE_ERRORS
+                },
+                key=str,
+            )
             if not fields:
                 raise
             listed = ", ".join(repr(f) for f in fields)
