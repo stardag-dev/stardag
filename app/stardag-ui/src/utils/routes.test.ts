@@ -15,4 +15,11 @@ describe("viewFromPath", () => {
     expect(viewFromPath("/acme/prod/builds/0199")).toBe("build");
     expect(viewFromPath("/acme/prod")).toBe("builds");
   });
+
+  it("routes the task diff in every scoped form, apart from task pages", () => {
+    expect(viewFromPath("/task-diff")).toBe("task-diff");
+    expect(viewFromPath("/acme/task-diff")).toBe("task-diff");
+    expect(viewFromPath("/acme/prod/task-diff")).toBe("task-diff");
+    expect(viewFromPath("/acme/prod/tasks/task-diff")).toBe("tasks");
+  });
 });

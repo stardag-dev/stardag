@@ -12,15 +12,18 @@ import { identityOf, qualifiedName } from "./instances";
 
 export type JsonKind = "object" | "array" | "string" | "number" | "boolean" | "null";
 
-export interface JsonNode {
-  /** The node's JSON path (`$.a[0]["b c"]`): its identity, and what "copy path" copies. */
+/**
+ * What the paging, visibility and expansion helpers need of a node: the
+ * shape of a preorder index. The JSON tree's nodes have it, and so do the
+ * diff view's (`utils/jsonDiff`), which is how the two share them.
+ */
+export interface TreeNode {
+  /** The node's identity: expansion and paging state are keyed by it. */
   id: string;
-  /** The object key or array index under the parent; `null` for the root. */
-  key: string | number | null;
   /** The root is 0. */
   depth: number;
+  /** A container's kind decides whether it has children to draw. */
   kind: JsonKind;
-  value: unknown;
   /** Number of children; 0 for a scalar. */
   size: number;
   /** Index of the parent in the node list; -1 for the root. */
@@ -30,6 +33,14 @@ export interface JsonNode {
   /** 1-based position among its siblings, and their count (for `aria-posinset`/`aria-setsize`). */
   posInSet: number;
   setSize: number;
+}
+
+export interface JsonNode extends TreeNode {
+  /** The node's JSON path (`$.a[0]["b c"]`): its identity, and what "copy path" copies. */
+  id: string;
+  /** The object key or array index under the parent; `null` for the root. */
+  key: string | number | null;
+  value: unknown;
   /** `namespace.Name` when the node is an object carrying a task body's discriminators. */
   taskLabel: string | null;
   /** Lower-cased key (object keys only) and scalar text, precomputed for search. */
@@ -63,7 +74,7 @@ export function kindOf(value: unknown): JsonKind {
   }
 }
 
-export function isContainer(node: JsonNode): boolean {
+export function isContainer(node: TreeNode): boolean {
   return node.kind === "object" || node.kind === "array";
 }
 
@@ -74,7 +85,7 @@ export function scalarText(value: unknown): string {
   return String(value);
 }
 
-function taskLabelOf(value: Record<string, unknown>): string | null {
+export function taskLabelOf(value: Record<string, unknown>): string | null {
   const { namespace, name } = identityOf(value);
   return name ? qualifiedName(namespace, name) : null;
 }
@@ -172,7 +183,11 @@ export function moreOf(row: number): {
   };
 }
 
-export function windowOf(nodes: JsonNode[], windows: Windows, parent: number): Window {
+export function windowOf(
+  nodes: readonly TreeNode[],
+  windows: Windows,
+  parent: number,
+): Window {
   const node = nodes[parent];
   return windows.get(node.id) ?? [0, Math.min(node.size, PAGE_SIZE)];
 }
@@ -187,7 +202,7 @@ export function windowOf(nodes: JsonNode[], windows: Windows, parent: number): W
  * of its children a search matches.
  */
 export function visibleRows(
-  nodes: JsonNode[],
+  nodes: readonly TreeNode[],
   expanded: ReadonlySet<string>,
   windows: Windows = new Map(),
 ): number[] {
@@ -210,7 +225,11 @@ export function visibleRows(
 }
 
 /** The index of `parent`'s `n`th child (0-based), or -1. */
-export function nthChild(nodes: JsonNode[], parent: number, n: number): number {
+export function nthChild(
+  nodes: readonly TreeNode[],
+  parent: number,
+  n: number,
+): number {
   let position = 0;
   for (let child = parent + 1; child < nodes[parent].end; child = nodes[child].end) {
     if (position === n) return child;
@@ -221,7 +240,7 @@ export function nthChild(nodes: JsonNode[], parent: number, n: number): number {
 
 /** How many of `parent`'s children a "show more" row on that side stands for. */
 export function hiddenCount(
-  nodes: JsonNode[],
+  nodes: readonly TreeNode[],
   windows: Windows,
   parent: number,
   direction: MoreDirection,
@@ -232,7 +251,7 @@ export function hiddenCount(
 
 /** `windows` with `parent`'s window grown by one page on one side. */
 export function showMore(
-  nodes: JsonNode[],
+  nodes: readonly TreeNode[],
   windows: Windows,
   parent: number,
   direction: MoreDirection,
@@ -255,7 +274,7 @@ export function showMore(
  * at one page of rows. Returns `windows` itself when nothing moves.
  */
 export function revealInPages(
-  nodes: JsonNode[],
+  nodes: readonly TreeNode[],
   windows: Windows,
   index: number,
 ): Windows {
@@ -277,7 +296,7 @@ export function revealInPages(
 }
 
 /** Every container's id: "expand all". */
-export function allContainerIds(nodes: JsonNode[]): Set<string> {
+export function allContainerIds(nodes: readonly TreeNode[]): Set<string> {
   return new Set(nodes.filter(isContainer).map((node) => node.id));
 }
 
@@ -288,7 +307,7 @@ export function allContainerIds(nodes: JsonNode[]): Set<string> {
  * shown, whatever its size.
  */
 export function defaultExpanded(
-  nodes: JsonNode[],
+  nodes: readonly TreeNode[],
   maxDepth = 2,
   budget = 200,
 ): Set<string> {
@@ -307,7 +326,10 @@ export function defaultExpanded(
 }
 
 /** The ids of every ancestor of the given nodes: what to expand to reveal them. */
-export function ancestorIds(nodes: JsonNode[], indices: Iterable<number>): Set<string> {
+export function ancestorIds(
+  nodes: readonly TreeNode[],
+  indices: Iterable<number>,
+): Set<string> {
   const ids = new Set<string>();
   for (const index of indices) {
     let parent = nodes[index]?.parent ?? -1;
@@ -639,21 +661,34 @@ export function fuzzyMatch(text: string, query: string): FuzzyMatch | null {
 }
 
 /**
+ * `fuzzyMatch` with the query folded once, for matching it against many
+ * texts: each call takes the text and its precomputed `foldCase` (or
+ * `null` for "not searchable"). `null` for an empty or whitespace-only
+ * query, which matches nothing.
+ */
+export function queryMatcher(
+  query: string,
+): ((text: string, folded: string | null) => FuzzyMatch | null) | null {
+  const q = foldCase(query.trim());
+  if (!q) return null;
+  const qChars = Array.from(q);
+  return (text, folded) =>
+    folded !== null && isSubsequence(q, folded)
+      ? scoreFolded(text, foldWithMap(text), qChars)
+      : null;
+}
+
+/**
  * The nodes whose key or scalar value fuzzy-matches `query`, best first,
  * document order breaking ties. Array indices and container values are
  * not searched: an index is a position, not content, and a container's
  * content is its children's. An empty or whitespace-only query matches
  * nothing.
  */
-export function findMatches(nodes: JsonNode[], query: string): JsonMatch[] {
-  const q = foldCase(query.trim());
-  if (!q) return [];
-  const qChars = Array.from(q);
+export function findMatches(nodes: readonly JsonNode[], query: string): JsonMatch[] {
+  const match = queryMatcher(query);
+  if (!match) return [];
   const matches: JsonMatch[] = [];
-  const match = (text: string, folded: string | null): FuzzyMatch | null =>
-    folded !== null && isSubsequence(q, folded)
-      ? scoreFolded(text, foldWithMap(text), qChars)
-      : null;
   for (let i = 1; i < nodes.length; i++) {
     const node = nodes[i];
     const key = typeof node.key === "string" ? match(node.key, node.keyLower) : null;
@@ -695,6 +730,14 @@ export function copyValueText(node: JsonNode): string {
   if (isContainer(node)) return JSON.stringify(node.value, null, 2);
   return scalarText(node.value);
 }
+
+/** The colour of a scalar by kind, in both themes (the tree's and the diff's). */
+export const SCALAR_CLASS: Record<string, string> = {
+  string: "text-green-700 dark:text-green-400",
+  number: "text-blue-700 dark:text-blue-300",
+  boolean: "text-purple-700 dark:text-purple-300",
+  null: "text-gray-500 italic dark:text-gray-400",
+};
 
 /** A collapsed container's summary: `3 keys`, `1 item`. */
 export function sizeLabel(node: JsonNode): string {

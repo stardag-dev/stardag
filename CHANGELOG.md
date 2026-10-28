@@ -314,6 +314,18 @@ annotate <id>`, where `--tag` (or `--add-tag`) and `--remove-tag` edit
 - Plan-only builds: a `registered` badge, and a plan-only build still
   `pending` (its driver died before it finished registering) is labelled
   "registration incomplete" (STA-150).
+- **Added: compare two task instances** (STA-170). "Compare" in a task's
+  Task Parameters box opens `/task-diff` with that instance on the left;
+  the right side is picked with the `/tasks` search,
+  pre-filtered to the same namespace and name (removable, with a hint), or
+  is another instance of the same task. Both sides and the search live in
+  the URL. The diff is structural: added, removed and changed values
+  (old and new both shown) in red and green, nested tasks labelled
+  `namespace.Name`, identical subtrees collapsed and differing ones open,
+  a `+a −r ~c` summary on collapsed nodes, "only differences", and the
+  parameter tree's fuzzy search, keyboard model and copy actions across
+  both sides. Arrays are aligned on their equal elements before pairing
+  by position, so an inserted element reads as one addition.
 
 ## [0.29.0] — 2026-10-28
 

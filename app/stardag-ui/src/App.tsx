@@ -20,6 +20,7 @@ import type { NavItem } from "./components/Sidebar";
 import { Sidebar } from "./components/Sidebar";
 import { ConcurrencyLimits } from "./components/ConcurrencyLimits";
 import { DeploymentsPage } from "./components/DeploymentsPage";
+import { TaskDiffPage } from "./components/TaskDiffPage";
 import { TaskPage } from "./components/TaskPage";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { UserMenu } from "./components/UserMenu";
@@ -30,6 +31,7 @@ import { ThemeProvider } from "./context/ThemeContext";
 import { EnvironmentProvider, useEnvironment } from "./context/EnvironmentContext";
 import { lastTaskSearchQuery, notifyLocationChange } from "./hooks/useTaskSearchUrl";
 import { viewFromPath } from "./utils/routes";
+import { compareQuery, type CompareTarget } from "./utils/taskDiff";
 
 // Main app layout with sidebar
 interface MainLayoutProps {
@@ -147,6 +149,7 @@ interface BuildPageProps extends SidebarStateProps {
   onBack: () => void;
   onOpenTask: (taskId: string) => void;
   onSelectBuild: (buildId: string) => void;
+  onCompareTask: (target: CompareTarget) => void;
 }
 
 function BuildPage({
@@ -155,6 +158,7 @@ function BuildPage({
   onBack,
   onOpenTask,
   onSelectBuild,
+  onCompareTask,
   sidebarCollapsed,
   onToggleSidebar,
 }: BuildPageProps) {
@@ -170,6 +174,7 @@ function BuildPage({
         onBack={onBack}
         onOpenTask={onOpenTask}
         onOpenBuild={onSelectBuild}
+        onCompareTask={onCompareTask}
       />
     </MainLayout>
   );
@@ -182,6 +187,7 @@ interface TaskPageRouteProps extends SidebarStateProps {
   onOpenTask: (taskId: string) => void;
   onSelectBuild: (buildId: string) => void;
   onSearchTasks: (query: string) => void;
+  onCompareTask: (target: CompareTarget) => void;
 }
 
 function TaskPageRoute({
@@ -190,6 +196,7 @@ function TaskPageRoute({
   onOpenTask,
   onSelectBuild,
   onSearchTasks,
+  onCompareTask,
   sidebarCollapsed,
   onToggleSidebar,
 }: TaskPageRouteProps) {
@@ -205,7 +212,44 @@ function TaskPageRoute({
         onOpenTask={onOpenTask}
         onOpenBuild={onSelectBuild}
         onSearchTasks={onSearchTasks}
+        onCompareTask={onCompareTask}
       />
+    </MainLayout>
+  );
+}
+
+// Compare two task instances
+interface TaskDiffRouteProps extends SidebarStateProps {
+  onNavigate: (item: NavItem) => void;
+  onOpenTask: (taskId: string) => void;
+}
+
+function TaskDiffRoute({
+  onNavigate,
+  onOpenTask,
+  sidebarCollapsed,
+  onToggleSidebar,
+}: TaskDiffRouteProps) {
+  const { activeEnvironment } = useEnvironment();
+  return (
+    <MainLayout
+      activeNav="tasks"
+      onNavigate={onNavigate}
+      sidebarCollapsed={sidebarCollapsed}
+      onToggleSidebar={onToggleSidebar}
+    >
+      {activeEnvironment ? (
+        // Keyed: reads of the previous environment never land in this one.
+        <TaskDiffPage
+          key={activeEnvironment.id}
+          environmentId={activeEnvironment.id}
+          onOpenTask={onOpenTask}
+        />
+      ) : (
+        <div className="flex h-full items-center justify-center text-gray-500 dark:text-gray-400">
+          Select an environment to compare tasks
+        </div>
+      )}
     </MainLayout>
   );
 }
@@ -215,12 +259,14 @@ type ConcurrencyLimitsPageProps = SidebarStateProps & {
   onNavigate: (item: NavItem) => void;
   onSelectBuild: (buildId: string) => void;
   onOpenTask: (taskId: string) => void;
+  onCompareTask: (target: CompareTarget) => void;
 };
 
 function ConcurrencyLimitsPage({
   onNavigate,
   onSelectBuild,
   onOpenTask,
+  onCompareTask,
   sidebarCollapsed,
   onToggleSidebar,
 }: ConcurrencyLimitsPageProps) {
@@ -231,7 +277,11 @@ function ConcurrencyLimitsPage({
       sidebarCollapsed={sidebarCollapsed}
       onToggleSidebar={onToggleSidebar}
     >
-      <ConcurrencyLimits onSelectBuild={onSelectBuild} onOpenTask={onOpenTask} />
+      <ConcurrencyLimits
+        onSelectBuild={onSelectBuild}
+        onOpenTask={onOpenTask}
+        onCompareTask={onCompareTask}
+      />
     </MainLayout>
   );
 }
@@ -701,6 +751,12 @@ function Router() {
     [navigateTo, getEnvironmentPath],
   );
 
+  const handleCompareTask = useCallback(
+    (target: CompareTarget) =>
+      navigateTo(`${getEnvironmentPath()}/task-diff${compareQuery(target)}`),
+    [navigateTo, getEnvironmentPath],
+  );
+
   // Handle back from build view
   const handleBackFromBuild = useCallback(() => {
     const basePath = getEnvironmentPath();
@@ -753,6 +809,17 @@ function Router() {
             onOpenTask={handleOpenTask}
             onSelectBuild={handleSelectBuild}
             onSearchTasks={handleSearchTasks}
+            onCompareTask={handleCompareTask}
+            sidebarCollapsed={sidebarCollapsed}
+            onToggleSidebar={handleToggleSidebar}
+          />
+        );
+
+      case "task-diff":
+        return (
+          <TaskDiffRoute
+            onNavigate={handleNavigation}
+            onOpenTask={handleOpenTask}
             sidebarCollapsed={sidebarCollapsed}
             onToggleSidebar={handleToggleSidebar}
           />
@@ -764,6 +831,7 @@ function Router() {
             onNavigate={handleNavigation}
             onSelectBuild={handleSelectBuild}
             onOpenTask={handleOpenTask}
+            onCompareTask={handleCompareTask}
             sidebarCollapsed={sidebarCollapsed}
             onToggleSidebar={handleToggleSidebar}
           />
@@ -787,6 +855,7 @@ function Router() {
               onBack={handleBackFromBuild}
               onOpenTask={handleOpenTask}
               onSelectBuild={handleSelectBuild}
+              onCompareTask={handleCompareTask}
               sidebarCollapsed={sidebarCollapsed}
               onToggleSidebar={handleToggleSidebar}
             />

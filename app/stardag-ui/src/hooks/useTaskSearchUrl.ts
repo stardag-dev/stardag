@@ -23,7 +23,7 @@ function rememberLastQuery(query: string): void {
 
 // Fired by the app's own navigation (`pushState` emits no `popstate`), so
 // following a link to `/tasks` from `/tasks?q=x` resets the search.
-const LOCATION_CHANGE = "stardag:locationchange";
+export const LOCATION_CHANGE = "stardag:locationchange";
 
 export function notifyLocationChange(): void {
   window.dispatchEvent(new Event(LOCATION_CHANGE));
@@ -43,19 +43,59 @@ export interface TaskSearchUrl {
   navigationKey: number;
 }
 
+export interface TaskSearchUrlOptions {
+  /**
+   * Query parameters that belong to the page rather than the search
+   * (`/task-diff`'s selections): kept as they are when the search is
+   * written. Every other parameter is the search's.
+   */
+  keep?: readonly string[];
+  /**
+   * Remember the search as the one "Tasks" in a breadcrumb returns to.
+   * On for `/tasks` only; a search embedded in another page is not one.
+   */
+  remember?: boolean;
+}
+
+const NO_KEPT: readonly string[] = [];
+
+/**
+ * The search's query string with the page's own `keep` parameters from
+ * `current` in front of it (with `?`, or `""` when there is neither).
+ */
+export function withKeptParams(
+  current: string,
+  searchQuery: string,
+  keep: readonly string[],
+): string {
+  const from = new URLSearchParams(current);
+  const out = new URLSearchParams();
+  for (const name of keep) {
+    for (const value of from.getAll(name)) out.append(name, value);
+  }
+  for (const [name, value] of new URLSearchParams(searchQuery)) {
+    out.append(name, value);
+  }
+  const query = out.toString();
+  return query ? `?${query}` : "";
+}
+
 /**
  * The `/tasks` search, kept in the query string. The router tracks the
- * pathname only, so this owns `location.search` on the page: it reads it,
- * writes it with `history.pushState`/`replaceState`, and follows
- * `popstate`.
+ * pathname only, so this owns `location.search` on the page (all of it
+ * but the `keep` parameters): it reads it, writes it with
+ * `history.pushState`/`replaceState`, and follows `popstate`.
  */
-export function useTaskSearchUrl(): TaskSearchUrl {
+export function useTaskSearchUrl({
+  keep = NO_KEPT,
+  remember = true,
+}: TaskSearchUrlOptions = {}): TaskSearchUrl {
   const [search, setState] = useState(() => parseSearch(window.location.search));
   const [navigationKey, setNavigationKey] = useState(0);
 
   useEffect(() => {
-    rememberLastQuery(formatSearch(search));
-  }, [search]);
+    if (remember) rememberLastQuery(formatSearch(search));
+  }, [search, remember]);
 
   useEffect(() => {
     const onPopState = () => {
@@ -72,7 +112,7 @@ export function useTaskSearchUrl(): TaskSearchUrl {
 
   const setSearch = useCallback(
     (next: TaskSearchState, options: { replace?: boolean } = {}) => {
-      const query = formatSearch(next);
+      const query = withKeptParams(window.location.search, formatSearch(next), keep);
       const url = `${window.location.pathname}${query}${window.location.hash}`;
       if (query !== window.location.search) {
         if (options.replace) window.history.replaceState(window.history.state, "", url);
@@ -80,7 +120,7 @@ export function useTaskSearchUrl(): TaskSearchUrl {
       }
       setState(parseSearch(query));
     },
-    [],
+    [keep],
   );
 
   return { search, setSearch, navigationKey };

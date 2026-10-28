@@ -113,6 +113,31 @@ describe("TaskDetail", () => {
     expect(open).toHaveBeenCalledTimes(1);
   });
 
+  it("offers Compare in Task Parameters, with this task and the plan's instance", async () => {
+    const compare = vi.fn();
+    render(
+      <TaskDetail
+        taskId={TASK_ID}
+        environmentId="env-1"
+        context={{ buildId: "b", planId: "p", planInstanceId: "i-1", member }}
+        onCompare={compare}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Compare" }));
+    expect(compare).toHaveBeenCalledWith({
+      taskId: TASK_ID,
+      instanceId: "i-1",
+      namespace: "demo",
+      name: "Train",
+    });
+  });
+
+  it("offers no Compare without somewhere to go", async () => {
+    render(<TaskDetail taskId={TASK_ID} environmentId="env-1" />);
+    await screen.findByRole("heading", { name: /demo\.Train/ });
+    expect(screen.queryByRole("button", { name: "Compare" })).toBeNull();
+  });
+
   it("offers no task-page link on the task page itself", async () => {
     render(<TaskDetail taskId={TASK_ID} environmentId="env-1" />);
     await screen.findByRole("heading", { name: /demo\.Train/ });
