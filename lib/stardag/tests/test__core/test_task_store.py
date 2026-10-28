@@ -732,3 +732,63 @@ def test_a_ref_keeps_its_anchor_on_copies_but_not_in_pickles():
     other = Dataset.ref(ref.task_id)
     vars(other)[REF_ANCHOR_KEY] = Path("/elsewhere.py")
     assert other == ref  # not compared
+
+
+class Annotated_(sd.Task[int]):
+    """A small tree for the exact file text."""
+
+    label: str
+    options: dict[str, list[int]] = {}
+    inputs: list[sd.TaskLoads[list[int]]] = []
+
+    def run(self):
+        self._save(0)
+
+
+def test_the_exact_file_text(tmp_path):
+    dataset = Dataset(size=2)
+    task = Annotated_(
+        label="Ångström", options={"b": [2, 1], "a": []}, inputs=[dataset]
+    )
+    (stored,) = sd.write_to_store(task, store=tmp_path)
+    text = stored.path.read_text(encoding="utf-8")
+    source = json.loads(text)["sources"][0]
+    expected = f"""{{
+  "stardag_task_store": 1,
+  "task_id": "{task.id}",
+  "instance_hash": "{task.instance_hash}",
+  "namespace": "{__name__}",
+  "name": "Annotated_",
+  "module": "{__name__}",
+  "sources": [
+    {{
+      "kind": "local",
+      "stardag_version": "{source["stardag_version"]}",
+      "written_at": "{source["written_at"]}"
+    }}
+  ],
+  "body": {{
+    "__name": "Annotated_",
+    "__namespace": "{__name__}",
+    "inputs": [
+      {{
+        "__stardag_task": {{
+          "instance_hash": "{dataset.instance_hash}",
+          "task": "{__name__}.Dataset",
+          "task_id": "{dataset.id}"
+        }}
+      }}
+    ],
+    "label": "Ångström",
+    "options": {{
+      "a": [],
+      "b": [
+        2,
+        1
+      ]
+    }},
+    "version": ""
+  }}
+}}
+"""
+    assert text == expected

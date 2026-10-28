@@ -359,8 +359,9 @@ default = "~/.stardag/local-target-roots/default/default"
 | `~/.stardag/local-target-roots/` | Default local target storage |
 | `.stardag/config.toml`           | Project-level configuration  |
 
-The project config's `[project]` table (`task_store`, `task_modules`)
-describes the code base and is read even with `STARDAG_NO_REGISTRY=1`.
+Package settings (`task_store`, `task_modules`) are not here: they live in
+`[tool.stardag]` of each package's `pyproject.toml`, read even with
+`STARDAG_NO_REGISTRY=1`.
 
 ## Local Development Setup
 

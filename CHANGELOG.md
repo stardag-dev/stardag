@@ -109,39 +109,55 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   idempotent with the same body and a `ValueError` with another; an
   unpinned reference reads the most recently seeded instance.
 - **New: the committed task store** (STA-157), a reviewed,
-  registry-independent copy of the task instances a code base pins (a key
-  dataset, a trained model), kept in the repository and loaded eagerly.
+  registry-independent copy of the task instances a package pins (a key
+  dataset, a trained model), kept inside the package and loaded eagerly.
   `MyTask.from_store(task_id, instance_id=None, *, ...)` returns the real
   task (typed `Self`; fields readable, `model_copy` works; `instance_hash=`
-  and `store=` are keyword-only), and `sd.task_from_store(MyTask, ...)` is the function
-  form for a class whose field shadows it. Writers:
+  and `store=` are keyword-only), and `sd.task_from_store(MyTask, ...)` is
+  the function form for a class whose field shadows it. Writers:
   `stardag tasks ref <task-id> --write [--store DIR]` copies a registry
   instance after checking it rehydrates to its task id, and
-  `sd.write_to_store(tasks)` writes from task objects with no registry. The
-  format is normalized and content-addressed: one file per distinct
-  instance body at `<namespace>.<Name>/<task_id>/<instance_hash>.json`,
-  every nested task a pointer to its own file (shared upstreams stored
-  once), re-inlining to the original body byte for byte, written
-  deterministically. Each file records its class's module as an import
-  hint and where the body came from. The store is configured as
-  `[project] task_store` in `.stardag/config.toml` (relative to the
-  project root) or `STARDAG_TASK_STORE`. See the new how-to, "Pin Tasks in
-  a Committed Store".
-- **New: `[project] task_modules`** (STA-162), in `.stardag/config.toml`
-  or `STARDAG_TASK_MODULES`: the modules defining the project's task
-  classes, in the `StardagApp(task_modules=...)` pattern grammar. Any
+  `sd.write_to_store(tasks)` writes from task objects with no registry;
+  both print the reader line, pinned by instance id (unverified metadata)
+  and instance hash (verified). The format is normalized and
+  content-addressed: one file per distinct instance body at
+  `<namespace>.<Name>/<task_id>/<instance_hash>.json`, every nested task a
+  pointer (`{"__stardag_task": {"task", "task_id", "instance_hash"}}`) to
+  its own file (shared upstreams stored once), re-inlining to the original
+  body byte for byte, written deterministically. Each file records its
+  class's module as an import hint and where the body came from. A root
+  task id mismatch names the deepest nested task whose id moved. See the
+  new how-to, "Pin Tasks in a Committed Store".
+- **New: `[tool.stardag]` in a package's `pyproject.toml`** (STA-157,
+  STA-162): `task_store` (a path relative to the file, or
+  `"pkg:<package>/<dir>"` inside a package) and `task_modules`, read apart
+  from registry configuration and even with `STARDAG_NO_REGISTRY=1`;
+  `STARDAG_TASK_STORE` / `STARDAG_TASK_MODULES` override them. The settings
+  that apply are found per call, walking up to the nearest `pyproject.toml`
+  with the table from the calling module's file, then from the task
+  class's module, then from the working directory, so each package of a
+  repository reads its own store wherever its pins are imported from; an
+  installed package's store is found by a marker file inside it. Any
   rehydration that misses a class (`task_from_body`, `from_registry`,
-  `TaskRef` hydration, `from_store`) imports them once per process and
-  retries; the error, now `sd.TaskClassNotRegisteredError` (a
-  `TaskRehydrationError`), names the class, the patterns and any import
-  failure. `stardag tasks ref` uses them to print the import without
-  `--module`.
+  `TaskRef` hydration, `from_store`) imports the applicable `task_modules`
+  once per process and retries; the error, now
+  `sd.TaskClassNotRegisteredError` (a `TaskRehydrationError`), names the
+  class, the patterns and any import failure. `stardag tasks ref` uses them
+  to print the import without `--module`.
+- **New: `!pattern` excludes in `task_modules`** (STA-157), for
+  `StardagApp(task_modules=...)` as for `[tool.stardag]`: `"!pkg.deploy"`
+  or `"!pkg.scripts.*"` removes what it matches from what the other
+  patterns include, whatever the order.
 - **New: references consult the task store first** (STA-157).
   `TaskRef.hydrate()` and build-start hydration serve a pinned reference
   from a body stored under its instance id, and an unpinned one when the
   store holds exactly one body of the task, before the body cache and the
-  registry. Inside a remote container there is no store, and the registry
-  is read as before.
+  registry. The store is that of the package whose code created the
+  reference. An explicit `hydrate(registry=...)` skips it. Inside a remote
+  container without the store, the registry is read as before.
+- **Fixed: `find_project_config` never returns `~/.stardag/config.toml`**,
+  which a working directory under the home directory used to find as a
+  project config.
 - **Breaking: a task field named `from_store` now shadows the classmethod**
   (STA-157), as a field named `ref` does: pydantic warns at class
   definition and pyright reports an incompatible override. Use

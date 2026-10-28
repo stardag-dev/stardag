@@ -63,8 +63,8 @@ class TaskClassNotRegisteredError(TaskRehydrationError):
     """A stored body names a task class that is not registered in this
     process: the module defining it was not imported.
 
-    Rehydration imports the project's ``[project] task_modules``
-    (``.stardag/config.toml``) on the first such miss in a process and
+    Rehydration imports the applicable ``[tool.stardag] task_modules`` (the
+    package's ``pyproject.toml``) on the first such miss in a process and
     retries once before raising this."""
 
 

@@ -113,36 +113,48 @@ environment so they stay searchable there with tags and descriptions: the
 registry is the record of what ran, the store a reviewed, immutable copy.
 
 ```toml
-# <repo>/.stardag/config.toml
-[project]
-task_store = "stardag-tasks"           # relative to the project root, not the cwd
-task_modules = ["my_project.tasks.*"]  # imported on demand when a class is missing
+# <package>/pyproject.toml  (one per package; registry config stays in .stardag/)
+[tool.stardag]
+task_store = "src/my_package/stardag_tasks"   # inside the package: ships with it
+task_modules = ["my_package.tasks.*", "!my_package.tasks.deploy"]  # "!" excludes
 ```
 
 ```sh
-stardag tasks ref <task-id> --write   # copy a registry instance into the store, print the line
+stardag tasks ref <task-id> --write   # run in the package dir; copies a registry instance, prints the line
 ```
 
 ```python
-BASELINE = TrainedModel.from_store("6f1c...", instance_id="0193...")  # real task, no registry
-BASELINE.learning_rate                                # fields readable
+BASELINE = TrainedModel.from_store("6f1c...", instance_id="0193...", instance_hash="7a2e...")
+BASELINE.learning_rate                                # real task, fields readable
 BASELINE.model_copy(update={"learning_rate": 1e-4})   # derivations work
 sd.write_to_store(TrainedModel(data=...))             # from a task object (not built yet is fine)
 ```
 
+- **Which store**: explicit `store=` (relative: against the package root;
+  or `"pkg:<package>/<dir>"`), then `STARDAG_TASK_STORE`, then the nearest
+  `pyproject.toml` with `[tool.stardag]` walking up from the calling
+  module's file (stardag-internal frames skipped), then from the task
+  class's module, then from the CWD. So a pin reads its own package's store
+  wherever it is imported from (monorepos, scripts, notebooks). Installed
+  packages: the store dir holding the `stardag_task_store.toml` marker. The
+  CLI resolves from the CWD.
 - Format: `<store>/<namespace>.<Name>/<task_id>/<instance_hash>.json`, one
   file per distinct body, nested tasks as pointers
-  (`{"__stardag_task": {...}}`, by task id and instance hash; shared
-  upstreams once); lossless,
-  content-addressed, deterministic. Never edit files by hand (refused on read).
+  (`{"__stardag_task": {"task", "task_id", "instance_hash"}}`; shared
+  upstreams once); lossless, content-addressed, deterministic. Only `body`
+  is verified; `sources` (instance ids) is metadata, so pass
+  `instance_hash=` too (the printed lines do). Never edit files by hand.
 - Each file records the class's module as an import hint, so `from_store`
-  works in a fresh process with no imports. Any rehydration miss imports
-  `[project] task_modules` once and retries. A namespace is never read as a
-  module path.
-- `ref.hydrate()` and build-start hydration look in the store first (pinned
-  ref: body stored under its instance id; unpinned: only one body stored).
-  Remote containers (Modal) have no store, so refs from `requires()` read the
-  registry there.
+  works in a fresh process with no imports. Any rehydration miss imports the
+  applicable `task_modules` once and retries. A namespace is never read as a
+  module path. A store is code: only read stores you trust.
+- A root id mismatch names the deepest nested task whose id moved.
+- `ref.hydrate()` and build-start hydration look in the store of the code
+  that created the ref first (pinned: body stored under its instance id;
+  unpinned: only one body stored); `hydrate(registry=...)` skips it.
+- Remote containers have a store only if the image has it: keep the store
+  inside the package. A module-level `from_store(...)` in a module a
+  deployed app's `task_modules` match is imported in every tick container.
 - Tests: read the store with `STARDAG_NO_REGISTRY=1`, no profile, no fixtures.
   `InMemoryRegistry.add_instance(body=, task_id=, instance_id=)` remains the
   way to seed an in-memory registry.

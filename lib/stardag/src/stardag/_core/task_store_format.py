@@ -39,8 +39,11 @@ A file is an **envelope** around the body::
 - **Deduplicated.** A shared upstream is one file, pointed at by every
   downstream.
 - **Deterministic.** Keys of the body are sorted, the envelope's keys come
-  in a fixed order, two-space indentation, a trailing newline: the same
-  content is the same bytes, so diffs are minimal.
+  in a fixed order, two-space indentation with every property and array
+  element on its own line, non-ASCII kept as is (UTF-8), a trailing
+  newline: the same content is the same bytes, so diffs are minimal. The
+  file formatting is independent of the instance hash, which is computed
+  from the canonical compact body.
 - **What looks like a task is stored as one.** A nested dict carrying the
   ``__namespace`` / ``__name`` keys of a registered task class is split
   into its own file, even in a plain ``dict`` field. Lossless all the same.

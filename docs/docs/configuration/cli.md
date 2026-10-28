@@ -685,13 +685,16 @@ deployments`.
 - `tasks ref <task-id>` — print the code that references the task: a
   `Task.ref(...)` call, pinned to an instance (`--instance`, default the
   task's newest). Pass `--module` (repeatable), the module defining the
-  class, to also print its import (not needed for classes the project's
-  `[project] task_modules` cover); the namespace is never read as an
-  import path. Writes nothing, unless `--write`: then the instance body is
-  checked to rehydrate to its task id, written with every nested task's
-  body into the committed task store (`--store DIR`, default the
-  configured `[project] task_store`), and the printed line is the eager
-  `Task.from_store(...)`. See
+  class, to also print its import; it is not needed for classes covered by
+  the `[tool.stardag] task_modules` of the package you run it in. The
+  namespace is never read as an import path. Writes nothing, unless
+  `--write`: then the instance body is checked to rehydrate to its task
+  id, written with every nested task's body into the committed task store,
+  and the printed line is the eager `Task.from_store(...)`, pinned by
+  instance id and instance hash. The store is `--store DIR` (printed as
+  given; a relative one resolves against the package root) or the
+  `[tool.stardag] task_store` of the `pyproject.toml` found from the
+  working directory: run it in the package you write to. See
   [Reference Existing Tasks](../how-to/reference-existing-tasks.md) and
   [Pin Tasks in a Committed Store](../how-to/committed-task-store.md).
 - `tasks retry` — reset a failed (or otherwise ended) task to `PENDING`

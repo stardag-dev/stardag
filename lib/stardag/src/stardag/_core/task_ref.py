@@ -341,12 +341,14 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
         """The referenced task object, read from the project's task store
         or the registry.
 
-        The committed task store (``[project] task_store``) is consulted
-        first: a pinned reference is served from a body recorded under its
-        instance id, an unpinned one only when the store holds exactly one
-        body of the task. A reference hydrated inside a remote container
-        (a Modal worker) has no store unless it is baked into the image,
-        and reads the registry.
+        The committed task store is consulted first (not when ``registry``
+        is given, which asks for that registry): the store of the package
+        whose code created the reference, else of the referenced class
+        (``[tool.stardag] task_store``). A pinned reference is served from
+        a body recorded under its instance id, an unpinned one only when
+        the store holds exactly one body of the task. A reference hydrated
+        inside a remote container (a Modal worker) has no store unless the
+        image has it, and reads the registry.
 
         Pinned (``instance_id`` given), the instance's body is used and is
         served from the local body cache when present, so it works offline

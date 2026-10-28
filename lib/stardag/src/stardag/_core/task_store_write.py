@@ -236,7 +236,7 @@ def write_to_store(
     Args:
         tasks: A task, or several (a list, tuple or dict of them).
         store: The store directory. Default: the configured one
-            (``[project] task_store``).
+            (``[tool.stardag] task_store`` of the calling package).
 
     Returns:
         One :class:`StoredTask` per root, in order.
