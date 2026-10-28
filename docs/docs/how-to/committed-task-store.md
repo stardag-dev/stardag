@@ -99,7 +99,10 @@ An **installed package** (under `site-packages`) has no `pyproject.toml`:
 there, the store is the directory inside the package holding a
 `stardag_task_store.toml` marker, which every store writer creates. The
 walk never leaves an installed package, so a virtualenv inside another
-repository does not pick up that repository's store.
+repository does not pick up that repository's store. The same marker is
+used for a package shipped as source without its `pyproject.toml` (copied
+into an image): when the walk finds no `[tool.stardag]` table, the store
+is the marked directory inside the module's top-level package.
 
 `task_modules` follow the same order (without the explicit argument). The
 marker also records a copy of the package's `task_modules`, for an

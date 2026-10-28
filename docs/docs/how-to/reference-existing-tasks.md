@@ -140,7 +140,9 @@ every significant field but may differ in non-significant ones (see
   local body cache (`~/.stardag/registry-cache/`) after its first read, so
   hydration works offline.
 - **Unpinned**: chosen at hydration time, which always asks the registry.
-  For a completed task, it is the instance its completing execution ran;
+  For a completed task, it is the instance its completing execution ran
+  (an execution that reported completion and whose report completed the
+  task; a rejected late report does not count);
   otherwise, or when no completed execution is recorded (a completion
   observed at discovery, say), the newest instance.
 

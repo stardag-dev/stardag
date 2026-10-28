@@ -678,6 +678,7 @@ class TestUnpinnedSelection:
             "task_id": task_id,
             "instance_id": str(instance_id),
             "outcome": outcome,
+            "claim_outcome": outcome,
             "started_at": "2026-10-27T00:00:00Z",
         }
 

@@ -245,6 +245,8 @@ def expand_task_module_patterns(
             modules.add(pattern)
             continue
         root = pattern[: -len(_WILDCARD_SUFFIX)]
+        if any(e.endswith(_WILDCARD_SUFFIX) and _matches(root, e) for e in excludes):
+            continue  # the whole subtree is excluded: never import its root
         modules.add(root)
         modules.update(_iter_submodules(root, pattern))
     return sorted(m for m in modules if not any(_matches(m, p) for p in excludes))

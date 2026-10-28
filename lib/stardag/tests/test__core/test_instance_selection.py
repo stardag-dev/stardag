@@ -36,7 +36,9 @@ RAN = Model(size=1, notes="the run that completed it")
 LATER = Model(size=1, notes="re-registered by a later deployment")
 
 
-def _registry(*, completed: bool = True, executed: bool = True):
+def _registry(
+    *, completed: bool = True, executed: bool = True, claim_outcome: str = "completed"
+):
     registry = InMemoryRegistry()
     ran, later = uuid4(), uuid4()
     registry.add_instance(body=RAN.instance_body(), task_id=RAN.id, instance_id=ran)
@@ -60,6 +62,7 @@ def _registry(*, completed: bool = True, executed: bool = True):
             started_at=datetime.now(timezone.utc),
             ended_at=datetime.now(timezone.utc),
             outcome="completed",
+            claim_outcome=claim_outcome,
         )
         registry.executions[execution.id] = execution
     return registry, ran, later
@@ -74,6 +77,15 @@ def test_a_completed_task_selects_the_completing_executions_instance():
 
 def test_without_a_completed_execution_the_newest_is_selected():
     registry, _, later = _registry(executed=False)
+    chosen = select_instance(registry, str(RAN.id))
+    assert chosen.instance.id == later
+    assert "no completed execution recorded" in chosen.explanation
+
+
+def test_a_rejected_late_completion_report_is_not_the_completing_execution():
+    """A late report records outcome "completed" but did not complete the
+    task (its claim had moved on): not the instance that produced it."""
+    registry, _, later = _registry(claim_outcome="taken_over")
     chosen = select_instance(registry, str(RAN.id))
     assert chosen.instance.id == later
     assert "no completed execution recorded" in chosen.explanation

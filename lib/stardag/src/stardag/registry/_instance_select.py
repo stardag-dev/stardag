@@ -56,8 +56,8 @@ class SelectedInstance:
 
 
 def completed_execution(registry: RegistryABC, task_id: str) -> ExecutionInfo | None:
-    """The task's newest execution whose outcome is completed and which
-    records its instance, or ``None`` (none, or a registry without
+    """The task's newest execution whose outcome and claim outcome are both
+    completed and which records its instance, or ``None`` (none, or a registry without
     ``GET /tasks/{id}/executions``)."""
     try:
         executions = registry.task_list_executions(task_id, include_ended=True)
@@ -70,7 +70,14 @@ def completed_execution(registry: RegistryABC, task_id: str) -> ExecutionInfo | 
             return None
         raise
     for execution in executions:  # newest first
-        if execution.outcome == COMPLETED and execution.instance_id is not None:
+        # Both ends: the execution reported completed *and* that report
+        # completed the task (a rejected late report also records
+        # ``outcome="completed"``, with another claim outcome).
+        if (
+            execution.outcome == COMPLETED
+            and execution.claim_outcome == COMPLETED
+            and execution.instance_id is not None
+        ):
             return execution
     return None
 

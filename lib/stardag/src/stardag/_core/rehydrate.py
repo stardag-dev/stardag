@@ -423,7 +423,27 @@ def load_from_registry(
     allow_aliased: bool = True,
 ) -> BaseTask:
     """``BaseTask.from_registry``: see there. ``allow_aliased=False``
-    refuses ``AliasTask`` payloads (see :func:`_validate_for`)."""
+    refuses ``AliasTask`` payloads (see :func:`_validate_for`).
+
+    Runs anchored at the caller (or anchors already pinned, by a reference
+    or a store reader) and then ``cls``'s module, so a class miss imports
+    the ``task_modules`` of the task's own package from anywhere."""
+    from stardag._core.anchor import anchored, call_anchors
+
+    with anchored(*call_anchors(cls)):
+        return _load_from_registry(
+            cls, task_id, registry, instance_id=instance_id, allow_aliased=allow_aliased
+        )
+
+
+def _load_from_registry(
+    cls: type[BaseTask],
+    task_id: UUID,
+    registry: "RegistryABC",
+    *,
+    instance_id: UUID | str | None = None,
+    allow_aliased: bool = True,
+) -> BaseTask:
     if instance_id is None:
         # Not simply the newest: for a completed task, the instance of the
         # execution that completed it (``select_instance``).
@@ -440,7 +460,7 @@ def load_from_registry(
                 f"The registry holds no instance body for task {task_id}."
             ) from e
         if selected.reason == COMPLETED_EXECUTION:
-            return load_from_registry(
+            return _load_from_registry(
                 cls,
                 task_id,
                 registry,

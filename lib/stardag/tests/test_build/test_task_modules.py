@@ -703,3 +703,9 @@ class TestExclusions:
     def test_a_malformed_exclusion_is_refused(self, bad):
         with pytest.raises(TaskModulesError):
             validate_task_module_patterns([bad])
+
+    def test_a_fully_excluded_wildcard_root_is_never_imported(self, make_package):
+        pkg = make_package()
+        root = f"{pkg.name}.reporting"
+        assert expand_task_module_patterns([f"{root}.*", f"!{root}.*"]) == []
+        assert root not in sys.modules

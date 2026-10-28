@@ -33,7 +33,9 @@ so in a repository of several packages each one's pins read its own store
    never leaves an installed package: a file under ``site-packages`` /
    ``dist-packages`` is resolved inside its top-level package, where the
    store is the one directory holding a ``stardag_task_store.toml`` marker
-   (written by every store writer), and ``task_modules`` are the copy the
+   (written by every store writer), as it is inside a source package
+   shipped without its ``pyproject.toml`` (no table found on the walk),
+   and ``task_modules`` are the copy the
    marker records. A found ``pyproject.toml`` always wins over that copy;
    every write refreshes it when the two differ, and a read that finds
    both differing logs a warning;
@@ -253,19 +255,44 @@ def discover_project_config(start: Path) -> ProjectConfig | None:
     if installed is not None:
         found = _installed_config(installed)
     else:
-        for directory in (start, *start.parents):
-            if directory.name in _SITE_DIRS:
-                break
-            pyproject = directory / "pyproject.toml"
-            if pyproject.is_file():
-                table = _read_tool_table(pyproject)
-                if table is not None:
-                    found = _from_table(table, pyproject)
-                    _warn_on_marker_drift(found)
-                    break
+        found = _walk_pyprojects(start)
+        if found is None:
+            # Source shipped without its pyproject.toml (copied into an
+            # image): the store marker inside the source package.
+            package = _source_package_dir(start)
+            if package is not None:
+                found = _installed_config(package)
     with _CACHE_LOCK:
         _DIR_CACHE[start] = found
     return found
+
+
+def _source_package_dir(directory: Path) -> Path | None:
+    """The top-level regular package (``__init__.py``) containing
+    ``directory``, or ``None`` when it is not inside one."""
+    top: Path | None = None
+    for candidate in (directory, *directory.parents):
+        if (candidate / "__init__.py").is_file():
+            top = candidate
+        else:
+            break
+    return top
+
+
+def _walk_pyprojects(start: Path) -> ProjectConfig | None:
+    """The nearest ``pyproject.toml`` with a ``[tool.stardag]`` table from
+    ``start`` upwards, never above a ``site-packages`` directory."""
+    for directory in (start, *start.parents):
+        if directory.name in _SITE_DIRS:
+            break
+        pyproject = directory / "pyproject.toml"
+        if pyproject.is_file():
+            table = _read_tool_table(pyproject)
+            if table is not None:
+                found = _from_table(table, pyproject)
+                _warn_on_marker_drift(found)
+                return found
+    return None
 
 
 # -----------------------------------------------------------------------------

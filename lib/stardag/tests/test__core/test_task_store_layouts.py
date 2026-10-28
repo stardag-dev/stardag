@@ -433,3 +433,70 @@ def test_a_reference_read_from_the_registry_uses_its_packages_task_modules(
         src_a,
     )
     assert out == "5"
+
+
+def test_a_source_package_shipped_without_its_pyproject_finds_its_store(tmp_path):
+    """A package copied into an image as source (no pyproject.toml) finds
+    the store it ships through the store's marker."""
+    import shutil
+
+    build = tmp_path / "build"
+    src = _package(build, "img_pkg", 'task_store = "src/img_pkg/stardag_tasks"')
+    model_id = _pin(tmp_path, build, src, "img_pkg", 9)
+    image = tmp_path / "image" / "app"
+    image.mkdir(parents=True)
+    shutil.copytree(src / "img_pkg", image / "img_pkg")
+    (image / "img_pkg" / "pins.py").write_text(
+        f'from img_pkg.models import TrainedModel\nX = TrainedModel.from_store("{model_id}")\n'
+    )
+    out = _run(
+        tmp_path, tmp_path, "import img_pkg.pins as p; print(p.X.data.size)", image
+    )
+    assert out == "9"
+
+
+def test_from_registry_imports_the_task_classs_package_modules_from_anywhere(
+    tmp_path,
+):
+    """from_registry called from a script outside the task's package: a
+    nested class miss imports that package's task_modules."""
+    src = _package(tmp_path / "pkg", "fr_pkg", 'task_modules = ["fr_pkg.*"]')
+    (src / "fr_pkg" / "data.py").write_text(MODELS.split("class TrainedModel")[0])
+    (src / "fr_pkg" / "models.py").write_text(
+        MODELS.split("class Dataset")[0] + "class TrainedModel(sd.Task[str]):\n"
+        "    data: sd.TaskLoads[list[int]]\n\n"
+        "    def run(self):\n"
+        '        self._save("model")\n'
+    )
+    written = json.loads(
+        _run(
+            tmp_path,
+            tmp_path,
+            """
+            import json
+            from fr_pkg.data import Dataset
+            from fr_pkg.models import TrainedModel
+            m = TrainedModel(data=Dataset(size=6))
+            print(json.dumps({"id": str(m.id), "body": m.instance_body()}))
+            """,
+            src,
+        )
+    )
+    elsewhere = tmp_path / "notebooks"
+    elsewhere.mkdir()
+    out = _run(
+        tmp_path,
+        elsewhere,
+        f"""
+        import json, sys, uuid
+        from stardag.testing import InMemoryRegistry
+        from fr_pkg.models import TrainedModel
+        registry = InMemoryRegistry()
+        registry.add_instance(body=json.loads({json.dumps(json.dumps(written["body"]))}),
+                              task_id="{written["id"]}", instance_id=uuid.uuid4())
+        assert "fr_pkg.data" not in sys.modules
+        print(TrainedModel.from_registry("{written["id"]}", registry=registry).data.size)
+        """,
+        src,
+    )
+    assert out == "6"

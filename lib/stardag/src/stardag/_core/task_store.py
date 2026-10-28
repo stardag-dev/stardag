@@ -169,8 +169,8 @@ class TaskStore:
         if not fresh:
             with _INDEX_LOCK:
                 cached = _INDEXES.get(key)
-            if cached is not None:
-                return cached
+                if cached is not None:
+                    return dict(cached)  # a snapshot: writes mutate the cache
         found: dict[tuple[str, str], Path] = {}
         if self.root.is_dir():
             for class_dir in self.root.iterdir():
@@ -186,7 +186,7 @@ class TaskStore:
                             found[(task_id, instance_hash)] = path
         with _INDEX_LOCK:
             _INDEXES[key] = found
-        return found
+            return dict(found)
 
     def lookup(self, task_id: str, instance_hash: str) -> Path | None:
         path = self.index().get((task_id, instance_hash))
@@ -277,7 +277,10 @@ class TaskStore:
     ) -> Path | None:
         if path.exists():
             existing = self.read(path)
-            if existing.to_json_body() != envelope.to_json_body():
+            if (
+                existing.to_json_body() != envelope.to_json_body()
+                and not self._addressed_body_matches(existing)
+            ):
                 raise TaskStoreError(
                     f"{path} already holds a different body under the same "
                     "instance hash. Store files are content-addressed, so this "
@@ -297,6 +300,26 @@ class TaskStore:
             updated = envelope
         _atomic_write(path, updated.to_json())
         return path
+
+    def _addressed_body_matches(self, existing: Envelope) -> bool:
+        """Whether ``existing``, fully re-inlined, is the body its address
+        names. Normalization can differ for one body (a task-shaped value
+        in a plain dict is split only once its class is registered), so two
+        normalized forms of the same address are both fine as long as the
+        stored one is intact; the stored one is kept."""
+        from stardag._core.task_store_format import denormalize
+
+        def load(task_id: str, instance_hash: str, referenced_from: str) -> Envelope:
+            nested = self.lookup(task_id, instance_hash)
+            if nested is None:
+                raise TaskStoreError(f"missing {task_id}/{instance_hash}")
+            return self.read(nested)
+
+        try:
+            denormalize(existing, load)
+        except TaskStoreError:
+            return False
+        return True
 
     def select(
         self,
@@ -365,8 +388,8 @@ def _store_lock(root: Path) -> typing.Iterator[None]:
     committed store and lock files do not accumulate per stored body."""
     key = str(root.resolve())
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
-    lock_dir = Path(tempfile.gettempdir()) / "stardag-task-store-locks"
-    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_dir = Path(tempfile.gettempdir()) / f"stardag-task-store-locks-{_user_key()}"
+    lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     with _THREAD_LOCK, open(lock_dir / f"{digest}.lock", "a") as handle:
         try:
             import fcntl
@@ -378,6 +401,17 @@ def _store_lock(root: Path) -> typing.Iterator[None]:
             yield
         finally:
             fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _user_key() -> str:
+    """Scopes the lock directory to the OS user: a shared temporary
+    directory must not let one user's lock directory block another's."""
+    getuid = getattr(os, "getuid", None)
+    if getuid is not None:
+        return str(getuid())
+    import getpass
+
+    return hashlib.sha256(getpass.getuser().encode("utf-8")).hexdigest()[:12]
 
 
 def _uuid_or_none(text: str) -> str | None:

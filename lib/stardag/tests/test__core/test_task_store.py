@@ -857,3 +857,33 @@ def test_the_pyproject_wins_over_a_stale_marker_and_warns(tmp_path, caplog):
         'task_modules = ["new.*"]'
         in (tmp_path / "pins" / "stardag_task_store.toml").read_text()
     )
+
+
+def test_a_differently_normalized_rewrite_of_an_intact_file_is_kept(tmp_path):
+    """One address can normalize two ways (a task-shaped value in a plain
+    dict is split only when its class is registered): an intact stored
+    file is kept, not refused as a hand edit."""
+    model = TrainedModel(data=Dataset(size=3))
+    (stored,) = sd.write_to_store(model, store=tmp_path)
+    store = TaskStore(tmp_path)
+    envelope = store.read(stored.path)
+    inlined = Envelope(
+        task_id=envelope.task_id,
+        instance_hash=envelope.instance_hash,
+        namespace=envelope.namespace,
+        name=envelope.name,
+        module=envelope.module,
+        body=model.instance_body(),  # the nested task inline, same address
+    )
+    before = stored.path.read_text()
+    assert store.write(inlined, {"kind": "local"}) is None
+    assert stored.path.read_text() == before
+
+
+def test_the_lock_directory_is_scoped_to_the_user(tmp_path):
+    import os
+    import tempfile
+
+    sd.write_to_store(Dataset(size=3), store=tmp_path)
+    lock_dirs = list(Path(tempfile.gettempdir()).glob("stardag-task-store-locks-*"))
+    assert any(d.name.endswith(str(os.getuid())) for d in lock_dirs)
