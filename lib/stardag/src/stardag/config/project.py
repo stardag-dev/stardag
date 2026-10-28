@@ -193,8 +193,15 @@ def _installed_config(package_dir: Path) -> ProjectConfig | None:
             f"The installed package {package_dir} holds several task stores "
             f"({listed}); pass store=... to pick one."
         )
+    try:
+        modules = tomllib.loads(markers[0].read_text("utf-8")).get("task_modules", ())
+    except (OSError, tomllib.TOMLDecodeError):
+        modules = ()
     return ProjectConfig(
-        config_path=markers[0], root=package_dir, task_store=markers[0].parent
+        config_path=markers[0],
+        root=package_dir,
+        task_store=markers[0].parent,
+        task_modules=tuple(str(m) for m in modules),
     )
 
 
@@ -256,18 +263,26 @@ def resolve_project_config(
     with _OVERRIDE_LOCK:
         if _OVERRIDES and _OVERRIDES[-1] is not None:
             return _OVERRIDES[-1]
-    found: ProjectConfig | None = None
-    for anchor in anchors:
-        if anchor is None:
-            continue
-        directory = anchor if anchor.is_dir() else anchor.parent
-        found = discover_project_config(directory)
-        if found is not None:
-            break
-    if found is None:
-        found = discover_project_config(Path.cwd()) or ProjectConfig()
     env_store = os.environ.get(TASK_STORE_ENV)
     env_modules = os.environ.get(TASK_MODULES_ENV)
+    found: ProjectConfig | None = None
+    try:
+        for anchor in anchors:
+            if anchor is None:
+                continue
+            directory = anchor if anchor.is_dir() else anchor.parent
+            found = discover_project_config(directory)
+            if found is not None:
+                break
+        if found is None:
+            found = discover_project_config(Path.cwd())
+    except ProjectConfigError:
+        # The env overrides bypass automatic selection (an installed package
+        # holding several stores, say); without them the error stands.
+        if not env_store:
+            raise
+        found = None
+    found = found or ProjectConfig()
     if env_store or env_modules is not None:
         found = found.model_copy(
             update={

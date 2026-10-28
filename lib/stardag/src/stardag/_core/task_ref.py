@@ -378,6 +378,18 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
         not for an explicit ``hydrate(registry=...)``, which asks for that
         registry, but always for build-start hydration, which passes the
         build's registry only as the fallback."""
+        from stardag._core.anchor import anchored
+        from stardag._core.task_store_read import ref_anchors
+
+        # The reference's own anchors (the code that created it, then its
+        # class) decide its task store and the task_modules imported on a
+        # class miss, also when it is read from the registry.
+        with anchored(*ref_anchors(self)):
+            return self._hydrate_anchored(registry, use_store=use_store)
+
+    def _hydrate_anchored(
+        self, registry: RegistryABC | None, *, use_store: bool
+    ) -> TaskT:
         from stardag._core.task_store_read import hydrate_from_store, store_note
         from stardag.registry import is_noop_registry, registry_provider
 

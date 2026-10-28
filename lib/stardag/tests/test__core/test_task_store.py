@@ -792,3 +792,40 @@ def test_the_exact_file_text(tmp_path):
 }}
 """
     assert text == expected
+
+
+def test_files_follow_the_umask_in_effect_when_written(tmp_path):
+    import os
+
+    previous = os.umask(0o077)
+    try:
+        sd.write_to_store(Dataset(size=3), store=tmp_path)
+    finally:
+        os.umask(previous)
+    for path in _store_files(tmp_path):
+        assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_a_body_added_on_disk_for_a_known_task_is_seen(tmp_path):
+    import shutil
+
+    plain, annotated = Dataset(size=3), Dataset(size=3, note="kept")
+    sd.write_to_store(plain, store=tmp_path / "a")
+    sd.write_to_store(annotated, store=tmp_path / "b")
+    assert Dataset.from_store(plain.id, store=tmp_path / "a") == plain  # cached
+    shutil.copytree(tmp_path / "b", tmp_path / "a", dirs_exist_ok=True)
+    picked = Dataset.from_store(
+        plain.id, instance_hash=annotated.instance_hash, store=tmp_path / "a"
+    )
+    assert picked.note == "kept"
+    with pytest.raises(sd.TaskStoreError, match="2 bodies"):
+        Dataset.from_store(plain.id, store=tmp_path / "a")
+
+
+def test_the_marker_records_the_packages_task_modules(tmp_path):
+    with project_config_override(
+        ProjectConfig(root=tmp_path, task_store=tmp_path / "s", task_modules=("a.*",))
+    ):
+        sd.write_to_store(Dataset(size=3))
+    marker = (tmp_path / "s" / "stardag_task_store.toml").read_text()
+    assert 'task_modules = ["a.*"]' in marker

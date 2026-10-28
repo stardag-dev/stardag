@@ -114,7 +114,10 @@ def store_argument(
 
     if store is None:
         return None
-    config = project_config(anchors)
+    try:
+        config = project_config(anchors)
+    except TaskStoreError:
+        return os.fspath(store)  # no applicable settings to compare against
     if config.task_store is not None and config.task_store == task_store.root:
         return None
     text = os.fspath(store)

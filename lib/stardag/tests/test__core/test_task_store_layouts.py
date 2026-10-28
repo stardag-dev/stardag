@@ -327,3 +327,105 @@ def test_the_cli_resolves_from_the_working_directory(tmp_path):
     )
     assert Path(out) == (tmp_path / "pkg" / "pins").absolute()
     json.dumps(out)  # printable
+
+
+def _install(tmp_path: Path, src: Path, name: str) -> Path:
+    import shutil
+
+    site = tmp_path / "venv" / "lib" / "python3.12" / "site-packages"
+    site.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src / name, site / name)
+    return site
+
+
+def test_an_installed_package_uses_the_task_modules_in_its_marker(tmp_path):
+    """A stale module hint falls back to the package's task_modules, which
+    an installed copy reads from the store's marker (no pyproject.toml)."""
+    build = tmp_path / "build"
+    src = _package(
+        build,
+        "mark_pkg",
+        'task_store = "src/mark_pkg/stardag_tasks"\ntask_modules = ["mark_pkg.models"]',
+    )
+    model_id = _pin(tmp_path, build, src, "mark_pkg", 2)
+    for path in (src / "mark_pkg" / "stardag_tasks").rglob("*.json"):
+        data = json.loads(path.read_text())
+        data["module"] = "moved.away"
+        path.write_text(json.dumps(data))
+    site = _install(tmp_path, src, "mark_pkg")
+    (site / "mark_pkg" / "pins.py").write_text(
+        f'import stardag as sd\nX = sd.task_from_store(sd.BaseTask, "{model_id}")\n'
+    )
+    out = _run(
+        tmp_path, tmp_path, "import mark_pkg.pins as p; print(p.X.data.size)", site
+    )
+    assert out == "2"
+
+
+def test_an_explicit_store_bypasses_an_ambiguous_installed_package(tmp_path):
+    build = tmp_path / "build"
+    src = _package(build, "amb_pkg", 'task_store = "src/amb_pkg/stardag_tasks"')
+    model_id = _pin(tmp_path, build, src, "amb_pkg", 4)
+    second = src / "amb_pkg" / "other_tasks"
+    second.mkdir()
+    (second / "stardag_task_store.toml").write_text("format = 1\n")
+    site = _install(tmp_path, src, "amb_pkg")
+    (site / "amb_pkg" / "pins.py").write_text(
+        "from pathlib import Path\n"
+        "from amb_pkg.models import TrainedModel\n"
+        f'X = TrainedModel.from_store("{model_id}", store=Path(__file__).parent / "stardag_tasks")\n'
+    )
+    out = _run(
+        tmp_path, tmp_path, "import amb_pkg.pins as p; print(p.X.data.size)", site
+    )
+    assert out == "4"
+
+
+def test_a_reference_read_from_the_registry_uses_its_packages_task_modules(
+    tmp_path,
+):
+    """With no store body, a reference created in package A is read from
+    the registry in package B's process; its nested class lives in a module
+    nothing imported, and A's task_modules (not B's) import it."""
+    src_a = _package(tmp_path / "pkg_a", "ref_reg", 'task_modules = ["ref_reg.*"]')
+    (src_a / "ref_reg" / "data.py").write_text(MODELS.split("class TrainedModel")[0])
+    (src_a / "ref_reg" / "models.py").write_text(
+        MODELS.split("class Dataset")[0] + "class TrainedModel(sd.Task[str]):\n"
+        "    data: sd.TaskLoads[list[int]]\n\n"
+        "    def run(self):\n"
+        '        self._save("model")\n'
+    )
+    written = json.loads(
+        _run(
+            tmp_path,
+            tmp_path,
+            """
+            import json
+            from ref_reg.data import Dataset
+            from ref_reg.models import TrainedModel
+            m = TrainedModel(data=Dataset(size=5))
+            print(json.dumps({"id": str(m.id), "body": m.instance_body()}))
+            """,
+            src_a,
+        )
+    )
+    (src_a / "ref_reg" / "refs.py").write_text(
+        f'from ref_reg.models import TrainedModel\nREF = TrainedModel.ref("{written["id"]}", instance_id="{"0" * 8}-0000-0000-0000-{"0" * 12}")\n'
+    )
+    _package(tmp_path / "pkg_b", "ref_b2", "")
+    out = _run(
+        tmp_path,
+        tmp_path / "pkg_b",
+        f"""
+        import json, sys
+        from stardag.testing import InMemoryRegistry
+        from ref_reg.refs import REF
+        assert "ref_reg.data" not in sys.modules
+        registry = InMemoryRegistry()
+        registry.add_instance(body=json.loads({json.dumps(json.dumps(written["body"]))}),
+                              task_id=REF.task_id, instance_id=REF.instance_id)
+        print(REF.hydrate(registry).data.size)
+        """,
+        src_a,
+    )
+    assert out == "5"

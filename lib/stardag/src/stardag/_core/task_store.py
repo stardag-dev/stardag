@@ -25,8 +25,10 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import logging
 import os
+import secrets
 import tempfile
 import threading
 import typing
@@ -95,19 +97,26 @@ def resolve_store(
     """
     from stardag.config.project import ProjectConfigError, resolve_store_spec
 
-    config = project_config(anchors)
     if store is not None:
+        # An explicit store bypasses automatic selection: discovery failing
+        # (an installed package with several stores) only loses the root
+        # a relative path would resolve against.
         try:
-            return TaskStore(resolve_store_spec(store, config.root))
+            root = project_config(anchors).root
+        except TaskStoreError:
+            root = None
+        try:
+            return TaskStore(resolve_store_spec(store, root))
         except ProjectConfigError as e:
             raise TaskStoreError(str(e)) from e
+    config = project_config(anchors)
     if config.task_store is None:
         raise TaskStoreNotConfiguredError(
             "No task store configured. Pass store=<directory>, set task_store "
             "under [tool.stardag] in the package's pyproject.toml (relative to "
             "that file, or 'pkg:<package>/<dir>'), or set STARDAG_TASK_STORE."
         )
-    return TaskStore(config.task_store)
+    return TaskStore(config.task_store, task_modules=config.task_modules)
 
 
 # -----------------------------------------------------------------------------
@@ -126,8 +135,14 @@ def clear_index_cache() -> None:
 class TaskStore:
     """A task store directory (see the module docstring)."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self, root: Path, *, task_modules: tuple[str, ...] | None = None
+    ) -> None:
         self.root = root
+        #: The package's ``task_modules``, recorded in the store's marker so
+        #: an installed copy (no ``pyproject.toml``) still has them. ``None``
+        #: when this store was not reached through package settings.
+        self.task_modules = task_modules
 
     def __repr__(self) -> str:
         return f"TaskStore({str(self.root)!r})"
@@ -178,12 +193,23 @@ class TaskStore:
         return path
 
     def paths_of(self, task_id: str) -> list[Path]:
-        paths = sorted(p for (tid, _), p in self.index().items() if tid == task_id)
-        if not paths or not all(p.exists() for p in paths):
-            paths = sorted(
-                p for (tid, _), p in self.index(fresh=True).items() if tid == task_id
-            )
-        return paths
+        """Every stored body of ``task_id``. The task's directory (one per
+        task id) is located from the index and listed afresh, so a body
+        added on disk since the index was cached (a pull, another process)
+        is seen."""
+        dirs = {p.parent for (tid, _), p in self.index().items() if tid == task_id}
+        if not dirs or not all(d.is_dir() for d in dirs):
+            dirs = {
+                p.parent
+                for (tid, _), p in self.index(fresh=True).items()
+                if tid == task_id
+            }
+        return sorted(
+            path
+            for d in dirs
+            for path in d.glob("*.json")
+            if _uuid_or_none(path.stem) is not None
+        )
 
     def read(self, path: Path) -> Envelope:
         """The envelope in ``path``, checked against its address."""
@@ -212,15 +238,37 @@ class TaskStore:
         path = self.path_for(envelope)
         with _store_lock(self.root):
             written = self._write_locked(path, envelope, source)
-            marker = self.root / _marker_name()
-            if not marker.exists():
-                _atomic_write(marker, _MARKER_TEXT)
+            self._write_marker()
         if written is not None:
             with _INDEX_LOCK:
                 cached = _INDEXES.get(self.root)
                 if cached is not None:
                     cached[(envelope.task_id, envelope.instance_hash)] = path
         return written
+
+    def _write_marker(self) -> None:
+        import tomllib
+
+        marker = self.root / _marker_name()
+        existing: tuple[str, ...] | None = None
+        if marker.exists():
+            try:
+                existing = tuple(
+                    tomllib.loads(marker.read_text("utf-8")).get("task_modules", ())
+                )
+            except (OSError, tomllib.TOMLDecodeError):
+                existing = None
+            if self.task_modules is None or existing == self.task_modules:
+                return
+        modules = self.task_modules or ()
+        text = _MARKER_TEXT
+        if modules:
+            listed = ", ".join(json.dumps(m) for m in modules)
+            text += (
+                "# The package's [tool.stardag] task_modules, for an installed copy.\n"
+                f"task_modules = [{listed}]\n"
+            )
+        _atomic_write(marker, text)
 
     def _write_locked(
         self, path: Path, envelope: Envelope, source: dict[str, Any]
@@ -330,17 +378,6 @@ def _store_lock(root: Path) -> typing.Iterator[None]:
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-def _current_umask() -> int:
-    # Read once: setting the umask to read it is process-wide, and racy if
-    # done per write.
-    mask = os.umask(0o022)
-    os.umask(mask)
-    return mask
-
-
-_UMASK = _current_umask()
-
-
 def _uuid_or_none(text: str) -> str | None:
     try:
         return str(UUID(text))
@@ -353,11 +390,13 @@ def _atomic_write(path: Path, text: str) -> None:
     gets (``0o666 & ~umask``), not ``mkstemp``'s ``0o600``: a store copied
     into a container image must be readable by its user."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp")
+    # Created with mode 0o666 so the kernel applies the umask in effect now
+    # (mkstemp would force 0o600); O_EXCL on a random name, as mkstemp does.
+    tmp = str(path.parent / f".{path.stem}.{secrets.token_hex(8)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
-        os.chmod(tmp, 0o666 & ~_UMASK)
         os.replace(tmp, path)
     except BaseException:
         try:
