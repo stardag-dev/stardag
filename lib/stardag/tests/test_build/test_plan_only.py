@@ -293,6 +293,19 @@ class Score(sd.Task[float]):
         self._save(float(len(self.model.load())))
 
 
+class ScoresRegistered(sd.Task[float]):
+    """Reaches its upstream through a reference built in ``requires()``."""
+
+    weights_id: str
+    weights_instance: str
+
+    def requires(self):  # type: ignore[override]
+        return Weights.ref(self.weights_id, instance_id=self.weights_instance)
+
+    def run(self) -> None:
+        self._save(0.0)
+
+
 class TestRegister:
     async def test_returns_a_pinned_ref_per_root_and_prints_its_line(
         self, default_in_memory_fs_target: Target, capsys
@@ -334,6 +347,26 @@ class TestRegister:
         hydrated = score_ref.hydrate(registry)
         assert hydrated == Score(model=weights)
         assert len(registry.builds) == 2
+
+    async def test_a_ref_from_requires_hydrates_from_the_given_registry(
+        self, default_in_memory_fs_target: Target
+    ):
+        """A reference ``requires()`` builds is hydrated from the registry
+        passed to ``sd.register``, not the configured default (which the
+        test suite keeps off): the walk receives it."""
+        registry = InMemoryRegistry()
+        weights = Weights(key=f"w-{new_id()}")
+        (weights_ref,) = await sd.register_aio(weights, registry=registry, echo=False)
+        root = ScoresRegistered(
+            weights_id=str(weights_ref.task_id),
+            weights_instance=str(weights_ref.instance_id),
+        )
+        (root_ref,) = await sd.register_aio(root, registry=registry, echo=False)
+        assert root_ref.task_id == root.id
+        (plan_only,) = [
+            b for b in registry.builds.values() if str(root.id) in b.root_task_ids
+        ]
+        assert plan_only.status == "registered"
 
     async def test_a_ref_as_the_root_registers_its_task(
         self, default_in_memory_fs_target: Target

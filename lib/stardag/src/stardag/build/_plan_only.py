@@ -215,6 +215,9 @@ async def build_plan_only_aio(
             roots,
             max_concurrent_discover=max_concurrent_discover,
             register_all=True,
+            # A reference ``requires()`` constructs hydrates from this
+            # registry too, not the configured default.
+            registry=registry,
         )
         await session.open(
             roots, app_name=app_name, description=description, plan_only=True

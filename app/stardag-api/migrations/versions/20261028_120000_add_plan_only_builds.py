@@ -16,6 +16,11 @@ event.
   comparing the enum itself would cast the new label. As text, the whole
   migration's DDL stays in one transaction (the test suite migrates inside
   an outer one), and so will the next label added this way.
+- Retry-safe: the validation step commits the DDL before Alembic records
+  the revision, so an interrupted validation is retried over what already
+  exists. The column is added ``IF NOT EXISTS`` and dropped ``IF EXISTS``,
+  the labels are added ``IF NOT EXISTS``, and the CHECK is dropped and
+  re-added either way.
 - The CHECK is added ``NOT VALID`` and validated in a second step:
   validating scans every ``event`` row, and under the ``ADD CONSTRAINT``'s
   ACCESS EXCLUSIVE lock that scan would block every event append for its
@@ -48,7 +53,6 @@ Create Date: 2026-10-28 12:00:00.000000
 
 from typing import Sequence, Union
 
-import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
@@ -75,9 +79,12 @@ def upgrade() -> None:
         "ALTER TYPE event_type ADD VALUE IF NOT EXISTS 'build_registered'"
         " AFTER 'build_exit_early'"
     )
-    op.add_column(
-        "build",
-        sa.Column("plan_only", sa.Boolean(), server_default=sa.false(), nullable=False),
+    # ``IF NOT EXISTS``: the validation below commits this migration's DDL
+    # before Alembic records the revision, so a validation interrupted there
+    # is retried over a column that already exists.
+    op.execute(
+        "ALTER TABLE build ADD COLUMN IF NOT EXISTS plan_only boolean"
+        " NOT NULL DEFAULT false"
     )
     op.drop_constraint(_CHECK, "event", type_="check")
     op.execute(
@@ -113,5 +120,5 @@ def downgrade() -> None:
         f"ALTER TABLE event ADD CONSTRAINT {_CHECK} CHECK (plan_id IS NULL OR"
         f" event_type NOT IN ({_OLD_BUILD_EVENTS})) NOT VALID"
     )
-    op.drop_column("build", "plan_only")
+    op.execute("ALTER TABLE build DROP COLUMN IF EXISTS plan_only")
     _validate(_CHECK)
