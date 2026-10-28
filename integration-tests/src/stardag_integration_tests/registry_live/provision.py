@@ -148,6 +148,10 @@ def sdk_environment(deployment: Deployment) -> dict[str, str]:
 # replaced while it does (see ``up``). Each is one recycle identified off
 # the boot id, so the bound is on recycles, not on failures.
 PROVISION_ATTEMPTS = 3
+# How a boot id read at the end of provisioning is retried before it counts
+# as unanswered (see ``_up_once``).
+PROVISION_BOOT_READ_ATTEMPTS = 5
+PROVISION_BOOT_READ_PAUSE_SECONDS = 3.0
 
 
 class RegistryRecycledWhileProvisioning(RuntimeError):
@@ -212,14 +216,20 @@ def _up_once(modal_environment: str) -> Deployment:
     # point after it -- connect included -- shows as a different id below.
     first_boot = read_boot_id(api_url)
 
-    def recycled() -> str | None:
-        try:
-            current = read_boot_id(api_url, timeout=15.0)
-        except Exception:
-            # Nothing identified: not a recycle this can name, so the
-            # original failure stands.
-            return None
-        return current if current != first_boot else None
+    def boot_now() -> str | None:
+        """The boot id now, or None if it could not be read at all.
+
+        Retried, as ``Deployment.assert_same_container`` retries it: the
+        moment this matters most -- a replacement container -- is also when
+        that container may still be starting Postgres and running Alembic.
+        """
+        for attempt in range(PROVISION_BOOT_READ_ATTEMPTS):
+            try:
+                return read_boot_id(api_url, timeout=15.0)
+            except Exception:
+                if attempt + 1 < PROVISION_BOOT_READ_ATTEMPTS:
+                    time.sleep(PROVISION_BOOT_READ_PAUSE_SECONDS)
+        return None
 
     try:
         deployment = connect(
@@ -235,8 +245,10 @@ def _up_once(modal_environment: str) -> Deployment:
 
         _deploy_dag_apps(repo_root, modal_environment)
     except (Exception, SystemExit) as error:
-        current = recycled()
-        if current is None:
+        current = boot_now()
+        if current is None or current == first_boot:
+            # No recycle identified -- unchanged, or nothing answered -- so
+            # the original failure stands, and is not retried.
             raise
         raise RegistryRecycledWhileProvisioning(
             f"The registry container was replaced while provisioning (boot "
@@ -244,17 +256,20 @@ def _up_once(modal_environment: str) -> Deployment:
             f"{str(error).strip()[:500]}"
         ) from error
 
-    current = recycled()
-    if current is not None:
+    current = boot_now()
+    if current is None:
+        # Success is only reported against a container known to be the one
+        # provisioned; an unanswerable registry is not that.
+        raise SystemExit(
+            f"Provisioned, but the registry at {api_url} did not answer "
+            f"/_harness/boot in {PROVISION_BOOT_READ_ATTEMPTS} attempts, so "
+            "whether its database survived provisioning is unknown."
+        )
+    if current != first_boot or deployment.boot_id != first_boot:
         raise RegistryRecycledWhileProvisioning(
             f"The registry container was replaced while provisioning (boot "
             f"id {first_boot} -> {current}); what was provisioned went with "
             "its database."
-        )
-    if deployment.boot_id != first_boot:
-        raise RegistryRecycledWhileProvisioning(
-            f"The registry container was replaced while connecting (boot id "
-            f"{first_boot} -> {deployment.boot_id})."
         )
 
     path = coordinates_path(modal_environment)

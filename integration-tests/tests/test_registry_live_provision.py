@@ -35,8 +35,9 @@ class _Stack:
     """Stubs for everything ``_up_once`` reaches, scripted per test."""
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        # One entry per read of the boot id, in order; the last repeats.
-        self.boot_ids: list[str] = ["boot-1"]
+        # One entry per read of the boot id, in order; the last repeats. An
+        # exception entry is raised, as an unanswered read.
+        self.boot_ids: list[str | Exception] = ["boot-1"]
         self.deploy_apps_error: BaseException | None = None
         self.deploys = 0
         self._reads = 0
@@ -57,6 +58,7 @@ class _Stack:
             monkeypatch.setenv(name, "")
         monkeypatch.setenv("STARDAG_PROFILE", "")
         monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+        monkeypatch.setattr(provision, "PROVISION_BOOT_READ_PAUSE_SECONDS", 0.0)
 
     def _deploy_registry(self, *args, **kwargs) -> str:
         self.deploys += 1
@@ -65,7 +67,10 @@ class _Stack:
     def _read_boot_id(self, api_url: str, **kwargs) -> str:
         index = min(self._reads, len(self.boot_ids) - 1)
         self._reads += 1
-        return self.boot_ids[index]
+        value = self.boot_ids[index]
+        if isinstance(value, Exception):
+            raise value
+        return value
 
     def _connect(self, api_url: str, **kwargs) -> Deployment:
         return replace(DEPLOYMENT, boot_id=self._read_boot_id(api_url))
@@ -116,3 +121,31 @@ def test_recycles_are_retried_a_bounded_number_of_times(stack: _Stack) -> None:
     with pytest.raises(provision.RegistryRecycledWhileProvisioning):
         provision.up("dev-unit")
     assert stack.deploys == provision.PROVISION_ATTEMPTS
+
+
+def test_a_recycle_still_starting_is_identified_once_it_answers(
+    stack: _Stack,
+) -> None:
+    # The replacement does not answer the first check after the failure.
+    unanswered = TimeoutError("read timed out")
+    stack.boot_ids = ["boot-1", "boot-1", unanswered, unanswered, "boot-2"]
+    stack.deploy_apps_error = SystemExit("InvalidAPIKeyError")
+    assert provision.up("dev-unit").boot_id == "boot-2"
+    assert stack.deploys == 2
+
+
+def test_a_failure_with_the_registry_unanswerable_is_raised_not_retried(
+    stack: _Stack,
+) -> None:
+    stack.boot_ids = ["boot-1", "boot-1", TimeoutError("read timed out")]
+    stack.deploy_apps_error = SystemExit("Failed to deploy 'registry-live-dag'")
+    with pytest.raises(SystemExit, match="registry-live-dag"):
+        provision.up("dev-unit")
+    assert stack.deploys == 1
+
+
+def test_success_needs_the_boot_id_to_answer_at_the_end(stack: _Stack) -> None:
+    stack.boot_ids = ["boot-1", "boot-1", TimeoutError("read timed out")]
+    with pytest.raises(SystemExit, match="did not answer"):
+        provision.up("dev-unit")
+    assert stack.deploys == 1

@@ -407,6 +407,12 @@ jobs:
           # final run: it trades the retry away.
           FAIL_FAST: ${{ needs.resolve.outputs.fail_fast }}
         run: |
+          # `set +e` explicitly: Actions runs this with `bash -e`, and the
+          # branches below read each attempt's exit status and markers after a
+          # failed tox run. Under errexit a failed retry pipeline ended the step
+          # on the spot, skipping its reporting and any recovery after it
+          # (STA-168).
+          set +e
           set -uo pipefail
           diag="$STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR"
           rm -rf "$diag"

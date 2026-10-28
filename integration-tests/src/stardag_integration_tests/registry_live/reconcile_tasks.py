@@ -39,11 +39,11 @@ class FailsOnceUnreported(sd.Task[list[int]]):
       ``gate`` (``seconds`` at most, see ``_gates``) while the scenario
       probes the call, and writes its output.
 
-    Each record also carries the wall-clock time it was written (``at``), so
-    the scenario bounds the gap between the attempts by when they actually
-    happened rather than by when its own polling noticed them -- a
-    noticed-at clock shrinks the gap by whatever a slow registry read cost
-    (STA-168).
+    Each record also carries the wall-clock time its attempt started
+    (``at``, taken before any registry I/O), so the scenario bounds the gap
+    between the attempts by when they actually happened rather than by when
+    its own polling noticed them -- a noticed-at clock shrinks the gap by
+    whatever a slow registry read cost (STA-168).
 
     "First" is read off the registry for the reason ``DiesOnce`` gives: a
     retry may land in a fresh container, which has no state of its own.
@@ -62,6 +62,9 @@ class FailsOnceUnreported(sd.Task[list[int]]):
         from stardag.artifact import JSONArtifact
         from stardag.registry import registry_provider
 
+        # Before any registry I/O: the scenario reads this as when the
+        # attempt started, and a slow read here must not make it later.
+        started_at = time.time()
         registry = registry_provider.get()
         execution_id = UUID(os.environ["STARDAG_EXECUTION_ID"])
         plan_id = UUID(os.environ["STARDAG_PLAN_ID"])
@@ -82,7 +85,7 @@ class FailsOnceUnreported(sd.Task[list[int]]):
             [
                 JSONArtifact(
                     name=name,
-                    body={"execution_id": str(execution_id), "at": time.time()},
+                    body={"execution_id": str(execution_id), "at": started_at},
                 )
             ],
             execution_id=execution_id,
