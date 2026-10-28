@@ -114,13 +114,17 @@ def get_access_token_cache_path(
 def find_project_config() -> Path | None:
     """Find .stardag/config.toml in current directory or parents.
 
+    The user config (``~/.stardag/config.toml``) is never a project config,
+    even for a working directory under the home directory: it is skipped.
+
     Returns:
         Path to project config if found, None otherwise.
     """
     current = Path.cwd()
+    user_config = get_user_config_path()
     for directory in [current, *current.parents]:
         config_path = directory / ".stardag" / "config.toml"
-        if config_path.exists():
+        if config_path.exists() and config_path != user_config:
             return config_path
     return None
 

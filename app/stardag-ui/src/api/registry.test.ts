@@ -160,4 +160,27 @@ describe("registry API", () => {
       message: "Value error, a tag must not be empty",
     });
   });
+
+  it("refuses a filtered page from a registry older than task search", async () => {
+    // An older registry ignores the filters and serves rows without tags.
+    respond(200, { tasks: [{ task_id: "t" }], next_cursor: null });
+    await expect(
+      fetchTasks("env-1", { tags: ["prod"], q: "train" }),
+    ).rejects.toMatchObject({
+      code: "search_unsupported",
+      message: expect.stringMatching(/tag, text/),
+    });
+  });
+
+  it("still reads unfiltered and status-only pages from an older registry", async () => {
+    respond(200, { tasks: [{ task_id: "t" }], next_cursor: null });
+    await expect(fetchTasks("env-1")).resolves.toMatchObject({
+      tasks: [{ task_id: "t" }],
+    });
+    respond(200, { tasks: [{ task_id: "t" }], next_cursor: null });
+    await expect(fetchTasks("env-1", { status: "failed" })).resolves.toBeTruthy();
+    // An empty filtered page cannot be told apart, and is simply empty.
+    respond(200, { tasks: [], next_cursor: null });
+    await expect(fetchTasks("env-1", { name: "X" })).resolves.toBeTruthy();
+  });
 });

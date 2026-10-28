@@ -62,4 +62,14 @@ describe("TaskRefSnippet", () => {
     );
     expect(tooltipOf(link)).toMatch(/exact task/);
   });
+
+  it("copies sd.task_ref when the task has a ref field", () => {
+    const shadowed = { ...instance("new"), body: { __name: "Checkout", ref: "main" } };
+    render(
+      <TaskRefSnippet taskId={TASK_ID} taskName="Checkout" instances={[shadowed]} />,
+    );
+    expect(screen.getByLabelText("Code referencing this task").textContent).toBe(
+      `import stardag as sd\n\nsd.task_ref(Checkout, "${TASK_ID}", instance_id="new")`,
+    );
+  });
 });

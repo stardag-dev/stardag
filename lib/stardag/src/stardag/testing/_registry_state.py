@@ -141,6 +141,9 @@ class TaskRow:
     limit_keys: set[str] = field(default_factory=set)
     tags: list[str] = field(default_factory=list)
     description: str | None = None
+    #: Created by ``add_instance`` (a test seeding a body), which cannot
+    #: know the output URI: the first registration of the task supplies it.
+    seeded: bool = False
 
 
 @dataclass

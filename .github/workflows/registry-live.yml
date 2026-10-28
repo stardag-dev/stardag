@@ -186,6 +186,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: resolve
     if: needs.resolve.outputs.run == 'true'
+    outputs:
+      # The scenario a PR run stopped at, for the verdict on the head.
+      stopped_at: ${{ steps.scenarios.outputs.stopped_at }}
     # Provisioning is about a minute and the scenarios run concurrently in
     # roughly three; the rest is slack for Modal latency, not a budget.
     timeout-minutes: 30
@@ -297,6 +300,10 @@ jobs:
 
       # A separate step from the run below, so a provisioning failure reads
       # as one rather than as a scenario failing for reasons of its own.
+      # A registry recycle *during* provisioning is retried inside
+      # `provision up` itself, off the same boot id the scenarios' check
+      # reads, and annotated as `Registry container recycled at
+      # provisioning` (STA-168).
       - name: Provision the registry and the scenario app
         run: |
           uv run --project integration-tests --python 3.12 \
@@ -322,6 +329,9 @@ jobs:
       #    nonce the container generates at boot. Its retry re-provisions
       #    first, because the replacement's database is empty -- the run's
       #    workspace, target root and API key were in the one that went.
+      #    The one case retried twice: a recycle identified *during the
+      #    retry* re-provisions and re-runs once more (see the end of the
+      #    step), since it explains that attempt's failures the same way.
       #
       # 2. **A transport timeout**: a request that received *no HTTP
       #    response at all*, from a scenario's body or from a fixture at
@@ -399,13 +409,38 @@ jobs:
           # what makes a failure readable early. Remove the label before the
           # final run: it trades the retry away.
           FAIL_FAST: ${{ needs.resolve.outputs.fail_fast }}
+          # **A PR run stops at its first failure that no retry could
+          # rescue** (STA-172): the tier has one slot, and a run already
+          # decided red used to hold it until its slowest scenario ended.
+          # Scenarios already running finish, nothing more starts, and the
+          # run is not retried. A transport fault or a recycle is not such a
+          # failure, so a run with only those continues and retries exactly
+          # as before. The weekly run and a hand-run bare ref keep the full
+          # sweep, so every failure is still collected periodically.
+          #
+          # Unlike the label above it waits for in-flight scenarios and
+          # decides on the harness's own classification
+          # (`_diagnostics.failure_class`), not on a red line in the log.
+          # Set for the first attempt only: a retry runs only what failed,
+          # and stopping it early could leave a scenario it owed a result
+          # unrun. See `registry_live/_stop_early.py`.
+          STOP_EARLY: ${{ inputs.pr && '1' || '' }}
         run: |
+          # `set +e` explicitly: Actions runs this with `bash -e`, and the
+          # branches below read each attempt's exit status and markers after a
+          # failed tox run. Under errexit a failed retry pipeline ended the step
+          # on the spot, skipping its reporting and any recovery after it
+          # (STA-168).
+          set +e
           set -uo pipefail
           diag="$STARDAG_REGISTRY_LIVE_DIAGNOSTICS_DIR"
           rm -rf "$diag"
           mkdir -p "$diag"
           timeouts="$diag/transport-timeouts"
           others="$diag/non-timeout-failures"
+          # Written by the stop-early plugin, naming the scenario and phase.
+          # Kept in step with `_stop_early.STOPPED_EARLY_MARKER_NAME`.
+          stopped="$diag/stopped-at-real-failure"
           # Scenarios that could not be evaluated: the tick that ended a
           # build never reported, so a counter read off its trail has no
           # answer. The harness skips those rather than guessing, and the
@@ -477,7 +512,8 @@ jobs:
             exit $rc
           fi
 
-          if tox -e registry-modal-live $POSARGS 2>&1 \
+          if STARDAG_REGISTRY_LIVE_STOP_AT_REAL_FAILURE="$STOP_EARLY" \
+               tox -e registry-modal-live $POSARGS 2>&1 \
                | tee "$diag/pytest-attempt-1.log"; then
             # A green run can still have skipped a scenario, and that is
             # worth the artifact and the count even though nothing failed.
@@ -493,11 +529,22 @@ jobs:
           # artifact nothing in the run records what the first attempt hit.
           echo "diagnose=true" >> "$GITHUB_OUTPUT"
 
+          retry_args="$RETRY_POSARGS"
           if [ -f "$STARDAG_REGISTRY_LIVE_RECYCLE_MARKER" ]; then
             echo "::warning title=Registry container recycled::$(cat \
               "$STARDAG_REGISTRY_LIVE_RECYCLE_MARKER") -- the run's database" \
               "went with it. Re-provisioning and re-running the failed scenarios."
             reprovision=yes
+            # A recycle explains every failure in the run, including the
+            # one this run stopped at -- a lost database fails an assertion
+            # before the check that names the recycle runs. But a run that
+            # stopped never started some scenarios, and `--last-failed`
+            # would never start them either, so the retry is the whole tier.
+            if [ -f "$stopped" ]; then
+              echo "This run had stopped at $(head -n 1 "$stopped"); the" \
+                   "retry runs every scenario, since some never started."
+              retry_args="$POSARGS"
+            fi
           elif grep -q "$unclassified" "$diag/pytest-attempt-1.log"; then
             echo "The harness could not classify or could not record a" \
                  "failure in this run:"
@@ -505,6 +552,20 @@ jobs:
             echo "Not retried. An unwritten marker is indistinguishable" \
                  "from a run with nothing wrong in it, so this fails" \
                  "closed."
+            exit 1
+          elif [ -f "$stopped" ]; then
+            first=$(head -n 1 "$stopped")
+            echo "stopped_at=$(sed 's/ -- .*//; s|^tests_registry_live/||' \
+              <<<"$first")" >> "$GITHUB_OUTPUT"
+            echo "::error title=Registry-live stopped at the first real" \
+              "failure::$first -- the scenarios already running finished and" \
+              "the rest were not started, to free the slot. Not retried:" \
+              "only a transport fault or a registry recycle is (STA-172)."
+            if [ -f "$timeouts" ]; then
+              echo "The run also met transport faults, which a retry could" \
+                   "only have decided by letting the failure above pass:"
+              sed 's/^/  /' "$timeouts"
+            fi
             exit 1
           elif [ -f "$timeouts" ] && grep -q ' \[collect\] ' "$timeouts"; then
             # A scenario module failed to *collect* on a transport timeout
@@ -583,8 +644,41 @@ jobs:
             fi
           fi
 
-          tox -e registry-modal-live $RETRY_POSARGS 2>&1 \
+          tox -e registry-modal-live $retry_args 2>&1 \
             | tee "$diag/pytest-attempt-2.log"
+          rc=$?
+          report_inconclusive "$inconclusive"
+          report_retries "$retries"
+          if [ "$rc" -eq 0 ] || [ ! -f "$STARDAG_REGISTRY_LIVE_RECYCLE_MARKER" ]
+          then
+            exit $rc
+          fi
+
+          # **A recycle during the retry gets a recovery of its own.** The
+          # retry is a second run against the same kind of container, and
+          # it can lose its database the same way: on 2026-10-28 a transport
+          # fault's retry was preempted three minutes in, and the run ended
+          # red on a scenario that had passed before -- with the recycle
+          # identified and its marker written, because only attempt 1 read
+          # it (STA-168). The marker at the top level is attempt 2's own
+          # (attempt 1's was moved aside above), so this is the same
+          # identification the first branch keys on, applied once more, and
+          # nothing else is retried a second time.
+          echo "::warning title=Registry container recycled::$(cat \
+            "$STARDAG_REGISTRY_LIVE_RECYCLE_MARKER") -- during the retry;" \
+            "the database went with it. Re-provisioning and re-running the" \
+            "scenarios that failed again."
+          mkdir -p "$diag/attempt-2"
+          find "$diag" -maxdepth 1 -type f -exec mv {} "$diag/attempt-2/" \;
+          if ! uv run --project integration-tests --python 3.12 \
+                 python -m stardag_integration_tests.registry_live.provision up
+          then
+            echo "Re-provisioning failed after a recycle; not re-running" \
+                 "the tier against a stack that was not rebuilt."
+            exit 1
+          fi
+          tox -e registry-modal-live $RETRY_POSARGS 2>&1 \
+            | tee "$diag/pytest-attempt-3.log"
           rc=$?
           report_inconclusive "$inconclusive"
           report_retries "$retries"
@@ -727,6 +821,7 @@ jobs:
         env:
           RESULT: ${{ needs.resolve.result == 'success' && needs.registry-live.result || 'resolve-failed' }}
           SHA: ${{ needs.resolve.outputs.sha || inputs.sha }}
+          STOPPED_AT: ${{ needs.registry-live.outputs.stopped_at }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -737,10 +832,15 @@ jobs:
           fi
           case "$RESULT" in
             success)   state=success; desc="Passed." ;;
-            failure)   state=failure; desc="Failed. The run has the logs and, if red, a diagnostics artifact." ;;
+            failure)   state=failure; desc="Failed. The run has the logs and, if red, a diagnostics artifact."
+                       if [ -n "$STOPPED_AT" ]; then
+                         desc="Stopped at the first real failure: $STOPPED_AT"
+                       fi ;;
             cancelled) state=error;   desc="Cancelled. Re-run the PR's Modal Live Tests to queue again." ;;
             *)         state=error;   desc="Did not run ($RESULT). Re-run the PR's Modal Live Tests to queue again." ;;
           esac
+          # GitHub refuses a status description over 140 characters.
+          if [ "${#desc}" -gt 140 ]; then desc="${desc:0:137}..."; fi
           gh api "repos/$REPO/statuses/$SHA" -f state="$state" \
             -f context="$CONTEXT" -f target_url="$RUN_URL" \
             -f description="$desc" > /dev/null

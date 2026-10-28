@@ -5,6 +5,14 @@ before tests run if needed (via the `ensure_app_deployed` fixture).
 
 To manually deploy:
     modal deploy tests/test_integration/test_modal/test__target.py
+
+Each remote function writes under a fresh per-*attempt* directory and returns
+the in-volume path it wrote. Modal executes an input at least once, not
+exactly once: the client re-submits an input whose attempt ended in an
+internal failure (a lost input, a preempted worker) without counting it
+against the function's retries. A re-run attempt writing to the path the
+first one already wrote would fail its own ``assert not target.exists()``
+-- which is how this module flaked (STA-169).
 """
 
 import subprocess
@@ -85,8 +93,14 @@ def ensure_app_deployed():
     # subprocess.run(["modal", "app", "stop", TEST_APP_NAME])
 
 
-def _write_read_full_uri(temp_test_dir: str, mount_expected: bool):
-    uri = f"modalvol://{VOLUME_NAME}/{temp_test_dir}/test.txt"
+def _attempt_dir(temp_test_dir: str) -> str:
+    """A directory no earlier attempt of this input can have written to."""
+    return f"{temp_test_dir}/attempt-{uuid.uuid4().hex}"
+
+
+def _write_read_full_uri(temp_test_dir: str, mount_expected: bool) -> str:
+    in_volume_path = f"{_attempt_dir(temp_test_dir)}/test.txt"
+    uri = f"modalvol://{VOLUME_NAME}/{in_volume_path}"
     target = sd_modal.get_modal_target(uri)
     assert target.uri == uri
     if mount_expected:
@@ -95,6 +109,7 @@ def _write_read_full_uri(temp_test_dir: str, mount_expected: bool):
         assert isinstance(target, RemoteFileTarget)
 
     _write_read_(target)
+    return in_volume_path
 
 
 @app.function(
@@ -107,16 +122,16 @@ def _write_read_full_uri(temp_test_dir: str, mount_expected: bool):
     ),
     volumes={MOUNT_PATH: VOLUME},
 )
-def write_read_full_uri(temp_test_dir: str):
+def write_read_full_uri(temp_test_dir: str) -> str:
     VOLUME.reload()
-    _write_read_full_uri(temp_test_dir, mount_expected=True)
+    return _write_read_full_uri(temp_test_dir, mount_expected=True)
 
 
 @app.function(
     image=TEST_IMAGE.add_local_python_source("stardag"),
 )
-def write_read_full_uri_no_mount(temp_test_dir: str):
-    _write_read_full_uri(temp_test_dir, mount_expected=False)
+def write_read_full_uri_no_mount(temp_test_dir: str) -> str:
+    return _write_read_full_uri(temp_test_dir, mount_expected=False)
 
 
 @pytest.mark.parametrize(
@@ -130,8 +145,9 @@ def test_modal_mounted_volume_target_full_uri(use_mount: bool):
     )
     temp_test_dir = f"test-{uuid.uuid4()}"
     try:
-        write_read_function.remote(temp_test_dir=temp_test_dir)
-        res = read_file(f"{temp_test_dir}/test.txt")
+        in_volume_path = write_read_function.remote(temp_test_dir=temp_test_dir)
+        assert in_volume_path.startswith(f"{temp_test_dir}/")
+        res = read_file(in_volume_path)
         assert res == b"test"
     finally:
         try:
@@ -140,17 +156,16 @@ def test_modal_mounted_volume_target_full_uri(use_mount: bool):
             pass  # File might not exist if test failed early
 
 
-def _write_read_default_root(temp_test_dir: str, mount_expected: bool):
-    target = get_file_target(f"{temp_test_dir}/test.txt")
-    assert (
-        target.uri
-        == f"modalvol://{VOLUME_NAME}/{ROOT_DEFAULT}/{temp_test_dir}/test.txt"
-    )
+def _write_read_default_root(temp_test_dir: str, mount_expected: bool) -> str:
+    relpath = f"{_attempt_dir(temp_test_dir)}/test.txt"
+    target = get_file_target(relpath)
+    assert target.uri == f"modalvol://{VOLUME_NAME}/{ROOT_DEFAULT}/{relpath}"
     if mount_expected:
         assert isinstance(target, sd_modal.ModalMountedVolumeFileTarget)
     else:
         assert isinstance(target, RemoteFileTarget)
     _write_read_(target)
+    return f"{ROOT_DEFAULT}/{relpath}"
 
 
 @app.function(
@@ -166,9 +181,9 @@ def _write_read_default_root(temp_test_dir: str, mount_expected: bool):
     ),
     volumes={MOUNT_PATH: VOLUME},
 )
-def write_read_default_root(temp_test_dir: str):
+def write_read_default_root(temp_test_dir: str) -> str:
     VOLUME.reload()
-    _write_read_default_root(temp_test_dir, mount_expected=True)
+    return _write_read_default_root(temp_test_dir, mount_expected=True)
 
 
 @app.function(
@@ -182,8 +197,8 @@ def write_read_default_root(temp_test_dir: str):
         ).add_local_python_source("stardag")
     ),
 )
-def write_read_default_root_no_mount(temp_test_dir: str):
-    _write_read_default_root(temp_test_dir, mount_expected=False)
+def write_read_default_root_no_mount(temp_test_dir: str) -> str:
+    return _write_read_default_root(temp_test_dir, mount_expected=False)
 
 
 @pytest.mark.parametrize(
@@ -199,8 +214,9 @@ def test_modal_mounted_volume_target_default_root(use_mount: bool):
     )
     temp_test_dir = f"test-{uuid.uuid4()}"
     try:
-        write_read_function.remote(temp_test_dir=temp_test_dir)
-        res = read_file(f"{ROOT_DEFAULT}/{temp_test_dir}/test.txt")
+        in_volume_path = write_read_function.remote(temp_test_dir=temp_test_dir)
+        assert in_volume_path.startswith(f"{ROOT_DEFAULT}/{temp_test_dir}/")
+        res = read_file(in_volume_path)
         assert res == b"test"
     finally:
         try:
@@ -253,11 +269,12 @@ async def _write_read_aio_(target: FileTarget):
         assert await f.read() == b"test"
 
 
-def _write_read_aio_full_uri(temp_test_dir: str, mount_expected: bool):
+def _write_read_aio_full_uri(temp_test_dir: str, mount_expected: bool) -> str:
     """Test async interface with full URI."""
     import asyncio
 
-    uri = f"modalvol://{VOLUME_NAME}/{temp_test_dir}/test_aio.txt"
+    in_volume_path = f"{_attempt_dir(temp_test_dir)}/test_aio.txt"
+    uri = f"modalvol://{VOLUME_NAME}/{in_volume_path}"
     target = sd_modal.get_modal_target(uri)
     assert target.uri == uri
     if mount_expected:
@@ -266,6 +283,7 @@ def _write_read_aio_full_uri(temp_test_dir: str, mount_expected: bool):
         assert isinstance(target, RemoteFileTarget)
 
     asyncio.run(_write_read_aio_(target))
+    return in_volume_path
 
 
 @app.function(
@@ -278,16 +296,16 @@ def _write_read_aio_full_uri(temp_test_dir: str, mount_expected: bool):
     ),
     volumes={MOUNT_PATH: VOLUME},
 )
-def write_read_aio_full_uri(temp_test_dir: str):
+def write_read_aio_full_uri(temp_test_dir: str) -> str:
     VOLUME.reload()
-    _write_read_aio_full_uri(temp_test_dir, mount_expected=True)
+    return _write_read_aio_full_uri(temp_test_dir, mount_expected=True)
 
 
 @app.function(
     image=TEST_IMAGE.add_local_python_source("stardag"),
 )
-def write_read_aio_full_uri_no_mount(temp_test_dir: str):
-    _write_read_aio_full_uri(temp_test_dir, mount_expected=False)
+def write_read_aio_full_uri_no_mount(temp_test_dir: str) -> str:
+    return _write_read_aio_full_uri(temp_test_dir, mount_expected=False)
 
 
 @pytest.mark.parametrize(
@@ -304,8 +322,9 @@ def test_modal_target_async_full_uri(use_mount: bool):
     )
     temp_test_dir = f"test-aio-{uuid.uuid4()}"
     try:
-        write_read_function.remote(temp_test_dir=temp_test_dir)
-        res = read_file(f"{temp_test_dir}/test_aio.txt")
+        in_volume_path = write_read_function.remote(temp_test_dir=temp_test_dir)
+        assert in_volume_path.startswith(f"{temp_test_dir}/")
+        res = read_file(in_volume_path)
         assert res == b"test"
     finally:
         try:

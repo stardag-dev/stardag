@@ -1,7 +1,7 @@
 import { useId, useState } from "react";
 import type { TaskInstance } from "../types/task";
 import { shortHash } from "../utils/ids";
-import { TASK_REF_DOCS_URL, taskRefSnippet } from "../utils/taskRef";
+import { refIsShadowed, TASK_REF_DOCS_URL, taskRefSnippet } from "../utils/taskRef";
 import { formatRelativeTime } from "../utils/time";
 import { CopyButton } from "./ModalExecution";
 import { InfoIcon } from "./ui/InfoIcon";
@@ -49,7 +49,10 @@ export function TaskRefSnippet({
     preferredInstanceId ??
     options[0]?.id ??
     null;
-  const snippet = taskRefSnippet(taskId, instanceId, taskName);
+  // Every instance of a task is the same class, so any body tells whether a
+  // `ref` field shadows the method; the chosen one is read when it is here.
+  const body = (instances.find((i) => i.id === instanceId) ?? instances[0])?.body;
+  const snippet = taskRefSnippet(taskId, instanceId, taskName, refIsShadowed(body));
 
   return (
     <div>
@@ -57,7 +60,7 @@ export function TaskRefSnippet({
         <h3 className="text-sm font-medium text-gray-500 dark:text-gray-400">
           Reference in code
         </h3>
-        <Tooltip content="Points code at this exact task instead of re-composing it, so it keeps resolving to the same task as the code evolves. Click for the docs.">
+        <Tooltip content="Points code at this exact task instead of re-composing it, so it keeps resolving to the same task as the code evolves. Uses the registered task name as the class: for a renamed or nested class, `stardag tasks ref <task-id> -m <module>` prints the exact expression. Click for the docs.">
           <a
             href={TASK_REF_DOCS_URL}
             target="_blank"

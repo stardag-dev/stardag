@@ -216,24 +216,40 @@ def test_crash_resume_reattaches_without_restarting_task(tmp_path):
         report while its claim is live -- an observation is refused against
         a live claim ("its holder reports") -- so without the relay the
         second build would see the output land and still be refused
-        ``plan_incomplete`` at ``/complete``. Relayed at the second build's
-        next claim attempt once the output exists, in this thread (the fake
-        is not thread-safe).
+        ``plan_incomplete`` at ``/complete``.
+
+        Relayed, once the output exists, at whichever of the second build's
+        calls comes first: its next claim attempt, or ``/complete``. Both
+        are needed (STA-169). The waiting build polls the target between
+        claim attempts and stops asking as soon as it sees the output, so
+        an output landing between a refused attempt and that poll is never
+        followed by another attempt -- relaying only there left the plan
+        incomplete at ``/complete``. And ``/complete`` is reached only after
+        the build has observed the output, so it is always a point where
+        the relay can fire. Both run in this thread (the fake is not
+        thread-safe).
         """
 
         crashed_plan_id: uuid.UUID | None = None
 
-        def member_start(self, plan_id, task_id, **kwargs):
+        def _relay_if_landed(self, task_id: str) -> None:
             if (
-                kwargs.get("claim", True)
-                and self.crashed_plan_id is not None
+                self.crashed_plan_id is not None
                 and self.tasks[task_id].status == "running"
                 and task.complete()
             ):
                 self.member_complete(
                     self.crashed_plan_id, task_id, execution_id=original_execution
                 )
+
+        def member_start(self, plan_id, task_id, **kwargs):
+            if kwargs.get("claim", True):
+                self._relay_if_landed(task_id)
             return super().member_start(plan_id, task_id, **kwargs)
+
+        def build_complete(self, build_id, *, force=False):
+            self._relay_if_landed(str(task.id))
+            return super().build_complete(build_id, force=force)
 
     registry = RelayingRegistry()
     deployment = registry.add_deployment(app_name=TEST_APP_NAME)

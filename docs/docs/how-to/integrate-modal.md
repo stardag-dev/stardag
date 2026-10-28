@@ -570,8 +570,12 @@ app = sd_modal.StardagApp(
 **Pattern grammar.** Each entry is either an exact module
 (`"my_pkg.tasks.ingest"`) or a package followed by a trailing recursive
 wildcard (`"my_pkg.tasks.*"`, matching `my_pkg.tasks` and everything below
-it). A `*` anywhere but the final component, or a malformed path, raises
-from `StardagApp(...)` — a typo must not degrade into a silent no-match.
+it). Either may be prefixed with `!` to exclude what it matches, whatever
+the order: `["my_pkg.*", "!my_pkg.deploy", "!my_pkg.scripts.*"]` keeps a
+deploy entry point that needs deploy-time environment at import out of
+every tick container. A `*` anywhere but the final component, or a
+malformed path, raises from `StardagApp(...)` — a typo must not degrade
+into a silent no-match.
 Left unset, the default is `"<root package of the module defining the
 app>.*"`, which is right for most apps; the inferred value is the real
 declaration, not merely an observation.

@@ -7,7 +7,12 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { fetchTasks, type TaskFilters } from "../api/registry";
+import {
+  fetchTasks,
+  RegistryError,
+  SEARCH_UNSUPPORTED,
+  type TaskFilters,
+} from "../api/registry";
 import { useTaskSearchUrl, type TaskSearchUrl } from "../hooks/useTaskSearchUrl";
 import type { TaskStatus, TaskSummary } from "../types/task";
 import { checkTag } from "../utils/annotations";
@@ -144,6 +149,8 @@ export function TaskSearchPanel({
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The registry predates task search: retrying cannot help.
+  const [searchUnsupported, setSearchUnsupported] = useState(false);
   const [retryNonce, setRetryNonce] = useState(0);
   // The search the shown rows answer, so a stale page is never appended to.
   const [shownQuery, setShownQuery] = useState<string | null>(null);
@@ -202,6 +209,9 @@ export function TaskSearchPanel({
       // A read for text since shortened is no longer wanted.
       if (readInFlightRef.current) {
         abortRef.current?.abort();
+        // The rows kept are still live: give them a fresh controller, so
+        // their "Load more" is not tied to the aborted read.
+        abortRef.current = new AbortController();
         readInFlightRef.current = false;
         setLoading(false);
       }
@@ -228,6 +238,9 @@ export function TaskSearchPanel({
         setTasks([]);
         setNextCursor(null);
         setShownQuery(null);
+        setSearchUnsupported(
+          err instanceof RegistryError && err.code === SEARCH_UNSUPPORTED,
+        );
         setError(err instanceof Error ? err.message : "Failed to search tasks");
       })
       .finally(() => {
@@ -349,7 +362,12 @@ export function TaskSearchPanel({
         openTask(option.taskId);
         break;
       case "name":
-        commit({ ...search, text: "", namespace: option.namespace, name: option.name });
+        commit({
+          ...search,
+          text: "",
+          namespace: option.namespace,
+          name: option.name,
+        });
         break;
       case "namespace":
         commit({ ...search, text: "", namespace: option.namespace });
@@ -602,16 +620,29 @@ export function TaskSearchPanel({
 
       {error && (
         <div className="border-b border-gray-200 bg-white px-4 py-2 dark:border-gray-700 dark:bg-gray-800">
-          <ResultBanner tone="error">
-            {error}{" "}
-            <button
-              type="button"
-              onClick={() => setRetryNonce((n) => n + 1)}
-              className="font-medium underline hover:no-underline"
-            >
-              Retry
-            </button>
-          </ResultBanner>
+          {searchUnsupported ? (
+            <ResultBanner tone="warning">
+              {error}{" "}
+              <button
+                type="button"
+                onClick={() => commit({ ...EMPTY_SEARCH, status: search.status })}
+                className="font-medium underline hover:no-underline"
+              >
+                Clear search
+              </button>
+            </ResultBanner>
+          ) : (
+            <ResultBanner tone="error">
+              {error}{" "}
+              <button
+                type="button"
+                onClick={() => setRetryNonce((n) => n + 1)}
+                className="font-medium underline hover:no-underline"
+              >
+                Retry
+              </button>
+            </ResultBanner>
+          )}
         </div>
       )}
 

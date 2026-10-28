@@ -8,7 +8,14 @@ from typing import Any, Callable, TypeVar, cast
 
 import aiofiles
 import modal
-from modal.exception import NotFoundError, ResourceExhaustedError
+from grpclib.exceptions import StreamTerminatedError
+from modal.exception import (
+    ConnectionError as ModalConnectionError,
+    InternalError,
+    NotFoundError,
+    ResourceExhaustedError,
+    ServiceError,
+)
 from pydantic import ValidationError
 from pydantic_settings import SettingsConfigDict
 from tenacity import (
@@ -99,12 +106,20 @@ def get_default_volume_mount_path(volume_name: str) -> Path:
 # exist?" once per task, so the limit is reachable in ordinary use and must
 # degrade into slowness, never into a failed build.
 #
+# The same holds for a dropped connection. Modal's client retries transient
+# failures of its *unary* RPCs itself, but not of its *streaming* ones, and
+# ``Volume.iterdir`` -- what an existence check runs -- is a stream
+# (``VolumeListFiles``): a stream reset mid-call surfaces as a bare
+# ``grpclib.exceptions.StreamTerminatedError`` and, before this was covered,
+# killed a build's discovery walk (STA-169). An existence check is a read,
+# so retrying it is always safe.
+#
 # Three things this policy gets right that the obvious one does not:
 #
 # - ``reraise=True``. Without it tenacity raises RetryError, which *hides*
-#   the ResourceExhaustedError and its message inside a Future repr — the
-#   caller cannot tell a rate limit from any other failure, and neither can
-#   a log. Diagnosability first.
+#   the underlying error and its message inside a Future repr — the caller
+#   cannot tell a rate limit from any other failure, and neither can a log.
+#   Diagnosability first.
 # - A budget sized for a rate limit rather than a blip: a stampede of
 #   concurrent callers all back off into the same window, so the last one
 #   through needs far more headroom than the first.
@@ -114,8 +129,24 @@ def get_default_volume_mount_path(volume_name: str) -> Path:
 _MAX_VOLUME_API_ATTEMPTS = 10
 _VOLUME_API_MAX_WAIT_SECONDS = 30
 
-_rate_limit_retry = retry(
-    retry=retry_if_exception_type(ResourceExhaustedError),
+# What counts as transient: the failures Modal's own unary retry treats as
+# such, in the types a *stream* surfaces them as. ``grpc_error_converter``
+# maps a stream's GRPCError by status — UNAVAILABLE, DEADLINE_EXCEEDED,
+# CANCELLED and UNKNOWN to ServiceError, INTERNAL to InternalError — and a
+# reset stream bypasses that conversion as StreamTerminatedError. Everything
+# else (NotFoundError, InvalidError, AuthError, ...) is an answer, and is
+# raised at once.
+_TRANSIENT_VOLUME_API_ERRORS: tuple[type[BaseException], ...] = (
+    ResourceExhaustedError,
+    StreamTerminatedError,
+    ServiceError,
+    InternalError,
+    ModalConnectionError,
+    ConnectionError,
+)
+
+_transient_retry = retry(
+    retry=retry_if_exception_type(_TRANSIENT_VOLUME_API_ERRORS),
     wait=wait_exponential_jitter(initial=0.5, max=_VOLUME_API_MAX_WAIT_SECONDS),
     stop=stop_after_attempt(_MAX_VOLUME_API_ATTEMPTS),
     before_sleep=before_sleep_log(logger, logging.WARNING),
@@ -125,14 +156,14 @@ _rate_limit_retry = retry(
 _F = TypeVar("_F", bound=Callable[..., Any])
 
 
-def _retry_on_rate_limit(fn: _F) -> _F:
-    """Apply the rate-limit retry policy, keeping ``fn``'s own type.
+def _retry_transient(fn: _F) -> _F:
+    """Apply the transient-failure retry policy, keeping ``fn``'s own type.
 
     tenacity >= 9.2 types a decorated function as its ``_RetryDecorated``
     protocol, so a subclass overriding a decorated method with a plain one
     would no longer type-check against it.
     """
-    return cast(_F, _rate_limit_retry(fn))
+    return cast(_F, _transient_retry(fn))
 
 
 # Bound how many volume-API calls this process has in flight, so concurrent
@@ -360,7 +391,7 @@ class ModalVolumeRemoteFileSystem(RemoteFileSystemABC):
 
     URI_PREFIX = MODAL_VOLUME_URI_PREFIX
 
-    @_retry_on_rate_limit
+    @_retry_transient
     def exists(self, uri: str) -> bool:
         """Check if a file exists in the Modal volume via API."""
         volume_name, in_volume_path = get_volume_name_and_path(uri)
@@ -400,7 +431,7 @@ class ModalVolumeRemoteFileSystem(RemoteFileSystemABC):
 
     # Async implementations using Modal's .aio interface
 
-    @_retry_on_rate_limit
+    @_retry_transient
     async def exists_aio(self, uri: str) -> bool:
         """Asynchronously check if the file exists in the Modal volume."""
         volume_name, in_volume_path = get_volume_name_and_path(uri)

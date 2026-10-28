@@ -59,6 +59,38 @@ class TaskRehydrationError(StardagError):
     """A task could not be reconstructed from its registry data."""
 
 
+class TaskClassNotRegisteredError(TaskRehydrationError):
+    """A stored body names a task class that is not registered in this
+    process: the module defining it was not imported.
+
+    Rehydration imports the applicable ``[tool.stardag] task_modules`` (the
+    package's ``pyproject.toml``) on the first such miss in a process and
+    retries once before raising this."""
+
+
+_T = typing.TypeVar("_T")
+
+
+def _retrying_on_missing_class(attempt: typing.Callable[[], _T]) -> _T:
+    """``attempt()``; on a missing task class, import the project's
+    ``task_modules`` (once per process) and retry once. The final error
+    says what was imported, or how to configure it."""
+    from stardag._core import task_imports
+
+    try:
+        return attempt()
+    except TaskClassNotRegisteredError as first:
+        error = first
+        if task_imports.import_project_task_modules():
+            try:
+                return attempt()
+            except TaskClassNotRegisteredError as second:
+                error = second
+        raise TaskClassNotRegisteredError(
+            f"{error}{task_imports.import_note()}"
+        ) from error
+
+
 # Marker for AliasTask payloads (see BaseTask.resolve): their ``loads_type``
 # field is pickled bytes, which must never be unpickled automatically from
 # registry-supplied data.
@@ -197,6 +229,18 @@ def task_from_registry_data(
             not imported), the payload doesn't validate, or the identity
             check fails.
     """
+    return _retrying_on_missing_class(
+        lambda: _task_from_registry_data_once(
+            task_data, expected_task_id=expected_task_id
+        )
+    )
+
+
+def _task_from_registry_data_once(
+    task_data: typing.Mapping[str, typing.Any],
+    *,
+    expected_task_id: str | UUID | None,
+) -> BaseTask:
     namespace = task_data.get(NAMESPACE_KEY)
     name = task_data.get(NAME_KEY)
     if name is None or namespace is None:
@@ -224,7 +268,7 @@ def task_from_registry_data(
     try:
         BaseTask._registry().get_class(TypeId(namespace=namespace, name=name))
     except KeyError as e:
-        raise TaskRehydrationError(
+        raise TaskClassNotRegisteredError(
             f"No task class registered for namespace={namespace!r}, "
             f"name={name!r}. The module defining the task class must be "
             "imported before rehydration (task classes register at "
@@ -250,7 +294,7 @@ def task_from_registry_data(
             listed = ", ".join(
                 f"{n} (namespace {ns or '<root>'})" for ns, n in sorted(missing)
             )
-            raise TaskRehydrationError(
+            raise TaskClassNotRegisteredError(
                 f"Cannot rehydrate {_label(namespace, name)}: no task class is "
                 f"registered for {listed}, used in its parameters. Import the "
                 "module that defines each of these classes before loading "
@@ -284,9 +328,86 @@ def task_from_registry_data(
 
 
 def _validate_for(
-    cls: type[BaseTask], body: typing.Mapping[str, typing.Any]
+    cls: type[BaseTask],
+    body: typing.Mapping[str, typing.Any],
+    *,
+    allow_aliased: bool = True,
 ) -> BaseTask:
-    return cls.model_validate(body, context={CONTEXT_MODE_KEY: "compat"})
+    """Validate ``body`` into the class it names, which must be ``cls`` or a
+    subclass of it (a body without discriminator keys validates into
+    ``cls``).
+
+    The class is resolved from the body rather than taken from ``cls``:
+    ``Base.from_registry`` then returns the concrete subclass the task was
+    registered as, a body of an unrelated class is refused by name rather
+    than as a task id mismatch, and a task class (nested ones included)
+    whose module is not imported is named.
+
+    ``allow_aliased=False`` refuses an ``AliasTask`` payload anywhere in the
+    body before anything is validated: its pickled ``loads_type`` would be
+    unpickled by validation. For loads no user asked for explicitly (a
+    ``TaskRef`` hydrated at build start), as in
+    :func:`task_from_registry_data`.
+
+    A task class that is not registered is retried once after importing
+    the project's ``task_modules`` (see :func:`_retrying_on_missing_class`).
+    """
+    return _retrying_on_missing_class(
+        lambda: _validate_for_once(cls, body, allow_aliased=allow_aliased)
+    )
+
+
+def _validate_for_once(
+    cls: type[BaseTask],
+    body: typing.Mapping[str, typing.Any],
+    *,
+    allow_aliased: bool,
+) -> BaseTask:
+    if not allow_aliased and _contains_aliased(body):
+        raise TaskRehydrationError(
+            "The stored body contains AliasTask ('__aliased') payloads, which "
+            "embed pickled bytes and are not rehydrated automatically. Load it "
+            "explicitly with from_registry if you trust the source."
+        )
+    target: type[BaseTask] = cls
+    namespace, name = body.get(NAMESPACE_KEY), body.get(NAME_KEY)
+    own_type_id = getattr(cls, "__type_id__", None)
+    if (
+        isinstance(namespace, str)
+        and isinstance(name, str)
+        and own_type_id != TypeId(namespace=namespace, name=name)
+    ):
+        try:
+            named = BaseTask._registry().get_class(
+                TypeId(namespace=namespace, name=name)
+            )
+        except KeyError as e:
+            raise TaskClassNotRegisteredError(
+                f"No task class registered for namespace={namespace!r}, "
+                f"name={name!r}. The module defining the task class must be "
+                "imported before rehydration (task classes register at "
+                "definition time)."
+            ) from e
+        if not (isinstance(named, type) and issubclass(named, cls)):
+            raise TaskRehydrationError(
+                f"The stored body is a {named.__module__}.{named.__qualname__} "
+                f"(namespace={namespace!r}, name={name!r}), not a "
+                f"{cls.__module__}.{cls.__qualname__}."
+            )
+        target = named
+    try:
+        return target.model_validate(body, context={CONTEXT_MODE_KEY: "compat"})
+    except Exception as e:
+        missing = _unregistered_task_types(body)
+        if not missing:
+            raise
+        listed = ", ".join(f"namespace={ns!r}, name={n!r}" for ns, n in sorted(missing))
+        raise TaskClassNotRegisteredError(
+            f"Failed to validate the stored body of {target.__qualname__}: no "
+            f"task class registered for the nested {listed}. The module "
+            "defining each task class in the body must be imported before "
+            "rehydration (task classes register at definition time)."
+        ) from e
 
 
 def _id_mismatch(task: BaseTask, task_id: UUID) -> TaskRehydrationError:
@@ -299,16 +420,67 @@ def load_from_registry(
     registry: "RegistryABC",
     *,
     instance_id: UUID | str | None = None,
+    allow_aliased: bool = True,
 ) -> BaseTask:
-    """``BaseTask.from_registry``: see there."""
+    """``BaseTask.from_registry``: see there. ``allow_aliased=False``
+    refuses ``AliasTask`` payloads (see :func:`_validate_for`).
+
+    Runs anchored at the caller (or anchors already pinned, by a reference
+    or a store reader) and then ``cls``'s module, so a class miss imports
+    the ``task_modules`` of the task's own package from anywhere."""
+    from stardag._core.anchor import anchored, call_anchors
+
+    with anchored(*call_anchors(cls)):
+        return _load_from_registry(
+            cls, task_id, registry, instance_id=instance_id, allow_aliased=allow_aliased
+        )
+
+
+def _load_from_registry(
+    cls: type[BaseTask],
+    task_id: UUID,
+    registry: "RegistryABC",
+    *,
+    instance_id: UUID | str | None = None,
+    allow_aliased: bool = True,
+) -> BaseTask:
     if instance_id is None:
-        info = registry.task_get(str(task_id))
-        if info.body is None:
+        # Not simply the newest: for a completed task, the instance of the
+        # execution that completed it (``select_instance``).
+        from stardag.registry._instance_select import (
+            COMPLETED_EXECUTION,
+            NoInstanceError,
+            select_instance,
+        )
+
+        try:
+            selected = select_instance(registry, str(task_id))
+        except NoInstanceError as e:
             raise TaskRehydrationError(
                 f"The registry holds no instance body for task {task_id}."
+            ) from e
+        if selected.reason == COMPLETED_EXECUTION:
+            return _load_from_registry(
+                cls,
+                task_id,
+                registry,
+                instance_id=selected.instance.id,
+                allow_aliased=allow_aliased,
             )
-        task = _validate_for(cls, info.body)
-        if task.id != task_id:
+        try:
+            task = _validate_for(
+                cls, selected.instance.body, allow_aliased=allow_aliased
+            )
+            rehydrated_id = task.id
+        except TaskRehydrationError:
+            raise
+        except Exception as e:
+            # As on the pinned path: one error family for a body that does
+            # not validate (a field since made required, say).
+            raise TaskRehydrationError(
+                f"Failed to rehydrate {selected.explanation} of task {task_id}: {e}"
+            ) from e
+        if rehydrated_id != task_id:
             raise _id_mismatch(task, task_id)
         return task
 
@@ -329,12 +501,17 @@ def load_from_registry(
             )
         error: TaskRehydrationError
         try:
-            task = _validate_for(cls, instance.body)
+            task = _validate_for(cls, instance.body, allow_aliased=allow_aliased)
             rehydrated_id = task.id
         except Exception as e:
-            error = TaskRehydrationError(
-                f"Failed to rehydrate instance {iid} of task {task_id}: {e}"
+            # A missing class keeps its own type (callers catch it), through
+            # the stale-cache retry too.
+            kind = (
+                TaskClassNotRegisteredError
+                if isinstance(e, TaskClassNotRegisteredError)
+                else TaskRehydrationError
             )
+            error = kind(f"Failed to rehydrate instance {iid} of task {task_id}: {e}")
             error.__cause__ = e
         else:
             if rehydrated_id == task_id:

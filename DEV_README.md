@@ -299,9 +299,14 @@ performs.
 The price of that is that the container holding the database must not be
 replaced mid-run, because a recycle loses the whole database rather than some
 rows — and every scenario then fails in ways that read as scheduling bugs.
-`min_containers=1` and an explicit CPU/memory request are the prevention; the
-boot nonce on `/_harness/boot` is the detection, checked after every scenario,
-so a recycle is one sentence naming the cause instead of a debugging session.
+`min_containers=1`, an explicit CPU/memory request and `nonpreemptible=True`
+are the prevention; the boot nonce on `/_harness/boot` is the detection,
+checked after every scenario, so a recycle is one sentence naming the cause
+instead of a debugging session. The last of the three came from reading the
+container's log: every recycle of 2026-10-28 was Modal _preempting_ it, which
+no resource request prevents (STA-168). Only the registry is non-preemptible;
+the workers stay preemptible, since surviving preemption is part of what the
+scenarios test.
 
 **A lost answer is retried where it happens, first.** The registry answers in
 well under a second, and yet a call from the runner or a worker sometimes gets
@@ -314,13 +319,27 @@ Those retries are counted, and CI annotates the count on every run, green or
 red (`Registry exchanges retried`), so the class stays measured after it
 stopped failing scenarios.
 
-**A recycled container is retried, once, and nothing else is.** CI re-runs
-the failed scenarios — re-provisioning first, since the replacement
-container's database is empty — when and only when that boot nonce changed. A
-scenario that failed on its own merits is never retried. Locally the marker is
-not written and the assertion message tells you to provision again. The
+**A recycled container is retried, and nothing else is.** CI re-runs the
+failed scenarios — re-provisioning first, since the replacement container's
+database is empty — when and only when that boot nonce changed. A scenario
+that failed on its own merits is never retried. Locally the marker is not
+written and the assertion message tells you to provision again. The
 alternative, PGDATA on a Modal Volume, was considered and rejected;
 `record_recycle` in `_harness.py` carries the reasoning.
+
+The recovery covers each place a recycle can land, because each once ended a
+run red with the recycle already identified (STA-168):
+
+- **During provisioning**, `provision up` compares the boot id read when the
+  registry first answers with the one at the end, or at a failure, and
+  provisions again if it changed — up to three times in all, and for no
+  other failure. The symptom it replaces is a proxy 500 ("function was
+  terminated by signal") and then `InvalidAPIKeyError` from a deploy's
+  activation call, before any scenario ran.
+- **During the first attempt**, the retry described above.
+- **During that retry**, one more re-provision and re-run of what failed
+  again, keyed on the retry's own marker. A transport fault is still retried
+  once only.
 
 **A transport fault that survives the client's retries is the second
 retryable failure, and the list ends there.** A request that never received a
@@ -345,6 +364,46 @@ filename and record body carries it.
 from.** One exemption exists and it is by type, not by phase:
 `RegistryContainerRecycled`, which is the recycle case and has a recovery of
 its own. A fixture failing to clean up is a real failure and ends the run.
+
+**On a PR run, the first real failure stops the run** (STA-172). The tier has
+one slot, and a run already decided red used to hold it until its slowest
+scenario finished — ten minutes and more, with every queued PR waiting. Now
+the first failure that no retry could rescue stops anything more from
+starting; the scenarios already running finish, since they are paid for and
+their logs are evidence, and the run ends red with no retry. Both decisions
+read one function, `_diagnostics.failure_class`, so the stop and the retry
+cannot disagree about what is retryable:
+
+| First attempt meets                                         | PR run                                          | Weekly or hand-run bare ref |
+| ----------------------------------------------------------- | ----------------------------------------------- | --------------------------- |
+| A real failure, any phase (assertion, HTTP status, XPASS …) | Stops now; in-flight scenarios finish; no retry | Full sweep; no retry        |
+| Only transport faults and/or a recycle                      | Continues, then the `--last-failed` retry       | The same                    |
+
+The run's annotation (`Registry-live stopped at the first real failure`) and
+the `Registry-live tier` status name the scenario and phase it stopped at, and
+the diagnostics artifact carries it as `stopped-at-real-failure`. Only the
+first attempt stops early: a retry runs only what failed, so it is short, and
+stopping it could leave a scenario unrun that it owed a result. If a run that
+stopped also identified a recycle, the recycle still wins — it explains the
+failure — but the retry then runs the whole tier, because `--last-failed`
+would never start the scenarios the stop skipped.
+
+**Why the stop needs the workers, not just xdist's controller.**
+`LoadScheduling` hands every worker its items up front — about two each in
+this tier, so everything is on a worker before the first scenario ends — and
+a controller-side stop (or `--maxfail`) only queues a shutdown _behind_ them.
+So the worker that failed stops itself and drops a stop file, which every
+worker checks before starting its next item; the controller writes it too.
+`registry_live/_stop_early.py` carries the mechanism, and
+`tests/test_registry_live_stop_early.py` proves it with a real `pytest -n 2`
+over dummy scenarios. It is enabled by `STARDAG_REGISTRY_LIVE_STOP_AT_REAL_FAILURE=1`,
+which CI sets on PR runs; locally it is off unless you set it.
+
+**The `registry-live-fail-fast` label is still there, for iterating.** It is
+blunter: it stops at the first failed scenario of _any_ kind, retryable
+included, kills the run without waiting for in-flight scenarios, and skips the
+retry — so a red run hands over its logs in minutes. Remove it before the
+final run, since it trades the retry away.
 
 **On a timeout the harness probes `/_harness/boot` before the scenario gives
 up.** It returns a closure variable and touches no database, so a probe that

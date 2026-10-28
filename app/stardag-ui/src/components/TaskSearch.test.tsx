@@ -9,9 +9,17 @@ import {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TaskSummary } from "../types/task";
 
-vi.mock("../api/registry", () => ({ fetchTasks: vi.fn() }));
+vi.mock("../api/registry", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api/registry")>()),
+  fetchTasks: vi.fn(),
+}));
 
-import { fetchTasks, type TaskFilters } from "../api/registry";
+import {
+  fetchTasks,
+  RegistryError,
+  SEARCH_UNSUPPORTED,
+  type TaskFilters,
+} from "../api/registry";
 import { notifyLocationChange } from "../hooks/useTaskSearchUrl";
 import { TASK_PAGE_SIZE, TaskSearch } from "./TaskSearch";
 
@@ -153,7 +161,10 @@ describe("TaskSearch", () => {
           failNext = false;
           throw new Error("page failed");
         }
-        return { tasks: [task(T2, { task_name: "Evaluate" })], next_cursor: null };
+        return {
+          tasks: [task(T2, { task_name: "Evaluate" })],
+          next_cursor: null,
+        };
       }
       return { tasks: [task(T1)], next_cursor: "c1" };
     });
@@ -163,6 +174,31 @@ describe("TaskSearch", () => {
     fireEvent.click(screen.getByRole("button", { name: "Load more" }));
     await screen.findByText("Evaluate");
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("still pages after a pending read is cancelled by shortening the text", async () => {
+    window.history.replaceState({}, "", "/tasks?q=tra");
+    mocked.mockImplementation(async (_env, filters = {}) => {
+      if (filters.cursor) {
+        return {
+          tasks: [task(T2, { task_name: "Evaluate" })],
+          next_cursor: null,
+        };
+      }
+      if (filters.q === "trai") return new Promise(() => {}); // never settles
+      return { tasks: [task(T1)], next_cursor: "c1" };
+    });
+    render(<TaskSearch environmentId="env-1" onOpenTask={() => {}} />);
+    await screen.findByText("TrainModel");
+    const box = screen.getByRole("combobox", { name: "Search tasks" });
+    fireEvent.change(box, { target: { value: "trai" } });
+    await waitFor(() => expect(lastSearch()).toMatchObject({ q: "trai" }));
+    // Shortened under three characters while that read is still pending.
+    fireEvent.change(box, { target: { value: "tr" } });
+    await waitFor(() => expect(window.location.search).toBe("?q=tr"));
+    fireEvent.click(await screen.findByRole("button", { name: "Load more" }));
+    await screen.findByText("Evaluate");
+    expect(screen.queryByRole("button", { name: /Loading/ })).toBeNull();
   });
 
   it("does not send a short q read from the URL", async () => {
@@ -224,7 +260,10 @@ describe("TaskSearch", () => {
     window.history.replaceState({}, "", "/tasks?q=train");
     mocked.mockImplementation(async (_env, filters = {}) =>
       filters.cursor
-        ? { tasks: [task(T2, { task_name: "Evaluate", tags: [] })], next_cursor: null }
+        ? {
+            tasks: [task(T2, { task_name: "Evaluate", tags: [] })],
+            next_cursor: null,
+          }
         : { tasks: [task(T1)], next_cursor: "c1" },
     );
     render(<TaskSearch environmentId="env-1" onOpenTask={() => {}} />);
@@ -282,6 +321,32 @@ describe("TaskSearch", () => {
     expect(await screen.findByText("No tasks match this search")).toBeInTheDocument();
     fireEvent.click(screen.getAllByRole("button", { name: "Clear search" })[0]);
     await waitFor(() => expect(window.location.search).toBe(""));
+  });
+
+  it("says an older registry cannot search, instead of showing its rows", async () => {
+    window.history.replaceState({}, "", "/tasks?tag=prod&status=failed");
+    mocked.mockRejectedValue(
+      new RegistryError(
+        "This registry does not support task search",
+        200,
+        SEARCH_UNSUPPORTED,
+      ),
+    );
+    render(<TaskSearch environmentId="env-1" onOpenTask={() => {}} />);
+    expect(
+      await screen.findByText(/This registry does not support task search/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("TrainModel")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    // Clearing keeps the status filter, which an older registry serves.
+    mocked.mockResolvedValue({ tasks: [task(T1)], next_cursor: null });
+    fireEvent.click(
+      within(screen.getByText(/does not support task search/)).getByRole("button", {
+        name: "Clear search",
+      }),
+    );
+    await screen.findByText("TrainModel");
+    expect(window.location.search).toBe("?status=failed");
   });
 
   it("shows a failed read with a retry", async () => {

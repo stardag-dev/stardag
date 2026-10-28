@@ -342,21 +342,52 @@ export function taskListQuery(
   return params;
 }
 
+/** The refusal code of a search an older registry cannot answer. */
+export const SEARCH_UNSUPPORTED = "search_unsupported";
+
+/** The `GET /tasks` filters a registry older than task search ignores. */
+function searchFiltersIn(filters: TaskFilters): string[] {
+  const names: string[] = [];
+  if (filters.namespace !== undefined) names.push("namespace");
+  if (filters.name) names.push("name");
+  if (filters.tags?.length) names.push("tag");
+  if (filters.idPrefix) names.push("task id");
+  if (filters.q) names.push("text");
+  return names;
+}
+
 /**
  * One page of the environment's completions, most recent status change
  * first (`GET /tasks`). Keyset paging: pass `next_cursor` back as `cursor`
  * with the same filters.
+ *
+ * A registry older than task search ignores the search filters as unknown
+ * query parameters and answers unfiltered; it also serves no `tags` on its
+ * rows, which is how that is told apart (as the SDK does). Such a page is
+ * refused with {@link SEARCH_UNSUPPORTED} rather than shown as results.
+ * Unfiltered and status-only reads work against it as before.
  */
-export function fetchTasks(
+export async function fetchTasks(
   environmentId: string,
   filters: TaskFilters = {},
   signal?: AbortSignal,
 ): Promise<TaskListResponse> {
-  return getJson<TaskListResponse>(
+  const page = await getJson<TaskListResponse>(
     `${API_V2}/tasks?${taskListQuery(environmentId, filters).toString()}`,
     "Failed to search tasks",
     signal,
   );
+  const searched = searchFiltersIn(filters);
+  if (searched.length && page.tasks.length && !("tags" in page.tasks[0])) {
+    throw new RegistryError(
+      `This registry does not support task search (${searched.join(", ")} ` +
+        "filters) and would have answered unfiltered. Upgrade the registry " +
+        "server; listing without filters, or by status, still works.",
+      200,
+      SEARCH_UNSUPPORTED,
+    );
+  }
+  return page;
 }
 
 /**

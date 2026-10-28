@@ -9,14 +9,30 @@
  * import path, so it must not be read as one.
  */
 
-/** The `ref(...)` line, pinned to `instanceId` when one is given. */
+/**
+ * Whether the class's `ref` classmethod is shadowed: a task may have a
+ * parameter named `ref`, and then `MyTask.ref` is that field, not the
+ * method. Read off an instance body's top-level keys (its fields).
+ */
+export function refIsShadowed(body: Record<string, unknown> | undefined): boolean {
+  return body !== undefined && Object.prototype.hasOwnProperty.call(body, "ref");
+}
+
+/**
+ * The reference, pinned to `instanceId` when one is given:
+ * `MyTask.ref(...)`, or — when a `ref` field shadows the method —
+ * `sd.task_ref(MyTask, ...)` with the `import stardag as sd` it needs.
+ */
 export function taskRefSnippet(
   taskId: string,
   instanceId: string | null,
   className: string,
+  refShadowed = false,
 ): string {
   const pin = instanceId ? `, instance_id="${instanceId}"` : "";
-  return `${className}.ref("${taskId}"${pin})`;
+  return refShadowed
+    ? `import stardag as sd\n\nsd.task_ref(${className}, "${taskId}"${pin})`
+    : `${className}.ref("${taskId}"${pin})`;
 }
 
 /** The docs page explaining task references. */

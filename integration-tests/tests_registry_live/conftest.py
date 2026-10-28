@@ -37,6 +37,8 @@ from stardag_integration_tests.registry_live._diagnostics import (
     CLASSIFICATION_FAILED,
     COLLECT_PHASE,
     DIAGNOSTICS_DIR_ENV,
+    REAL,
+    failure_class,
     record_non_timeout_failure,
     record_transport_timeout,
     transport_timeout,
@@ -46,8 +48,8 @@ from stardag_integration_tests.registry_live._guard import ENV_API_URL, is_enabl
 from stardag_integration_tests.registry_live._harness import (
     BootCheckUnanswered,
     Deployment,
-    RegistryContainerRecycled,
 )
+from stardag_integration_tests.registry_live import _stop_early
 from stardag_integration_tests.registry_live._ordering import (
     controller_dist_mode,
     plan_order,
@@ -132,6 +134,9 @@ def pytest_configure(config: pytest.Config) -> None:
     # reads its expectation from the thing it is checking proves nothing.
     os.environ[ENV_API_URL] = deployment.api_url
     _deployment = deployment
+    # PR runs stop at their first failure no retry could rescue (STA-172);
+    # off unless CI asks for it. See ``_stop_early``.
+    _stop_early.register(config)
 
 
 def _budget(item: pytest.Item) -> tuple[float, bool]:
@@ -310,6 +315,14 @@ def _classify(
     # failed report carrying no exception at all, and dropping it would
     # leave the run retryable over an XPASS.
     error = call.excinfo.value if call.excinfo is not None else None
+    # ``failure_class`` is the decision, shared with the stop-early plugin
+    # so the two cannot disagree about what a retry may rescue. What
+    # remains here is only *which* retryable failure it was: a recycle has
+    # its own marker (written by the check that raised it), a transport
+    # fault gets its record and probe.
+    if failure_class(error) == REAL:
+        record_non_timeout_failure(nodeid=item.nodeid, phase=report.when, error=error)
+        return
     timeout = transport_timeout(error) if error is not None else None
     if error is not None and timeout is not None:
         record_transport_timeout(
@@ -320,8 +333,6 @@ def _classify(
             timeout=timeout,
             already_probed=isinstance(error, BootCheckUnanswered),
         )
-    elif not isinstance(error, RegistryContainerRecycled):
-        record_non_timeout_failure(nodeid=item.nodeid, phase=report.when, error=error)
 
 
 @pytest.hookimpl(wrapper=True)
