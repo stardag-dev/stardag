@@ -153,7 +153,8 @@ def test_write_stores_the_tree_and_prints_the_reader(
     assert result.exit_code == 0, result.output
     assert result.stdout.splitlines() == [
         "from stardag.utils.testing.helper_tasks import SyncOnlyTask",
-        f'SyncOnlyTask.from_store("{root.id}", instance_id="{newest}")',
+        f'SyncOnlyTask.from_store("{root.id}", instance_id="{newest}", '
+        f"store={json.dumps(str(tmp_path))})",
     ]
     assert "Wrote 2 file(s)" in result.stderr
     loaded = sd.task_from_store(
@@ -164,7 +165,8 @@ def test_write_stores_the_tree_and_prints_the_reader(
     payload = json.loads(again.stdout)
     assert payload["store"]["written"] == []
     assert payload["store"]["from_store"] == (
-        f'SyncOnlyTask.from_store("{root.id}", instance_id="{newest}")'
+        f'SyncOnlyTask.from_store("{root.id}", instance_id="{newest}", '
+        f"store={json.dumps(str(tmp_path))})"
     )
 
 

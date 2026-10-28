@@ -330,11 +330,47 @@ def test_the_function_form_reads_a_class_shadowing_the_classmethod(tmp_path):
 
 def test_the_printed_lines(tmp_path):
     model = TrainedModel(data=Dataset(size=3))
-    (stored,) = sd.write_to_store(model, store=tmp_path)
+    with project_config_provider.override(ProjectConfig(task_store=tmp_path)):
+        (stored,) = sd.write_to_store(model, store=tmp_path)
     assert str(stored).splitlines() == [
         f"from {__name__} import TrainedModel",
         f'TrainedModel.from_store("{model.id}", instance_hash="{model.instance_hash}")',
     ]
+
+
+def test_an_explicit_store_other_than_the_configured_one_is_printed(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    model = TrainedModel(data=Dataset(size=3))
+    (stored,) = sd.write_to_store(model, store="reviewed")
+    assert stored.call.endswith(', store="reviewed")')
+    assert TrainedModel.from_store(model.id, store="reviewed") == model
+
+
+def test_concurrent_writers_keep_every_instance_id(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    model = TrainedModel(data=Dataset(size=3))
+    registry = InMemoryRegistry()
+    ids = [uuid4() for _ in range(8)]
+    for iid in ids:
+        registry.add_instance(
+            body=model.instance_body(), task_id=model.id, instance_id=iid
+        )
+    with ThreadPoolExecutor(8) as pool:
+        list(
+            pool.map(
+                lambda iid: write_from_registry(
+                    model.id, instance_id=iid, registry=registry, store=tmp_path
+                ),
+                ids,
+            )
+        )
+    root = json.loads(
+        next((tmp_path / f"{__name__}.TrainedModel").rglob("*.json")).read_text()
+    )
+    assert sorted(s["instance_id"] for s in root["sources"]) == sorted(map(str, ids))
 
 
 def test_an_unhydrated_ref_is_not_written(tmp_path):
@@ -360,7 +396,8 @@ def _seeded(task: sd.BaseTask) -> tuple[InMemoryRegistry, UUID]:
 def test_write_from_registry_records_the_instance(tmp_path):
     model = TrainedModel(data=Dataset(size=3))
     registry, instance_id = _seeded(model)
-    stored = write_from_registry(model.id, registry=registry, store=tmp_path)
+    with project_config_provider.override(ProjectConfig(task_store=tmp_path)):
+        stored = write_from_registry(model.id, registry=registry)
     assert stored.instance_id == instance_id
     assert stored.call == (
         f'TrainedModel.from_store("{model.id}", instance_id="{instance_id}")'
@@ -461,3 +498,22 @@ def test_a_corrupt_stored_body_fails_the_ref_loudly(configured_store):
     stored.path.write_text("{not json")
     with pytest.raises(sd.TaskRefHydrationError, match="not valid JSON"):
         TrainedModel.ref(model.id).hydrate()
+
+
+def test_provenance_is_the_clients_own_scope_not_the_ambient_profile():
+    from types import SimpleNamespace
+
+    from stardag._core.task_store_write import registry_origin
+
+    client = SimpleNamespace(
+        api_url="https://registry.example.com",
+        environment_id="env-id",
+        _cache_workspace_id="ws-id",
+    )
+    # The hermetic config has no registry: nothing to name it by.
+    assert registry_origin(client) == {
+        "kind": "registry",
+        "registry_url": "https://registry.example.com",
+        "workspace": "ws-id",
+        "environment": "env-id",
+    }

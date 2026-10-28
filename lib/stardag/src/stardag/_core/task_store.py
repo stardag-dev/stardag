@@ -28,6 +28,8 @@ The registry stays the record of what ran; the store is a reviewed copy.
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import os
 import tempfile
 import threading
@@ -152,6 +154,12 @@ class TaskStore:
                 legitimate update.
         """
         path = self.path_for(envelope)
+        with _address_lock(path):
+            return self._write_locked(path, envelope, source)
+
+    def _write_locked(
+        self, path: Path, envelope: Envelope, source: dict[str, Any]
+    ) -> Path | None:
         if path.exists():
             existing = self.read(path)
             if existing.to_json_body() != envelope.to_json_body():
@@ -209,6 +217,34 @@ class TaskStore:
                 "to pick one."
             )
         return envelopes[0] if envelopes else None
+
+
+@contextlib.contextmanager
+def _address_lock(path: Path) -> typing.Iterator[None]:
+    """Serialize the read-merge-replace of one store file, across threads
+    and processes (an advisory ``flock`` on a sibling lock file where the
+    platform has one): two writers adding different sources to one body
+    must not overwrite each other's addition. The lock file lives in the
+    temporary directory, keyed by the file's path, so nothing but store
+    files ever appears in the (committed) store."""
+    digest = hashlib.sha256(str(path.absolute()).encode("utf-8")).hexdigest()[:32]
+    lock_dir = Path(tempfile.gettempdir()) / "stardag-task-store-locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"{digest}.lock"
+    with _THREAD_LOCK, open(lock_path, "a") as handle:
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover (Windows: threads only)
+            yield
+            return
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+_THREAD_LOCK = threading.RLock()
 
 
 def _uuid_or_none(text: str) -> str | None:

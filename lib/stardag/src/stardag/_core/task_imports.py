@@ -33,6 +33,8 @@ from stardag.polymorphic import TypeId
 logger = logging.getLogger(__name__)
 
 _LOCK = threading.Lock()
+_IMPORT_LOCK = threading.RLock()
+_importing_thread: int | None = None
 # The patterns last imported, or None: imported at most once per distinct
 # configuration in a process.
 _imported_for: tuple[str, ...] | None = None
@@ -73,16 +75,32 @@ def project_task_module_patterns() -> tuple[str, ...]:
 
 def import_project_task_modules() -> bool:
     """Import the project's ``task_modules``, once per process (per
-    configuration). Whether this call imported them, i.e. whether a lookup
-    that just missed is worth retrying. Never raises: an unexpandable
-    pattern is kept for :func:`import_note`."""
-    global _imported_for, _expansion_error
+    configuration). Whether they are imported, i.e. whether a lookup that
+    just missed is worth retrying: true after this call's import, and
+    after another thread's (a concurrent miss waits for it). Never raises:
+    an unexpandable pattern is kept for :func:`import_note`."""
+    global _importing_thread
     patterns = project_task_module_patterns()
     if not patterns:
         return False
-    with _LOCK:
+    if _importing_thread == threading.get_ident():
+        # A module being imported rehydrates a body itself: no recursion.
+        return False
+    # Held for the whole import: a concurrent miss waits for it, then
+    # retries against the classes it registered.
+    with _IMPORT_LOCK:
         if _imported_for == patterns:
-            return False
+            return True
+        _importing_thread = threading.get_ident()
+        try:
+            return _import_project_task_modules(patterns)
+        finally:
+            _importing_thread = None
+
+
+def _import_project_task_modules(patterns: tuple[str, ...]) -> bool:
+    global _imported_for, _expansion_error
+    with _LOCK:
         _imported_for = patterns
     from stardag.build._task_modules import (
         TaskModulesError,

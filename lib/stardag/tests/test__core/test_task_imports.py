@@ -242,3 +242,34 @@ def test_env_vars_override_the_project_config(project):
         )
     )
     assert out.splitlines() == ["TrainedModel", written["id"]]
+
+
+def test_a_concurrent_miss_waits_for_the_import_and_retries(monkeypatch):
+    """A second thread missing a class while the first imports the project's
+    modules waits for that import and is told to retry, rather than failing
+    against a half-imported process."""
+    import threading
+    import time
+
+    from stardag._core import task_imports
+    from stardag.build import _task_modules
+    from stardag.config.project import ProjectConfig, project_config_provider
+
+    started = threading.Event()
+
+    def slow_import(modules):
+        started.set()
+        time.sleep(0.3)
+        return _task_modules.TaskModuleImportReport(imported=tuple(modules))
+
+    monkeypatch.setattr(_task_modules, "import_task_modules", slow_import)
+    results: list[bool] = []
+    with project_config_provider.override(ProjectConfig(task_modules=("json",))):
+        first = threading.Thread(
+            target=lambda: results.append(task_imports.import_project_task_modules())
+        )
+        first.start()
+        started.wait(5)
+        results.append(task_imports.import_project_task_modules())
+        first.join()
+    assert results == [True, True]

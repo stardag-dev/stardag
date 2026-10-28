@@ -9,6 +9,7 @@ See :mod:`stardag._core.task_store` for the store and its reader, and
 from __future__ import annotations
 
 import datetime
+import json
 import os
 import typing
 from dataclasses import dataclass
@@ -41,6 +42,9 @@ class StoredTask:
     path: Path
     #: Files created or updated (empty when the store already held it all).
     written: tuple[Path, ...]
+    #: The ``store=`` argument the reader needs: the store directory as
+    #: given, when it is not the configured store; ``None`` otherwise.
+    store_argument: str | None = None
 
     @property
     def import_line(self) -> str | None:
@@ -60,6 +64,7 @@ class StoredTask:
             str(self.task_id),
             instance_id=None if self.instance_id is None else str(self.instance_id),
             instance_hash=str(self.instance_hash),
+            store=self.store_argument,
         )
 
     def __str__(self) -> str:
@@ -73,6 +78,7 @@ def reader_call(
     *,
     instance_id: str | None,
     instance_hash: str | None,
+    store: str | None = None,
 ) -> str:
     """``Prefix.from_store("<task-id>", instance_id=...)``, pinned to the
     registry instance when known and to the instance hash otherwise; or
@@ -84,10 +90,25 @@ def reader_call(
         pinned = f', instance_hash="{instance_hash}"'
     else:
         pinned = ""
+    if store is not None:
+        pinned += f", store={json.dumps(store)}"
     fields = getattr(task_class, "model_fields", None) or {}
     if "from_store" in fields:
         return f'sd.task_from_store({prefix}, "{task_id}"{pinned})'
     return f'{prefix}.from_store("{task_id}"{pinned})'
+
+
+def store_argument(
+    store: str | os.PathLike[str] | None, task_store: TaskStore
+) -> str | None:
+    """The ``store=`` a printed reader line needs: ``store`` as given (so a
+    relative path stays relative), unless it resolves to the configured
+    store, which the reader finds by itself."""
+    from stardag._core.task_store import configured_store
+
+    if store is None or configured_store() == task_store.root:
+        return None
+    return os.fspath(store)
 
 
 def module_hint(cls: type) -> str | None:
@@ -220,6 +241,7 @@ def write_to_store(
                 instance_id=None,
                 path=path,
                 written=tuple(written),
+                store_argument=store_argument(store, task_store),
             )
         )
     return results
@@ -294,6 +316,7 @@ def write_from_registry(
         instance_id=instance.id,
         path=path,
         written=tuple(written),
+        store_argument=store_argument(store, task_store),
     )
 
 
@@ -308,28 +331,35 @@ def _refuse_aliased(body: Any, task_id: str) -> None:
 
 
 def registry_origin(registry: Any) -> dict[str, Any]:
-    """The provenance recorded for a body read from ``registry``: its URL
-    and the workspace and environment (as the active profile names them,
-    else their ids)."""
+    """The provenance recorded for a body read from ``registry``: its URL,
+    workspace and environment as the client itself resolved them (ids),
+    named by the active profile's slugs only when that profile resolves to
+    exactly this scope. Never the ambient profile's scope otherwise: a CLI
+    ``-p`` override builds the client and then restores the ambient
+    profile."""
     from stardag.config import get_config
 
-    environment = getattr(registry, "environment_id", None)
-    workspace: str | None = None
+    url = getattr(registry, "api_url", None)
+    environment = getattr(registry, "environment_id", None) or None
+    workspace = getattr(registry, "_cache_workspace_id", None) or None
     try:
         config = get_config()
     except Exception:
         config = None
-    if config is not None and config.registry is not None:
-        workspace = config.registry.workspace_id or None
-        slugs = _profile_slugs(config.context.profile)
+    reg = config.registry if config is not None else None
+    if (
+        reg is not None
+        and url is not None
+        and reg.url.rstrip("/") == url.rstrip("/")
+        and (reg.environment_id or None) == environment
+        and (reg.workspace_id or None) == workspace
+    ):
+        slugs = _profile_slugs(config.context.profile) if config else None
         if slugs is not None:
-            workspace = slugs[0]
-            if environment in (None, config.registry.environment_id):
-                environment = slugs[1]
-        environment = environment or config.registry.environment_id or None
+            workspace, environment = slugs
     return {
         "kind": "registry",
-        "registry_url": getattr(registry, "api_url", None),
+        "registry_url": url,
         "workspace": workspace,
         "environment": environment,
     }
