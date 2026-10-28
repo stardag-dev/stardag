@@ -392,6 +392,48 @@ class TestWithStardagOnImage:
         mock_image.pip_install.assert_called_once_with("pydantic>=2.0")
         assert result == mock_image
 
+    @pytest.mark.parametrize(
+        "running_version",
+        [
+            "0.29.1.dev77+g2d6307ac",  # commits past a release
+            "0.30.0rc2.dev1+g2d6307ac",  # commits past a release candidate
+            "0.29.1.dev0+gdd0369e0.d20261028",  # at a release, dirty tree
+        ],
+    )
+    def test_a_non_release_build_version_uses_local_source(
+        self, not_editable, running_version: str
+    ) -> None:
+        """A non-editable install built from a checkout off a release tag.
+
+        ``auto`` recognises it by the shape hatch-vcs gives a non-release
+        build — a ``.devN`` and a ``+g<sha>`` local part — so it never pins a
+        PyPI release. That shape is only as right as the tag it counts from
+        (STA-167: it once counted from the server's tags), which
+        ``scripts/test_version_tags.py`` pins; this pins the shape.
+        """
+        mock_image = MagicMock(spec=modal.Image)
+        mock_image.pip_install.return_value = mock_image
+        mock_image.add_local_python_source.return_value = mock_image
+
+        with (
+            patch("stardag.integration.modal._config.sd") as mock_sd,
+            patch.object(
+                modal_config_provider,
+                "get",
+                return_value=ModalConfig(local_stardag_source="auto"),
+            ),
+            patch(
+                "stardag.integration.modal._config._get_stardag_deps_for_image",
+                return_value=["pydantic>=2.0"],
+            ),
+        ):
+            mock_sd.__version__ = running_version
+
+            with_stardag_on_image(mock_image)
+
+        mock_image.add_local_python_source.assert_called_once_with("stardag")
+        mock_image.pip_install.assert_called_once_with("pydantic>=2.0")
+
     def test_pypi_from_a_working_tree_warns(self, caplog) -> None:
         """``local_stardag_source="no"`` from an editable checkout is the
         one route left to the broken deploy. It is the caller's explicit
