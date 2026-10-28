@@ -27,6 +27,46 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `build_registered()`; `BuildInfo.plan_only`. **Needs a registry with
   plan-only builds** (this release's server); every other feature is
   unaffected against an older one.
+
+### Server
+
+- **Added: plan-only builds** (STA-150). `POST /builds` takes `plan_only`;
+  such a build is created `pending` and is never `running`, so the frontier,
+  claiming starts, wake-up flags, `wake-candidates` and `stalled-builds`,
+  which all act on running builds only, never act on it. `POST
+/builds/{id}/registered` ends it in the new terminal status `registered`
+  (event `build_registered`) once its active plan is sealed, running the
+  closure step first. `resume`, the reactive marker, `complete` and
+  `exit-early` refuse a plan-only build (409 `build_plan_only`); `fail` and
+  `cancel` close one that went wrong, and `skip-blocked` is a no-op on one. `BuildResponse.plan_only`. Migration:
+  `build.plan_only` (default false), the two enum labels, and the event
+  table's build-level CHECK recreated to compare `event_type::text` (an
+  enum label cannot be used in the transaction that adds it), added `NOT
+  VALID` and validated in a separate step so event appends are not blocked
+  while it scans. **Rolling back** the image once a `registered` build
+  exists requires the downgrade first, which rewrites those builds and
+  events to `cancelled`: an older server cannot read the new labels.
+
+### UI
+
+- Plan-only builds: a `registered` badge, and a plan-only build still
+  `pending` (its driver died before it finished registering) is labelled
+  "registration incomplete" (STA-150).
+
+## [0.29.0] — 2026-10-28
+
+SDK `0.29.0` and server `server-v0.8.0`. The SDK has three behaviour changes
+that can affect existing code (a missing `run()`, `Depends` under PEP 563, and
+run functions that delegate to a `Runner`), and the tick and worker changes
+below take effect only once a Modal app is **redeployed with the new SDK**. The
+server carries one additive migration
+(`workspaces.max_write_requests_per_minute`), and its images now install
+their dependencies from the lockfile. The SDK keeps working against a
+`server-v0.7.0` registry, but reconciliation does not: there a tick stops
+reconciling at the first unspawned claim it tries to end. See [RELEASE_NOTES.md](RELEASE_NOTES.md).
+
+### SDK
+
 - **Corrected: a worker's `retries=` does not recover a task that raises**
   (STA-154). The docs and the `FunctionSettings.retries` docstring said
   Modal's retry covers an exception raised inside the container. Under the
@@ -216,8 +256,10 @@ deploy` now **warns** about a worker with `retries` above zero (an `int`
   landed late can never run alongside its replacement. The same holds for
   a reactive worker that cannot create its lifecycle reporter, and for one
   whose call id is not readable inside its container. The conditional end
-  needs a registry that supports it; against an older one the tick leaves
-  unspawned claims to their TTL. New executor hooks:
+  needs a registry that supports it. An older one refuses it, and the tick
+  that is refused stops reconciling for the rest of its run, including the
+  probes of recorded calls, so their lost reports are left to the claim's
+  TTL as before; the next tick starts reconciling again. New executor hooks:
   `TaskExecutorABC.reconciles()` and `probe_detached()`, implemented for
   Modal. The tick summary counts `reconciled`.
 
@@ -232,23 +274,6 @@ deploy` now **warns** about a worker with `retries` above zero (an `int`
   at.
 
 ### Server
-
-- **Added: plan-only builds** (STA-150). `POST /builds` takes `plan_only`;
-  such a build is created `pending` and is never `running`, so the frontier,
-  claiming starts, wake-up flags, `wake-candidates` and `stalled-builds`,
-  which all act on running builds only, never act on it. `POST
-/builds/{id}/registered` ends it in the new terminal status `registered`
-  (event `build_registered`) once its active plan is sealed, running the
-  closure step first. `resume`, the reactive marker, `complete` and
-  `exit-early` refuse a plan-only build (409 `build_plan_only`); `fail` and
-  `cancel` close one that went wrong, and `skip-blocked` is a no-op on one. `BuildResponse.plan_only`. Migration:
-  `build.plan_only` (default false), the two enum labels, and the event
-  table's build-level CHECK recreated to compare `event_type::text` (an
-  enum label cannot be used in the transaction that adds it), added `NOT
-  VALID` and validated in a separate step so event appends are not blocked
-  while it scans. **Rolling back** the image once a `registered` build
-  exists requires the downgrade first, which rewrites those builds and
-  events to `cancelled`: an older server cannot read the new labels.
 
 - **Changed: the writes that finish running work get their own rate-limit
   window, and a workspace can have its own limit** (STA-135). The
@@ -306,11 +331,20 @@ deploy` now **warns** about a worker with `retries` above zero (an `int`
   `SELECT … ORDER BY … FOR UPDATE` acquires its locks in order now say that
   Postgres does not guarantee it.
 
-### UI
+- **Changed: the server images install their dependencies from
+  `app/stardag-api/uv.lock`** (STA-137). Every build of the API resolved its
+  dependencies fresh from `pyproject.toml`, so the lockfile never reached a
+  running server: two builds of one tag could ship different versions, and a
+  lockfile bump, a security fix included, did not reach the image at all.
+  `app/server.Dockerfile`, the API-only `app/stardag-api/Dockerfile` and the
+  self-host `--from-source` image now install the locked, hash-checked set.
+  Against `0.28.0`'s lock this release moves fastapi 0.141.1 → 0.162.0,
+  starlette 1.7.0 → 1.9.0, pydantic 2.13.5 → 2.14.1, pyjwt 2.14.0 → 2.15.0,
+  certifi 2026.7.22 → 2026.10.19, asyncpg 0.31.0 → 0.32.0 and alembic 1.20.0
+  → 1.20.1. The certifi bump drops the compromised emSign roots
+  (Dependabot alert 407) from the bundle the API trusts for its JWKS fetch.
 
-- Plan-only builds: a `registered` badge, and a plan-only build still
-  `pending` (its driver died before it finished registering) is labelled
-  "registration incomplete" (STA-150).
+### UI
 
 - The build stop panel mirrors `stardag builds stop`'s reasons (STA-90):
   an in-process execution is shown as running in its driver's own process,
