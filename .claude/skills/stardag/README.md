@@ -44,7 +44,7 @@ Claude Code [automatically discovers skills](https://code.claude.com/docs/en/ski
 
 ## Keeping It Updated
 
-It describes the v2 line (SDK 0.29 and `main` after it, registry server 0.8).
+It describes the v2 line (SDK 0.30 and `main` after it, registry server 0.9).
 
 **Last synced with `main`: 2026-10-28, at `d2aef2fa`.** To bring it up to date, start from
 `git log d2aef2fa..main` and the CHANGELOG's `[Unreleased]` section, then move this marker.

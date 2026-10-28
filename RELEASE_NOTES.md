@@ -6,24 +6,64 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
-## v0.29.0 — Reactive builds that recover
+## v0.30.0 — Stable references to tasks
 
-Released 2026-10-28 together with the registry server `server-v0.8.0`. Three
-behaviour changes can affect existing code; each has its own section below.
+Released 2026-10-28 together with the registry server `server-v0.9.0`.
+
+Code that keeps important tasks (a key dataset, a trained model) as constants
+built from factories and defaults silently re-keys them when those defaults
+change. This release adds stable handles to tasks that already exist, and the
+tooling to find, pin, document and compare them. Start with
+[Stable References to Tasks](https://stardag-dev.github.io/stardag/concepts/task-references/).
 
 ### Upgrading
 
-- **Redeploy each Modal app** with `stardag modal deploy` after upgrading.
-  The tick and worker changes below (reconciliation, the worker rule,
-  resilience under the rate limit, the `retries` warning) run inside the
-  deployed app, so an app deployed with 0.28.0 keeps its old behaviour.
-- **The server upgrade** is one additive migration (one nullable column).
-  Against a `server-v0.7.0` registry the SDK keeps working, but upgrade
-  the server to get reconciliation: the older registry refuses the
-  conditional end of an unspawned claim, and a tick that is refused stops
-  reconciling for the rest of its run, recorded calls included. What it
-  leaves is left to the claim's TTL, as in 0.28.0. Self-hosted deployments upgrade with
-  `stardag self-host upgrade`, which now defaults to `0.8.0`.
+- **Upgrade the server first.** `server-v0.9.0` carries two migrations:
+  task tags and descriptions (with search indexes built `CONCURRENTLY`, so the
+  `task` table stays readable while they build), and plan-only builds (a
+  `plan_only` column and a new `registered` build status). Once a `registered`
+  build exists, rolling the image back needs the migration's downgrade first:
+  an older server cannot read that status. Self-hosted deployments upgrade
+  with `stardag self-host upgrade`, which now defaults to `0.9.0`.
+- **Against a `server-v0.8.0` registry** references, `from_registry` with a
+  pinned instance and the committed task store keep working (a pinned
+  instance is read through `GET /tasks/{id}` when the server has no
+  `GET /instances/{id}`, among the task's newest 500 instances). Tags,
+  search, `stardag tasks annotate` and plan-only builds need `server-v0.9.0`;
+  `sd.register` against an older server raises `PlanOnlyUnsupportedError`.
+- **Redeploy Modal apps** to pick up the worker-side fixes below (a dropped
+  connection to a Modal Volume is retried).
+
+### Stable references to tasks
+
+- **Pin a task in the repo:** `stardag tasks ref <task-id> --write` (or
+  `sd.write_to_store(tasks)`) writes the task's instance body into a committed
+  task store (`[tool.stardag] task_store` in the package's `pyproject.toml`),
+  normalized and content-addressed, so shared upstream tasks are stored once
+  and a changed pin diffs readably. `MyTask.from_store(task_id,
+instance_hash=...)` loads the real task eagerly, offline, with no registry
+  or profile; `model_copy` derivation from a pinned task works.
+- **Reference a registered task:** `MyTask.ref(task_id, instance_id=...)` (or
+  `sd.task_ref(MyTask, ...)`) is a typed placeholder that fits
+  `TaskLoads[...]` fields, gives downstream tasks the same ids as the real
+  task, and is hydrated when a build starts (`.hydrate()` in driver code).
+  An unpinned reference resolves to the instance whose execution completed
+  the task.
+- **Imports resolve themselves:** store files record each class's module, and
+  `[tool.stardag] task_modules` (with `!pattern` excludes) is imported on a
+  lookup miss, so no module has to import every task class by hand. A task's
+  namespace is never read as an import path.
+- **Register without running:** `sd.register(tasks, tags=..., task_description=...)`
+  (or `sd.build(..., plan_only=True)`) registers tasks and their static
+  dependencies without executing anything, and returns pinned references.
+- **Find and document tasks:** tags and a description on each task
+  (`stardag tasks annotate`, editable in the UI), `stardag tasks list
+--tag/--name/--search`, and search on the UI's `/tasks` page.
+- **Compare two tasks** in the UI: "Compare" on a task's parameters opens a
+  structured diff against another task of the same type.
+- **Test offline:** `InMemoryRegistry.add_instance(body=, task_id=,
+instance_id=)` seeds a recorded body; `sd.task_from_body` validates a body
+  you hold.
 
 ### `stardag.TaskRef` is now the typed task reference; the old one is `TaskSlug`
 
@@ -52,6 +92,63 @@ slug = sd.TaskSlug.from_task(task).slug  # was: sd.TaskRef.from_task(task).slug
 Replace `sd.AliasTask[Model].from_registry(task_id)` with
 `MyTask.ref(task_id, instance_id=...)`, which is typed by the referenced
 class and hydrated from the registry at build start.
+
+### A task field named `ref` or `from_store` shadows the new methods
+
+`ref` (on every task class) and `from_store` are new class-level methods. A
+task class with a **field** of either name keeps working, but pydantic warns
+at class definition, pyright reports an incompatible override in your code,
+and that class has no `.ref()` / `.from_store()`. Use the function forms,
+`sd.task_ref(MyTask, ...)` and `sd.task_from_store(MyTask, ...)`, or rename
+the field.
+
+### Other fixes
+
+- A git install, an editable install or an image built from a source
+  checkout reported a version counted from the server's tags (e.g.
+  `0.7.1.devN`) instead of the SDK's. Releases were unaffected, but a Modal
+  image built from a non-editable checkout at a release commit could pin a
+  wrong PyPI `stardag`.
+- A dropped connection while checking a Modal Volume target is retried
+  instead of failing the build.
+- A delete retried after a lost response, whose first attempt had succeeded,
+  no longer fails with "not found".
+
+### New public API
+
+- `Task.ref` / `sd.task_ref`, `TaskRef`, `sd.resolve_refs`,
+  `sd.clear_hydration_memo`.
+- `Task.from_store` / `sd.task_from_store`, `sd.write_to_store`.
+- `sd.register` / `sd.register_aio`, `sd.build(..., plan_only=True)`.
+- `sd.task_from_body`; `from_registry(task_id, instance_id=...)`.
+- `TaskSlug` (the former `TaskRef` dataclass).
+- Errors: `TaskRefHydrationError`, `TaskRefNotHydratedError`,
+  `TaskClassNotRegisteredError`, `PlanOnlyUnsupportedError`.
+- `InMemoryRegistry.add_instance`; the registry client's `task_annotate`,
+  `task_instance_get` and `tasks list` filters.
+- CLI: `stardag tasks ref [--write]`, `stardag tasks annotate`,
+  `stardag cache clear`.
+
+---
+
+## v0.29.0 — Reactive builds that recover
+
+Released 2026-10-28 together with the registry server `server-v0.8.0`. Three
+behaviour changes can affect existing code; each has its own section below.
+
+### Upgrading
+
+- **Redeploy each Modal app** with `stardag modal deploy` after upgrading.
+  The tick and worker changes below (reconciliation, the worker rule,
+  resilience under the rate limit, the `retries` warning) run inside the
+  deployed app, so an app deployed with 0.28.0 keeps its old behaviour.
+- **The server upgrade** is one additive migration (one nullable column).
+  Against a `server-v0.7.0` registry the SDK keeps working, but upgrade
+  the server to get reconciliation: the older registry refuses the
+  conditional end of an unspawned claim, and a tick that is refused stops
+  reconciling for the rest of its run, recorded calls included. What it
+  leaves is left to the claim's TTL, as in 0.28.0. Self-hosted deployments upgrade with
+  `stardag self-host upgrade`, which now defaults to `0.8.0`.
 
 ### A missing `run()` is reported at construction, not class definition
 

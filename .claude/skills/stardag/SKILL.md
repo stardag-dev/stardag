@@ -1,7 +1,7 @@
 ---
 name: stardag
 description: >
-  Stardag SDK usage guide (registry v2 line, SDK 0.29+). Use when writing code that imports stardag,
+  Stardag SDK usage guide (registry v2 line, SDK 0.30+). Use when writing code that imports stardag,
   defining tasks/DAGs, choosing significant vs non-significant parameters, passing build
   settings, configuring builds, working with targets/serialization, deploying to Modal, or
   interacting with the Stardag Registry API/UI/CLI. Covers the full SDK surface: task
@@ -17,7 +17,7 @@ Tasks are Pydantic models with deterministic output paths based on parameter has
 
 **Always `import stardag as sd`** — this is the standard convention. Python 3.11 or newer.
 
-This guide describes the **v2 line** (SDK `0.29` and `main` after it, registry server `0.8`).
+This guide describes the **v2 line** (SDK `0.30` and `main` after it, registry server `0.9`).
 Anything you remember about `significance=`, `hash_exclude=`, `build_config`,
 `build_config_scope`, scope keys or global locks is v1 and gone — see
 [registry-and-platform.md](registry-and-platform.md#upgrading-from-v1).
