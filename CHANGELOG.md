@@ -33,6 +33,21 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   unreadable or mismatching entry is discarded and re-read. Writes are
   atomic. `stardag cache clear [--all]` empties it;
   `STARDAG_REGISTRY_CACHE=0` turns it off.
+
+## [0.29.0] — 2026-10-28
+
+SDK `0.29.0` and server `server-v0.8.0`. The SDK has three behaviour changes
+that can affect existing code (a missing `run()`, `Depends` under PEP 563, and
+run functions that delegate to a `Runner`), and the tick and worker changes
+below take effect only once a Modal app is **redeployed with the new SDK**. The
+server carries one additive migration
+(`workspaces.max_write_requests_per_minute`), and its images now install
+their dependencies from the lockfile. The SDK keeps working against a
+`server-v0.7.0` registry, but reconciliation does not: there a tick stops
+reconciling at the first unspawned claim it tries to end. See [RELEASE_NOTES.md](RELEASE_NOTES.md).
+
+### SDK
+
 - **Corrected: a worker's `retries=` does not recover a task that raises**
   (STA-154). The docs and the `FunctionSettings.retries` docstring said
   Modal's retry covers an exception raised inside the container. Under the
@@ -222,8 +237,10 @@ deploy` now **warns** about a worker with `retries` above zero (an `int`
   landed late can never run alongside its replacement. The same holds for
   a reactive worker that cannot create its lifecycle reporter, and for one
   whose call id is not readable inside its container. The conditional end
-  needs a registry that supports it; against an older one the tick leaves
-  unspawned claims to their TTL. New executor hooks:
+  needs a registry that supports it. An older one refuses it, and the tick
+  that is refused stops reconciling for the rest of its run, including the
+  probes of recorded calls, so their lost reports are left to the claim's
+  TTL as before; the next tick starts reconciling again. New executor hooks:
   `TaskExecutorABC.reconciles()` and `probe_detached()`, implemented for
   Modal. The tick summary counts `reconciled`.
 
@@ -294,6 +311,19 @@ deploy` now **warns** about a worker with `retries` above zero (an `int`
   the retry or name a reason not to. Comments that claimed a
   `SELECT … ORDER BY … FOR UPDATE` acquires its locks in order now say that
   Postgres does not guarantee it.
+
+- **Changed: the server images install their dependencies from
+  `app/stardag-api/uv.lock`** (STA-137). Every build of the API resolved its
+  dependencies fresh from `pyproject.toml`, so the lockfile never reached a
+  running server: two builds of one tag could ship different versions, and a
+  lockfile bump, a security fix included, did not reach the image at all.
+  `app/server.Dockerfile`, the API-only `app/stardag-api/Dockerfile` and the
+  self-host `--from-source` image now install the locked, hash-checked set.
+  Against `0.28.0`'s lock this release moves fastapi 0.141.1 → 0.162.0,
+  starlette 1.7.0 → 1.9.0, pydantic 2.13.5 → 2.14.1, pyjwt 2.14.0 → 2.15.0,
+  certifi 2026.7.22 → 2026.10.19, asyncpg 0.31.0 → 0.32.0 and alembic 1.20.0
+  → 1.20.1. The certifi bump drops the compromised emSign roots
+  (Dependabot alert 407) from the bundle the API trusts for its JWKS fetch.
 
 ### UI
 
