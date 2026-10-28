@@ -2,7 +2,9 @@
 
 Keep a reviewed, registry-independent copy of the task instances your code
 pins — a key dataset, a trained model — inside the package that pins them,
-and load them eagerly as real task objects.
+and load them eagerly as real task objects. For the overview — which
+handle to use, and the workflow from registering a task to pinning and
+testing it — see [Stable References to Tasks](../concepts/task-references.md).
 
 !!! tip "What you need to know"
 

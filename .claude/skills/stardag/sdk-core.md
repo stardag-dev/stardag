@@ -84,6 +84,64 @@ class CustomTarget(sd.TargetTask[LoadableSaveableFileSystemTarget[dict]]):
 
 Use when: custom output paths, non-standard serializers, or S3/remote targets.
 
+### Referring to Existing Tasks: Which Handle
+
+**Do not re-compose a task that already exists from factories and defaults
+to load it.** A module-level `MODEL = TrainedModel(data=make_dataset(...))`
+re-keys (new task id: a new, unbuilt task) as soon as a factory or a default
+it is built from changes. The durable record is the stored instance body,
+read back in compat mode. Pick the handle by use:
+
+| Use                                                                                      | Handle                                                                               |
+| ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Pinned, long-lived instance in code (key dataset, trained model)                         | `MyTask.from_store(task_id, instance_hash=...)`: committed task store, **eager**     |
+| Ad hoc (a notebook loading an asset already built in this env)                           | `MyTask.ref(task_id, instance_id=...)` (lazy) or `MyTask.from_registry(...)` (eager) |
+| A body you hold yourself (`instances[i].body` of `tasks show --json`, `instance_body()`) | `sd.task_from_body(body, expected_task_id=...)`                                      |
+
+Key instances should also be **registered and annotated in the production
+environment** (or whichever matters) so they stay searchable there: the
+registry is the record of what ran, the store a reviewed, immutable copy.
+
+**Workflow** (docs: concepts "Stable References to Tasks"):
+
+1. Build it, or register without running: `sd.register(task, tags=[...],
+task_description="...")` (see Build Options below) — prints a pinned
+   `ref(...)` line and returns `TaskRef`s.
+2. Annotate: `stardag tasks annotate <id> --tag baseline -d "..."`, the UI
+   task page, or `registry.task_annotate(task_id, tags=..., description=...)`.
+   Tags/description belong to the task id, are mutable and outside every
+   hash: they never re-key. Tags are for discovery, ids are for code.
+3. Find: UI `/tasks` search (text, `#tag`, `id:` prefix, name, namespace,
+   status), or `stardag tasks list --tag T --namespace NS -s TEXT`.
+4. Pin: `stardag tasks ref <id>` (prints `MyTask.ref(...)`; the UI's
+   "Reference in code" copies the same) or `stardag tasks ref <id> --write`
+   (store copy; prints `from_store(...)`) / `sd.write_to_store(tasks)`
+   (returns `StoredTask`s; `print(stored)` gives the line).
+5. Use; test offline (store with `STARDAG_NO_REGISTRY=1`, or
+   `InMemoryRegistry.add_instance`).
+6. Compare two instances (e.g. before moving a pin): the UI's **Compare**
+   button on a task's parameters opens `/task-diff`.
+
+**Never derive an import path from a task's namespace.** A namespace is an
+identity, not a module path, even when `auto_namespace` produced it from
+one. Imports come from the store's recorded module hints, the package's
+`[tool.stardag] task_modules`, or an explicit `--module`. When generating
+code from a registry task, ask for (or look up) the defining module rather
+than guessing it from the namespace.
+
+**Environment scope.** `ref` / `from_registry` read the active profile's
+workspace and environment; a task registered in another environment is not
+found there. Pinned bodies are cached per profile partition under
+`~/.stardag/registry-cache/` (offline after one read; `stardag cache clear`,
+`STARDAG_REGISTRY_CACHE=0`). The store has no environment: it is read from
+the package.
+
+**Unpinned selection** (`ref`/`from_registry` without `instance_id`, and the
+default of `stardag tasks ref`): for a completed task, the instance its
+completing execution ran; otherwise the newest. `from_registry` asks every
+call; an unpinned **ref** memoizes its first hydration for the process (per
+class, task id, registry) until `sd.clear_hydration_memo()`. Pin.
+
 ### Task.ref (Reference Registered Tasks)
 
 Reference a task the registry already holds, by id, instead of
@@ -101,6 +159,24 @@ model.hydrate()                     # -> TrainedModel; model.load() delegates
 replace every reference with its hydrated task before registering;
 `sd.resolve_refs(tasks)` does it outside a build. `sd.AliasTask` is
 deprecated in favour of it.
+
+- A reference is a placeholder, not a proxy: read parameters off
+  `ref.hydrate()`; `ref.model_copy(update=...)` is refused (derive from
+  `ref.hydrate()`, or use `from_store`). It fits `sd.TaskLoads[T]` /
+  `sd.Depends[T]` and build roots, **not** a field annotated with the
+  concrete class.
+- Serializing a task holding an unhydrated ref (instance body, Modal
+  payload) raises `sd.TaskRefNotHydratedError`; a plain `model_dump()`
+  raises pydantic's `PydanticSerializationError` wrapping it. Hydration
+  failures raise `sd.TaskRefHydrationError` (an outage:
+  `sd.TaskRefRegistryUnavailableError`).
+- `build_spawn` / `build_remote` hydrate only from an explicit `registry=`
+  and refuse refs without one.
+- A field named `ref` (or `from_store`) shadows the method: use
+  `sd.task_ref(MyTask, task_id, instance_id=...)` /
+  `sd.task_from_store(MyTask, task_id, ...)`, or rename the field.
+- `sd.TaskRef` is the typed reference now; the old name/version/id/slug
+  dataclass is `sd.TaskSlug`.
 
 ### The Committed Task Store (Pinned, Long-Lived Instances)
 
@@ -314,10 +390,32 @@ print(summary.build_id)
 - **`on_registry_failure="warn"`** carries on through a registry _outage_; a _refusal_ (an
   instance conflict, a reserved settings key) always raises.
 
+### Registering Without Running (Plan-Only Builds)
+
+```python
+(model_ref,) = sd.register(TrainedModel(data=Dataset(size=3)),
+                           tags=["baseline"], task_description="Tuned baseline")
+# prints: Registered build ... (nothing was run): import + TrainedModel.ref("<id>", instance_id="<id>")
+summary = sd.build(task, plan_only=True)   # same; summary.status is BuildExitStatus.REGISTERED
+```
+
+- Registers the roots and their **whole static closure** (complete tasks expanded too) under the
+  build's scope; nothing is claimed or run. Returns one pinned `TaskRef` per root; refs given as
+  roots are hydrated first. `tags=` / `task_description=` annotate every root.
+  `sd.register_aio` is the async form.
+- `app_name=` registers under a deployed app's current deployment (the scope its reactive builds
+  plan under); with `sd.build(plan_only=True)`, pass a Modal `task_executor` instead.
+- The build ends in status `registered` (UI badge). One whose driver died stays `pending`
+  ("registration incomplete" in the UI); harmless, close it with `stardag builds cancel`.
+- Never carries on without the registry (`on_registry_failure` does not apply). An older registry
+  raises `sd.PlanOnlyUnsupportedError`: upgrade it (plan-only builds need a server newer than
+  `server-v0.8.0`).
+
 **Registry transport.** Every registry call retries a lost answer (timeout, network error, a
 body cut short, 502/503/504, Modal proxy 500) up to three times with jittered backoff, and
 waits out the registry's rate limit (429 `rate_limited`, at least `Retry-After`, about 150 s
-in total). An answer the server wrote (any other error) is never retried. Each retry is
+in total). An answer the server wrote (any other error) is never retried, except that a
+concurrency-limit delete whose first answer was lost reads the retry's 404 as done. Each retry is
 logged as a warning and counted:
 
 ```python

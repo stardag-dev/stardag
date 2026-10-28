@@ -74,7 +74,14 @@ print(root.load())  # 45
   every process of the build; may change structure and execution, never output.
 - **Deployments**: `stardag modal deploy` records one per deploy; a local build plans under
   one keyed on its code id. A build's scope is `(deployment, settings)`.
-- **Namespaces**: Organize tasks into logical groups via `sd.namespace()`
+- **Namespaces**: Organize tasks into logical groups via `sd.namespace()`. A namespace is an
+  identity, **never an import path**: do not derive a module to import from it.
+- **Referring to existing tasks**: never re-compose a built task from factories to load it (it
+  re-keys when they change). Pinned, long-lived instances: the committed task store,
+  `MyTask.from_store(...)` (eager). Ad hoc work in the current environment:
+  `MyTask.ref(...)` / `from_registry`. Register and tag key instances in production
+  (`sd.register`, `stardag tasks annotate`); find them with `stardag tasks list --tag`; pin with
+  `stardag tasks ref <id> [--write]`. See [sdk-core.md](sdk-core.md#referring-to-existing-tasks-which-handle).
 
 ## Three-Tier API Design
 
@@ -112,7 +119,9 @@ MyTask.from_store(task_id, instance_hash=...)  # Eager load from the committed t
 sd.task_from_store(MyTask, task_id)   # Same, for a class whose field shadows from_store
 sd.write_to_store(tasks)              # Write task trees into the store (no registry needed)
 MyTask.ref(task_id, instance_id=...)  # Typed reference to a registered task (ad hoc work)
+sd.task_ref(MyTask, task_id, instance_id=...)  # Same, for a class whose field shadows ref
 sd.resolve_refs(tasks)  # Hydrate every TaskRef in a DAG (builds do this)
+sd.clear_hydration_memo()  # Forget memoized hydrations (tests; re-choose unpinned refs)
 sd.AliasTask[T]         # Deprecated: use MyTask.ref
 sd.LoadValidator[T]     # Automatic validation on _save() and load()
 
@@ -133,6 +142,8 @@ sd.check_serialization_stability   # The registration-time round-trip check, for
 sd.build(tasks)         # Concurrent build (default); settings=, resume_build_id=, ...
 sd.build_aio(tasks)     # Async concurrent build
 sd.build_sequential()   # Sequential (debugging)
+sd.register(tasks, tags=[...], task_description=...)  # Register without running -> [TaskRef]
+sd.build(tasks, plan_only=True)  # Same, returns a BuildSummary (status REGISTERED)
 
 # Targets
 sd.get_file_target(relpath)       # File target factory
@@ -170,6 +181,9 @@ from stardag.testing import test_harness, InMemoryRegistry
 #  first constructed, not when it is defined: an abstract intermediate class is fine)
 sd.StardagError, sd.APIError, sd.AuthenticationError, sd.AuthorizationError
 sd.InstanceConflictError           # Two constructions of one task id in one build
+sd.TaskRefHydrationError           # A Task.ref could not be hydrated (outage: TaskRefRegistryUnavailableError)
+sd.TaskRefNotHydratedError         # Serializing a task that still holds an unhydrated ref
+sd.PlanOnlyUnsupportedError        # sd.register against a registry without plan-only builds
 sd.UnstableSerializationError      # A field whose dump is not a fixed point
 sd.ResumableInterruption           # The one you RAISE, after checkpointing
 from stardag.integration.modal import MODAL_INTERRUPTIONS  # what to catch

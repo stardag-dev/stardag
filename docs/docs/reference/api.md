@@ -38,6 +38,9 @@ Auto-generated API documentation from source code.
         - build_aio
         - build_sequential
         - build_sequential_aio
+        - register
+        - register_aio
+        - PlanOnlyUnsupportedError
         - namespace
         - auto_namespace
         - get_file_target
@@ -84,6 +87,15 @@ Auto-generated API documentation from source code.
         - RegistryABC
         - NoOpRegistry
         - registry_provider
+
+## Testing Module
+
+::: stardag.testing
+    options:
+      show_root_heading: true
+      members:
+        - InMemoryRegistry
+        - test_harness
 
 ## Configuration
 

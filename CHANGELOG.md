@@ -88,9 +88,10 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   only from an explicit `registry=` (they need no local registry
   otherwise), and refuse references without one; `build_trigger` hydrates
   from the registry it creates the build in. A reference cannot be
-  serialized except into its parent's task id: an instance body, a Modal
-  payload or a plain `model_dump()` of a task holding one raises
-  (`sd.TaskRefNotHydratedError`). Hydration failures, including an
+  serialized except into its parent's task id: an instance body or a Modal
+  payload of a task holding one raises `sd.TaskRefNotHydratedError` (a
+  plain `model_dump()` fails too, as pydantic's
+  `PydanticSerializationError` wrapping it). Hydration failures, including an
   unreachable registry, raise `sd.TaskRefHydrationError`, a
   `TaskRehydrationError`; an outage (unreachable, 5xx, 429) is the subclass
   `sd.TaskRefRegistryUnavailableError`, which a reactive tick retries rather
@@ -150,8 +151,9 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `stardag tasks ref <task-id> --write [--store DIR]` copies a registry
   instance after checking it rehydrates to its task id, and
   `sd.write_to_store(tasks)` writes from task objects with no registry;
-  both print the reader line, pinned by instance id (unverified metadata)
-  and instance hash (verified). The format is normalized and
+  both print the reader line, pinned by instance hash (verified; the
+  registry instance id stays in the file's `sources` as unverified
+  metadata, and `instance_id=` still selects by it). The format is normalized and
   content-addressed: one file per distinct instance body at
   `<namespace>.<Name>/<task_id>/<instance_hash>.json`, every nested task a
   pointer (`{"__stardag_task": {"task", "task_id", "instance_hash"}}`) to

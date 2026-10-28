@@ -2,7 +2,9 @@
 
 Point code at a task the registry already holds — a trained model, a
 curated dataset — by a stable, typed handle, instead of re-composing it
-from code that keeps evolving.
+from code that keeps evolving. For the overview — which handle to use, and
+the workflow from registering a task to pinning and testing it — see
+[Stable References to Tasks](../concepts/task-references.md).
 
 !!! tip "What you need to know"
 
@@ -199,10 +201,11 @@ or they refuse. To do it yourself — say, to inspect the DAG a build will see
 — call `sd.resolve_refs(tasks)`.
 
 A reference has no body, only its task id, so it serializes into nothing but
-its parent's id. An instance body, a Modal payload, or a plain `model_dump()`
-of a task holding an unhydrated reference raises
-`sd.TaskRefNotHydratedError` rather than producing a dump that could not be
-loaded back.
+its parent's id. An instance body or a Modal payload of a task holding an
+unhydrated reference raises `sd.TaskRefNotHydratedError` rather than
+producing a dump that could not be loaded back. A plain `model_dump()` /
+`model_dump_json()` fails too, but pydantic wraps the error in a
+`pydantic_core.PydanticSerializationError`.
 
 ## When hydration fails
 

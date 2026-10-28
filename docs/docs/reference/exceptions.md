@@ -13,6 +13,13 @@ StardagError
 │   └── TokenExpiredError
 ├── ResumableInterruption
 ├── ExecutionCancelled
+├── TaskRehydrationError
+│   ├── TaskClassNotRegisteredError
+│   └── TaskRefHydrationError
+│       └── TaskRefRegistryUnavailableError
+├── TaskRefNotHydratedError
+├── TaskStoreError
+├── PlanOnlyUnsupportedError
 └── ...
 ```
 
@@ -233,6 +240,39 @@ cancelled, or its build stopped running. See
 Like `ResumableInterruption`, it is an ordinary `Exception` rather than a
 `BaseException`, so it does not slip past your own error handling. A task
 that catches it should re-raise.
+
+## Task references and stored bodies
+
+Raised while rebuilding a task from a stored body, or handling a reference
+to one. See [Stable References to Tasks](../concepts/task-references.md).
+
+- **`TaskRehydrationError`**: a stored instance body could not be rebuilt
+  into its task (`sd.task_from_body`, `from_registry`), or no longer
+  recomputes to the expected task id.
+- **`TaskClassNotRegisteredError`**: the body names a task class, by
+  namespace and name, that is not imported, even after importing the
+  package's `[tool.stardag] task_modules`. The message names the class,
+  the patterns and any module that failed to import.
+- **`TaskRefHydrationError`**: a `Task.ref(...)` could not be hydrated: no
+  such task or instance in the registry's environment, another class, or a
+  body whose id moved. See
+  [When hydration fails](../how-to/reference-existing-tasks.md#when-hydration-fails).
+- **`TaskRefRegistryUnavailableError`**: the hydration failed because the
+  registry could not be reached (unreachable, 5xx, 429). Pin the
+  reference, so it is served from the local body cache after one read.
+- **`TaskRefNotHydratedError`**: a task holding an unhydrated reference was
+  serialized into an instance body or a Modal payload. Hydrate first, with
+  `ref.hydrate()` or `sd.resolve_refs(tasks)`; builds do it for you. A
+  plain pydantic `model_dump()` / `model_dump_json()` fails for the same
+  reason, but surfaces as `pydantic_core.PydanticSerializationError`
+  wrapping it.
+- **`TaskStoreError`**: the committed task store could not be read or
+  written: no store configured, no body of the task, a missing file, or a
+  hand-edited one. See
+  [Pin Tasks in a Committed Store](../how-to/committed-task-store.md).
+- **`PlanOnlyUnsupportedError`**: `sd.register` or
+  `sd.build(..., plan_only=True)` against a registry that predates
+  plan-only builds. Upgrade the registry.
 
 ## Common Error Scenarios
 

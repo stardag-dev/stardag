@@ -326,9 +326,19 @@ app = StardagApp(
     # watchdog_period_minutes=5,           # optional timed sweep (lapsed claims)
     # limit_key_selector=my_limit_keys,    # registry concurrency-limit keys per task
     # container_setup=my_container_setup,  # runs once in EVERY container
-    # task_modules=["my_pkg.tasks"],       # inferred from the app's package by default
+    # task_modules=["my_pkg.tasks", "!my_pkg.deploy"],  # inferred by default; "!" excludes
 )
 ```
+
+`task_modules` patterns are imported in every tick container: exclude (`!pattern`) a module
+that needs deploy-time environment at import. A module-level `from_store(...)` constant in a
+matched module needs the task store in the image (keep the store inside the package).
+
+**stardag on the image.** `with_stardag_on_image` with `local_stardag_source="auto"` installs
+the local source for an editable or source install, else the PyPI release matching
+`stardag.__version__`. A dev build's version is derived from the SDK's own `v*` tags only
+(before the fix it could be counted from a `server-v*` tag, pinning the image to an old PyPI
+release); a Modal Volume target's existence check retries a dropped stream.
 
 ```bash
 stardag modal deploy my_pkg/app.py   # records a deployment, deploys, activates it

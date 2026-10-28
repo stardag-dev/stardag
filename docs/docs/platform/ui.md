@@ -102,8 +102,17 @@ shows one completion:
   ended ones included — executor, worker, how it ended or what became of
   its claim, its build, and for Modal the call id with a link to the Modal
   dashboard and the full set of Modal identifiers.
+- **Tags and description**, edited in place. They belong to the task id,
+  never change it, and are what the Tasks search finds it by.
+- **Reference in code**: copies `MyTask.ref("<task_id>",
+instance_id="<instance_id>")` for a chosen instance. It prints no import
+  line, since a namespace is not an import path. See
+  [Stable References to Tasks](../concepts/task-references.md).
 - **Task Parameters**: the parameters of the instance the viewed plan
-  holds (or the newest). The info icon shows that instance's scope —
+  holds (or the newest), as a collapsible tree with a fuzzy search over
+  keys and values. **Compare** opens `/task-diff`, a structural diff
+  against an instance picked from a search pre-filtered to the same task
+  type. The info icon shows that instance's scope —
   deployment and settings hash — its hashes and times, and the task's other
   instances below it, with the parameters they differ in. Fullscreen lists
   every instance above the parameters of the selected one.
@@ -112,8 +121,11 @@ shows one completion:
   including reports the registry recorded but refused and structure
   divergences between scopes. Each event's build is a link.
 
-Tasks are reached from a build's plan, a link, or by pasting a task id on
-the Tasks page; search over task parameters is not available yet.
+The **Tasks** page searches the environment's tasks: free text (name,
+namespace or description), a task-id prefix (or `id:<prefix>`), exact name
+and namespace, `#tag` (all of them) and status. The search lives in the
+URL, so it can be shared. Search over parameter values is not available
+yet; tasks are also reached from a build's plan or a link.
 
 ## Deployments
 
