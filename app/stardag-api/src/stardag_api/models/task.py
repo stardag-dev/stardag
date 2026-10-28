@@ -23,6 +23,7 @@ from sqlalchemy import (
     Uuid,
     text,
 )
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from stardag_api.models.base import (
@@ -89,6 +90,36 @@ class Task(EnvironmentScopedMixin, Base):
         ),
         Index("ix_task_environment_status", "environment_id", "status", "status_at"),
         Index("ix_task_environment_name", "environment_id", "task_name"),
+        # ``GET /tasks`` (STA-149). ``tag=``: containment (``tags @>
+        # ARRAY[...]``).
+        Index("ix_task_tags", "tags", postgresql_using="gin"),
+        # ``q=``: ``ILIKE '%x%'`` on each of the three columns, OR-ed; one
+        # multicolumn trigram index serves all three (a BitmapOr of three
+        # scans of it), at one index write per row. Needs ``pg_trgm``, and
+        # 3+ characters to help.
+        Index(
+            "ix_task_search_trgm",
+            "task_name",
+            "task_namespace",
+            "description",
+            postgresql_using="gin",
+            postgresql_ops={
+                "task_name": "gin_trgm_ops",
+                "task_namespace": "gin_trgm_ops",
+                "description": "gin_trgm_ops",
+            },
+        ),
+        # ``id_prefix=``: ``LIKE 'abc%'``. Under a non-C collation the
+        # unique ``(environment_id, task_id)`` index cannot serve it.
+        Index(
+            "ix_task_environment_task_id_prefix",
+            "environment_id",
+            "task_id",
+            postgresql_ops={"task_id": "text_pattern_ops"},
+        ),
+        # The listing's order and keyset: ``ORDER BY status_at DESC, id
+        # DESC`` with ``(status_at, id) < (...)``, scanned backwards.
+        Index("ix_task_environment_status_at", "environment_id", "status_at", "id"),
         Index(
             "ix_task_running_claim_plan",
             "claim_plan_id",
@@ -138,5 +169,13 @@ class Task(EnvironmentScopedMixin, Base):
 
     # When the platform last reported a preemption: a restart is due.
     preempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # Annotations of the completion (STA-149): mutable, set by ``PATCH
+    # /tasks/{task_id}`` only, and outside every hash and every registration
+    # payload. ``tags`` is kept normalised (trimmed, deduplicated, sorted).
+    tags: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, default=list, server_default="{}"
+    )
+    description: Mapped[str | None] = mapped_column(Text)
 
     environment: Mapped[Environment] = relationship(back_populates="tasks")

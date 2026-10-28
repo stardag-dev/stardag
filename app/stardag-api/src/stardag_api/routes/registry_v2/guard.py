@@ -35,7 +35,9 @@ _READS = frozenset({"GET", "HEAD", "OPTIONS"})
 #: workload issues a fixed number of them per claim or per lease, so they
 #: get their own window, far above the limit (``limits.FINISHING_WRITES_*``)
 #: but still capped against a client looping on one. A ``yield`` is not
-#: here: it registers new tasks, which is new work.
+#: here: it registers new tasks, which is new work. Nor is an annotation
+#: (``PATCH /tasks/{task_id}``): a user's write that finishes nothing, so a
+#: script looping over it is throttled like any other.
 _EXEMPT = frozenset(
     {
         ("POST", "/plans/{plan_id}/members/{task_id}/complete"),

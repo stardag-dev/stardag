@@ -9,8 +9,8 @@ service's ``code`` as ``detail.code``.
 - ``builds``: a build, its plans, frontier, lifecycle, events and ledger
 - ``plans``: registration, plan reads, member transitions, ``/yield``,
   exclusion, artifact upload
-- ``tasks``: a completion, the listing by status, its executions, events,
-  artifacts, the claim renewal
+- ``tasks``: a completion, the filtered listing, its annotations, its
+  executions, events, artifacts, the claim renewal, one instance by id
 - ``executions``: an operator end of one execution
 - ``reactive``: wake-ups, the scheduler lease, reactive meta, tick summaries
 - ``scope``: deployments, settings, concurrency limits

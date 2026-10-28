@@ -379,6 +379,12 @@ class TaskInfo(_Response):
     claim_build_id: UUID | None = None
     #: The execution the task's claim names (live or lapsed), if any.
     execution_id: UUID | None = None
+    #: Annotations of the completion (``task_annotate``): normalised tags,
+    #: sorted, and a description. Mutable, outside every hash; tags are for
+    #: discovery, never for addressing. Empty against a registry that
+    #: predates them.
+    tags: list[str] = Field(default_factory=list)
+    description: str | None = None
     #: Filled by ``task_get`` only; ``task_list`` items carry none.
     instances: list["TaskInstanceInfo"] = Field(default_factory=list)
 

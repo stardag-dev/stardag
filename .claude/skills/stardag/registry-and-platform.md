@@ -59,6 +59,8 @@ Registry routes live under **`/api/v2`**; auth, UI, workspace and target-root ro
 | `/api/v2/builds/{id}/plans`, `/plans/{id}[/graph]`            | GET            | Plans, their members and instance edges                              |
 | `/api/v2/plans/{id}/members[/{task_id}/...]`                  | POST           | Register, seal, start (claim), complete, fail, yield, retry, exclude |
 | `/api/v2/tasks`, `/tasks/{id}[/executions,events,artifacts]`  | GET            | Tasks and their history                                              |
+| `/api/v2/tasks/{id}`                                          | PATCH          | Annotate a task: `{tags?, description?}`                             |
+| `/api/v2/instances/{id}`                                      | GET            | One instance (body, scope, task id)                                  |
 | `/api/v2/executions/{id}/stopped`                             | POST           | Record a stop (`stopped` / `lost`); `only_if_unspawned` conditional  |
 | `/api/v2/builds/{id}/{notify,scheduler-lease,tick-summaries}` | various        | Reactive scheduler: wake-up flag, lease, tick reports                |
 | `/api/v2/builds/wake-candidates`                              | POST           | Flagged builds no scheduler serves, handed out once per window       |
@@ -209,7 +211,9 @@ stardag deployments show <deployment-id>
 stardag executions list --build <build-id> [--include-ended] [--not-in-current-plan]
 stardag executions list --task <task-id>
 stardag tasks list [--status running]                 # Claim column names the holding build
-stardag tasks show <task-id> [--events N]             # status, claim holder, instances, executions
+stardag tasks list --tag best --namespace ml -s baseline    # discovery filters (all must hold)
+stardag tasks show <task-id> [--events N]             # status, claim holder, tags, instances, executions
+stardag tasks annotate <task-id> --tag best -d "Tuned baseline"   # adds a tag; --set-tags replaces; never re-keys
 stardag tasks check <task-id> --module mypkg.tasks    # run complete() locally; writes nothing
 stardag tasks ref <task-id> [--instance <id>]         # print a pinned MyTask.ref(...) line
 stardag tasks ref <task-id> --write [--store DIR]     # copy into the committed task store
@@ -306,7 +310,7 @@ default target root on a Modal volume, and a local SDK registry + profile named 
   moves); `build_config=` / `sd.build_config_scope` / `sd.get_build_config` /
   `sd.set_build_config` → `settings`, read through a settings class; `GlobalLockConfig` and
   the lock routes → gone (the claim is the only mutual exclusion); `stardag builds cleanup` →
-  gone; `stardag tasks list` filters by status only. Python 3.11+.
+  gone. Python 3.11+.
 - Removed errors: `RegistryTooOldError`, `SDKVersionUnsupportedError`, `ScopeMismatchError`,
   `BuildConfigMismatchError`.
 

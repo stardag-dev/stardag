@@ -221,6 +221,88 @@ class TestDeployments:
 
 
 class TestTasks:
+    def test_annotate_adds_removes_replaces_and_clears(
+        self, fake_registry, running_build
+    ):
+        leaf = str(running_build.leaf.id)
+
+        def annotate(*args: str) -> dict:
+            result = invoke("tasks", "annotate", leaf, *args, "--json")
+            assert result.exit_code == 0, result.output
+            return json.loads(result.stdout)
+
+        # --tag adds (like --add-tag), it does not replace.
+        added = annotate("--tag", "v2", "--tag", " best ", "-d", "A model.")
+        assert (added["tags"], added["description"]) == (["best", "v2"], "A model.")
+        assert "instances" not in added
+        assert annotate("--tag", "prod")["tags"] == ["best", "prod", "v2"]
+        edited = annotate("--add-tag", "x", "--remove-tag", "v2")
+        assert (edited["tags"], edited["description"]) == (
+            ["best", "prod", "x"],
+            "A model.",
+        )
+        replaced = annotate("--set-tags", "only", "--set-tags", "these")
+        assert replaced["tags"] == ["only", "these"]
+        cleared = annotate("--clear-tags", "--description", "")
+        assert (cleared["tags"], cleared["description"]) == ([], None)
+        (call,) = fake_registry.calls_to("task_annotate")[-1:]
+        assert call["tags"] == [] and call["description"] == ""
+        # Only the description: the tags are not sent.
+        annotate("-d", "again")
+        assert fake_registry.calls_to("task_annotate")[-1]["tags"] is ...
+
+        shown = json.loads(invoke("tasks", "show", leaf, "--json").stdout)
+        assert shown["tags"] == [] and shown["description"] == "again"
+
+    def test_annotate_text_output_escapes_markup(self, fake_registry, running_build):
+        leaf = str(running_build.leaf.id)
+        result = invoke("tasks", "annotate", leaf, "--set-tags", "[bold]x")
+        assert result.exit_code == 0, result.output
+        assert "[bold]x" in result.stdout
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            (),
+            ("--set-tags", "a", "--tag", "b"),
+            ("--clear-tags", "--remove-tag", "b"),
+            ("--set-tags", "a", "--clear-tags"),
+        ],
+    )
+    def test_annotate_usage_errors(self, fake_registry, running_build, args):
+        result = invoke("tasks", "annotate", str(running_build.leaf.id), *args)
+        assert result.exit_code == 2, result.output
+        assert fake_registry.calls_to("task_annotate") == []
+
+    def test_annotate_refusal_is_reported(self, fake_registry, running_build):
+        result = invoke(
+            "tasks", "annotate", str(running_build.leaf.id), "--set-tags", ""
+        )
+        assert result.exit_code == 1, result.output
+
+    def test_list_filters(self, fake_registry, running_build):
+        leaf, root = str(running_build.leaf.id), str(running_build.root.id)
+        fake_registry.task_annotate(leaf, tags=["best", "prod"], description="Tuned")
+        fake_registry.task_annotate(root, tags=["best"])
+
+        def listed(*args: str) -> list[str]:
+            result = invoke("tasks", "list", *args, "--json")
+            assert result.exit_code == 0, result.output
+            return sorted(t["task_id"] for t in json.loads(result.stdout)["tasks"])
+
+        assert listed("--tag", "best") == sorted([leaf, root])
+        assert listed("--tag", "best", "--tag", "prod") == [leaf]
+        assert listed("--search", "tuned") == [leaf]
+        assert listed("-s", "TUNED") == [leaf]
+        assert listed("--id-prefix", leaf[:10]) == [leaf]
+        assert listed("--name", "nope") == []
+        call = fake_registry.calls_to("task_list")[-1]
+        assert call["name"] == "nope" and call["tags"] is None
+        text = invoke("tasks", "list", "--tag", "prod")
+        assert text.exit_code == 0 and "best, prod" in text.stdout
+        short = invoke("tasks", "list", "--search", "tu")
+        assert short.exit_code == 2 and "at least 3" in short.output
+
     def test_show_task_instances_and_artifacts(self, fake_registry, running_build):
         leaf = str(running_build.leaf.id)
         fake_registry.task_upload_artifacts(

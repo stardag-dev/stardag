@@ -41,7 +41,7 @@ event (its native-enum mapping raises on the unknown label), so:
   enum label, so the two labels stay in the types, unused.
 
 Revision ID: 5f1b7c3e9a20
-Revises: 3c8e1a7d5b42
+Revises: 7584698b441f
 Create Date: 2026-10-28 12:00:00.000000
 
 """
@@ -53,7 +53,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "5f1b7c3e9a20"
-down_revision: Union[str, Sequence[str], None] = "3c8e1a7d5b42"
+down_revision: Union[str, Sequence[str], None] = "7584698b441f"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

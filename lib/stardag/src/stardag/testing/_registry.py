@@ -21,6 +21,7 @@ assertions.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from types import EllipsisType
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -44,15 +45,19 @@ from stardag.registry._models import DeploymentKind, StopOutcome
 from stardag.testing._registry_exclusion import ExclusionMixin
 from stardag.testing._registry_plans import plan_info
 from stardag.testing._registry_reactive import ReactiveMixin
+from stardag.registry._api_reads import _tag_list
 from stardag.testing._registry_reads import ReadsMixin
 from stardag.testing._registry_state import (
     TERMINAL_BUILD_STATUSES,
     ArtifactRow,
     BuildRow,
     DeploymentRow,
+    MAX_DESCRIPTION_LENGTH,
+    MAX_TAGS,
     Event,
     InstanceRow,
     TaskRow,
+    normalise_tags,
     refuse,
     refuse_plan_only,
     settings_hash,
@@ -450,6 +455,38 @@ class InMemoryRegistry(
         ]
         instances.reverse()
         return self._task_summary(task, instances=instances)
+
+    def task_annotate(
+        self,
+        task_id: str,
+        *,
+        tags: Sequence[str] | EllipsisType = ...,
+        description: str | None | EllipsisType = ...,
+    ) -> TaskInfo:
+        """Mirrors ``PATCH /tasks/{task_id}``: omitted fields unchanged,
+        tags normalised, a blank description cleared; neither the status
+        nor ``status_at`` moves."""
+        self._record(
+            "task_annotate", task_id=task_id, tags=tags, description=description
+        )
+        if tags is not ...:
+            tags = _tag_list(tags)
+        task = self.task(task_id)
+        # The request's own bounds, checked before normalising (duplicates
+        # and surrounding whitespace may make up the difference).
+        if (tags is not ... and len(tags) > 4 * MAX_TAGS) or (
+            isinstance(description, str)
+            and len(description) > 4 * MAX_DESCRIPTION_LENGTH
+        ):
+            raise refuse("validation_error", "request too large", status=422)
+        new_tags = normalise_tags(tags) if tags is not ... else task.tags
+        if description is not ...:
+            text = (description or "").strip()
+            if len(text) > MAX_DESCRIPTION_LENGTH or "\x00" in text:
+                raise refuse("invalid_description", status=422)
+            task.description = text or None
+        task.tags = new_tags
+        return self._task_summary(task)
 
     def task_list_artifacts(self, task_id: str) -> list[TaskArtifactInfo]:
         self.task(task_id)

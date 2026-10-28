@@ -1,6 +1,7 @@
 """``/api/v2`` routes of a task (a completion): one with its instances,
-the listing by status (paged), its executions across builds, its event
-log, its artifacts, and the claim renewal.
+the listing (paged; by status, name, namespace, tag, id prefix, free text),
+its annotations, its executions across builds, its event log, its
+artifacts, the claim renewal — and one instance by id.
 
 Thin by rule: parse, resolve the environment from the credentials, call
 one service, convert its result.
@@ -9,10 +10,12 @@ one service, convert its result.
 from __future__ import annotations
 
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Query
 
 from stardag_api.models import TaskStatus
+from stardag_api.services.errors import BadRequest
 from stardag_api.routes.registry_v2._common import (
     Auth,
     Cursor,
@@ -29,12 +32,15 @@ from stardag_api.schemas_v2 import (
 )
 from stardag_api.schemas_v2_reads import (
     EventListResponse,
+    InstanceResponse,
+    TaskAnnotateRequest,
     TaskArtifactListResponse,
     TaskListResponse,
     TaskResponse,
     TaskSummaryResponse,
 )
 from stardag_api.services import (
+    annotations,
     artifacts,
     executions,
     reads,
@@ -78,15 +84,70 @@ async def list_tasks(
     db: Db,
     auth: Auth,
     status: TaskStatus | None = None,
+    namespace: Annotated[str | None, Query(max_length=255)] = None,
+    name: Annotated[str | None, Query(max_length=255)] = None,
+    tag: Annotated[list[str] | None, Query()] = None,
+    id_prefix: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
+    q: Annotated[str | None, Query(min_length=3, max_length=255)] = None,
     limit: Limit = 100,
     cursor: Cursor = None,
 ):
+    """Completions, most recent status change first, a page at a time.
+    Filters AND together: ``namespace`` and ``name`` match exactly
+    (``namespace=`` is the root namespace); ``tag`` is repeatable and a task
+    must carry **all** of them; ``id_prefix`` matches the start of the task
+    id; ``q`` (3+ characters: a trigram index serves it) is a
+    case-insensitive substring of the name, the namespace or the
+    description. Pass the same filters with each ``cursor``."""
+    for param, value in (
+        ("namespace", namespace),
+        ("name", name),
+        ("id_prefix", id_prefix),
+        ("q", q),
+    ):
+        # Postgres ``text`` cannot hold U+0000: a 400, not a database error.
+        if value is not None and "\x00" in value:
+            raise BadRequest("invalid_filter", f"{param} must not contain NUL")
+    try:
+        tags = annotations.normalise_tags(tag) if tag else None
+    except ValueError as exc:
+        raise BadRequest("invalid_tag", str(exc)) from None
     page = await reads.list_tasks(
-        db, auth.environment_id, status=status, limit=limit, cursor=cursor
+        db,
+        auth.environment_id,
+        status=status,
+        namespace=namespace,
+        name=name,
+        tags=tags,
+        id_prefix=id_prefix,
+        q=q,
+        limit=limit,
+        cursor=cursor,
     )
     return TaskListResponse(
         tasks=[TaskSummaryResponse.model_validate(t) for t in page.tasks],
         next_cursor=page.next_cursor,
+    )
+
+
+@router.patch("/tasks/{task_id}", response_model=TaskSummaryResponse)
+async def annotate_task(task_id: str, body: TaskAnnotateRequest, db: Db, auth: Auth):
+    """Set a completion's annotations (tags, description); omitted fields
+    are left as they are. Counted against the workspace's write rate limit
+    like any write that is not finishing running work."""
+    return TaskSummaryResponse.model_validate(
+        await annotations.annotate_task(
+            db, auth.environment_id, task_id, body.changes()
+        )
+    )
+
+
+@router.get("/instances/{instance_id}", response_model=InstanceResponse)
+async def get_instance(instance_id: UUID, db: Db, auth: Auth):
+    """One instance of the caller's environment by its row id (404
+    ``unknown_instance`` otherwise)."""
+    return InstanceResponse.model_validate(
+        await reads.get_instance(db, auth.environment_id, instance_id)
     )
 
 

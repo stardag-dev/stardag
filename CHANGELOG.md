@@ -14,17 +14,6 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   namespace and name of any task class, nested ones included, whose module
   is not imported. Previously this needed the private `CONTEXT_MODE_KEY`.
   `task_from_registry_data` stays, as the same function.
-- **New: `from_registry(task_id, instance_id=...)` pins an instance**
-  (STA-147). Without `instance_id` it loads, for a completed task, the
-  instance of the execution that completed it (from
-  `GET /tasks/{id}/executions`, read by id even when it is not among the
-  newest listed), and otherwise the newest instance, as before; with it,
-  that instance, after checking it belongs to the task. The
-  registry client gains `task_instance_get(instance_id, *, task_id=None)`
-  (and `_aio`), reading `GET /instances/{id}`. Against a registry without
-  that route it reads the instance from `GET /tasks/{task_id}` instead, so
-  it needs no server upgrade when `task_id` is given (`from_registry` always
-  passes it). `TaskInstanceInfo` gains an optional `task_id`.
 - **New: a local cache of instance bodies** (STA-147), under
   `~/.stardag/registry-cache/`, partitioned by registry URL and by what
   decides the answering environment (the API key's fingerprint, or the
@@ -36,6 +25,33 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   unreadable or mismatching entry is discarded and re-read. Writes are
   atomic. `stardag cache clear [--all]` empties it;
   `STARDAG_REGISTRY_CACHE=0` turns it off.
+- **Added: task annotations and task search** (STA-149).
+  `registry.task_annotate(task_id, tags=..., description=...)` sets a
+  task's tags and description: an omitted argument is left unchanged,
+  `tags=[]` clears the tags and `description=None` the description.
+  `registry.task_list(...)` takes `namespace`, `name`, `tags` (all of
+  them), `id_prefix` and `q` (at least 3 characters; case-insensitive
+  substring of name, namespace or description). `TaskInfo` gains `tags`
+  and `description`, empty against an older registry. CLI: `stardag tasks
+annotate <id>`, where `--tag` (or `--add-tag`) and `--remove-tag` edit
+  the tags, `--set-tags` replaces them, `--clear-tags` empties them and
+  `--description` sets the description; `stardag tasks list` gains
+  `--tag`, `--name`, `--namespace`, `--id-prefix` and `--search`/`-s`;
+  `tasks show` and `tasks list` show the tags. Needs the matching server:
+  against an older registry, annotating fails with a clear error, and a
+  filtered list is refused rather than answered unfiltered (an unfiltered
+  list works as before).
+- **New: `from_registry(task_id, instance_id=...)` pins an instance**
+  (STA-147). Without `instance_id` it loads, for a completed task, the
+  instance of the execution that completed it (from
+  `GET /tasks/{id}/executions`, read by id even when it is not among the
+  newest listed), and otherwise the newest instance, as before; with it,
+  that instance, after checking it belongs to the task. The
+  registry client gains `task_instance_get(instance_id, *, task_id=None)`
+  (and `_aio`), reading `GET /instances/{id}`. Against a registry without
+  that route it reads the instance from `GET /tasks/{task_id}` instead, so
+  it needs no server upgrade when `task_id` is given (`from_registry` always
+  passes it). `TaskInstanceInfo` gains an optional `task_id`.
 - **New: `Task.ref(task_id, instance_id=None)`, a typed reference to a
   registered task** (STA-148). Code can point at a task the registry
   already holds (a trained model, a dataset) by id, instead of re-composing
@@ -194,6 +210,34 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### Server
 
+- **Added: task annotations, task search filters and an instance read**
+  (STA-149). A task (the completion) gains `tags` and `description`:
+  mutable annotations outside every hash and every registration payload,
+  set by `PATCH /tasks/{task_id}` with `{tags?, description?}`. An omitted
+  field is unchanged; `tags` replaces the set, last writer wins (no
+  server-side add/remove). Tags are trimmed, deduplicated and sorted, at
+  most 32 of at most 64 characters; a description is at most 4096. The
+  write counts against the workspace's write rate limit, like any write
+  that does not finish running work. `GET /tasks` filters by `namespace`
+  and `name` (exact), `tag` (repeatable, all of them), `id_prefix` and `q`
+  (3+ characters; case-insensitive substring of name, namespace or
+  description), and task summaries and details carry the annotations.
+  `GET /instances/{id}` returns one instance of the caller's environment:
+  `id`, `task_id`, `deployment_id`, `settings_hash`, `instance_hash`,
+  `body`, `created_at`, `expanded_at`. Migration: two columns (`tags`
+  defaults to empty, so existing tasks read as untagged) and four indexes
+  serving the listing: `(environment_id, status_at, id)` for its order
+  (the unfiltered listing no longer scans the table), a GIN index on
+  `tags`, a `pg_trgm` trigram index for `q` and a `text_pattern_ops`
+  index for `id_prefix`. **Needs the `pg_trgm` extension**, which the
+  migration creates if missing: it ships with the official Postgres images
+  and Debian's `postgresql`, and it is a trusted extension since Postgres
+  13, so the database owner can create it. The columns are added in one
+  short transaction under a 5 s `lock_timeout` (a catalog-only change);
+  the indexes are built `CONCURRENTLY`, so reads and writes to `task`
+  continue while they build, and a failed run can be re-run. Additive in
+  both directions of a rolling deploy; downgrade leaves `pg_trgm`
+  installed.
 - **Added: plan-only builds** (STA-150). `POST /builds` takes `plan_only`;
   such a build is created `pending` and is never `running`, so the frontier,
   claiming starts, wake-up flags, `wake-candidates` and `stalled-builds`,
