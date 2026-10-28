@@ -346,6 +346,46 @@ from.** One exemption exists and it is by type, not by phase:
 `RegistryContainerRecycled`, which is the recycle case and has a recovery of
 its own. A fixture failing to clean up is a real failure and ends the run.
 
+**On a PR run, the first real failure stops the run** (STA-172). The tier has
+one slot, and a run already decided red used to hold it until its slowest
+scenario finished — ten minutes and more, with every queued PR waiting. Now
+the first failure that no retry could rescue stops anything more from
+starting; the scenarios already running finish, since they are paid for and
+their logs are evidence, and the run ends red with no retry. Both decisions
+read one function, `_diagnostics.failure_class`, so the stop and the retry
+cannot disagree about what is retryable:
+
+| First attempt meets                                         | PR run                                          | Weekly or hand-run bare ref |
+| ----------------------------------------------------------- | ----------------------------------------------- | --------------------------- |
+| A real failure, any phase (assertion, HTTP status, XPASS …) | Stops now; in-flight scenarios finish; no retry | Full sweep; no retry        |
+| Only transport faults and/or a recycle                      | Continues, then the `--last-failed` retry       | The same                    |
+
+The run's annotation (`Registry-live stopped at the first real failure`) and
+the `Registry-live tier` status name the scenario and phase it stopped at, and
+the diagnostics artifact carries it as `stopped-at-real-failure`. Only the
+first attempt stops early: a retry runs only what failed, so it is short, and
+stopping it could leave a scenario unrun that it owed a result. If a run that
+stopped also identified a recycle, the recycle still wins — it explains the
+failure — but the retry then runs the whole tier, because `--last-failed`
+would never start the scenarios the stop skipped.
+
+**Why the stop needs the workers, not just xdist's controller.**
+`LoadScheduling` hands every worker its items up front — about two each in
+this tier, so everything is on a worker before the first scenario ends — and
+a controller-side stop (or `--maxfail`) only queues a shutdown _behind_ them.
+So the worker that failed stops itself, and the controller drops a stop file
+every worker checks before starting its next item.
+`registry_live/_stop_early.py` carries the mechanism, and
+`tests/test_registry_live_stop_early.py` proves it with a real `pytest -n 2`
+over dummy scenarios. It is enabled by `STARDAG_REGISTRY_LIVE_STOP_AT_REAL_FAILURE=1`,
+which CI sets on PR runs; locally it is off unless you set it.
+
+**The `registry-live-fail-fast` label is still there, for iterating.** It is
+blunter: it stops at the first failed scenario of _any_ kind, retryable
+included, kills the run without waiting for in-flight scenarios, and skips the
+retry — so a red run hands over its logs in minutes. Remove it before the
+final run, since it trades the retry away.
+
 **On a timeout the harness probes `/_harness/boot` before the scenario gives
 up.** It returns a closure variable and touches no database, so a probe that
 does not answer, or takes seconds to, means the container itself is not
