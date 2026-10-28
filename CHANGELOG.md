@@ -36,6 +36,19 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   unreadable or mismatching entry is discarded and re-read. Writes are
   atomic. `stardag cache clear [--all]` empties it;
   `STARDAG_REGISTRY_CACHE=0` turns it off.
+- **Fixed: a non-release build reported a version counted from the server's
+  tags** (STA-167). The SDK takes its version from git (hatch-vcs), and the
+  SDK (`vX.Y.Z`) and server (`server-vX.Y.Z`) tags sit on the same commits,
+  but nothing restricted the lookup to the SDK's own. So a git install, an
+  editable install or an image built from a checkout reported e.g.
+  `0.7.1.dev77+g…` (from `server-v0.7.0`) instead of `0.28.1.dev77+g…`, and a
+  non-editable install built from a full checkout exactly at a release commit
+  could report the server's `0.8.0` instead of `0.29.0`. In that last case
+  `with_stardag_on_image` under the default `local_stardag_source="auto"`
+  pinned the Modal image to that old PyPI release. Published releases were
+  unaffected: the release build checks out only the pushed tag. The version
+  lookup now considers `v*` tags only; the server's version
+  (`scripts/server-version.sh`) already considered only `server-v*`.
 - **New: `Task.ref(task_id, instance_id=None)`, a typed reference to a
   registered task** (STA-148). Code can point at a task the registry
   already holds (a trained model, a dataset) by id, instead of re-composing
@@ -172,6 +185,18 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   (STA-157), as a field named `ref` does: pydantic warns at class
   definition and pyright reports an incompatible override. Use
   `sd.task_from_store(MyTask, ...)` for such a class, or rename the field.
+
+### UI
+
+- Task parameters are shown as a collapsible, searchable tree instead of
+  raw JSON (STA-151): expand/collapse per node or all at once, sizes on
+  collapsed containers, nested task bodies labelled with their task name,
+  and copy value / copy JSON path per node. The search fuzzy-matches keys
+  and values in the manner of an editor's quick-open filter (characters
+  in order, case-insensitive, word starts and contiguous runs preferred),
+  highlights the matched characters, opens their ancestors and steps
+  through the matches best first. Keyboard: arrows move and fold, `c`
+  copies the focused value and `p` its path.
 
 ## [0.29.0] — 2026-10-28
 
