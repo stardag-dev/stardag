@@ -728,3 +728,41 @@ class TestRoundThree:
         assert PlainBase.ref(model.id).get_name() == "PlainBase"
         with pytest.raises(TypeError, match="call it on a reference"):
             TaskRef.get_name()
+
+
+class TestRoundFour:
+    def test_a_resolution_that_would_change_an_id_is_refused(self, model):
+        from typing import Annotated as A
+
+        class DefaultList(sd.Task[str]):
+            models: A[
+                list[sd.TaskLoads[str]], sd.StardagField(compat_default=[model])
+            ] = [model]
+
+            def run(self):
+                self._save("x")
+
+        registry = InMemoryRegistry()
+        _store(registry, model)
+        holder = DefaultList(models=[TrainedModel.ref(model.id)])
+        with pytest.raises(sd.TaskRefHydrationError, match="change its task id"):
+            resolve_refs(holder, registry)
+
+    def test_an_explicit_hydration_binds_the_reference(self, model):
+        registry = InMemoryRegistry()
+        _store(registry, model)
+        ref = TrainedModel.ref(model.id)
+        ref.hydrate(registry)
+        # No configured registry: the reference reads the one it was
+        # hydrated from.
+        assert ref.hydrate() == model
+        assert TrainedModel.ref(model.id) == ref
+        with pytest.raises(sd.TaskRefHydrationError, match="no registry"):
+            TrainedModel.ref(model.id).hydrate()
+
+    def test_a_hydration_outage_is_a_registry_outage(self):
+        from stardag._core.task_ref import TaskRefRegistryUnavailableError
+        from stardag.build._reactive._frontier_actions import is_registry_outage
+
+        assert is_registry_outage(TaskRefRegistryUnavailableError("down"))
+        assert not is_registry_outage(sd.TaskRefHydrationError("no such task"))

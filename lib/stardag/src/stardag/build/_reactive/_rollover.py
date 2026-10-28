@@ -26,6 +26,7 @@ from collections.abc import Callable
 from uuid import UUID
 
 from stardag import BaseTask, task_from_registry_data
+from stardag._core.task_ref import TaskRefRegistryUnavailableError
 from stardag.build._deployment import (
     DeploymentResolutionError,
     current_app_deployment_id_aio,
@@ -131,6 +132,11 @@ async def roll_over_aio(
             )
             if preflight is not None:
                 preflight(walk)
+        except TaskRefRegistryUnavailableError:
+            # A registry outage while hydrating a reference a requires()
+            # built: transient, so not a verdict on this code. Propagates to
+            # the tick's outage handling, and the rollover is retried.
+            raise
         except Exception as e:
             await _fail(registry, build_id, "planning under this code failed", e)
         try:

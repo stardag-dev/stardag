@@ -319,8 +319,11 @@ async def _discovery_job(
 
 def is_registry_outage(error: BaseException) -> bool:
     """Whether ``error`` is the registry not answering (unreachable, a 5xx,
-    a rate limit outlasting the client's retries) rather than refusing."""
-    if isinstance(error, (httpx.TransportError, RateLimitError)):
+    a rate limit outlasting the client's retries) rather than refusing.
+    Includes a ``TaskRef`` that could not be hydrated for that reason."""
+    if isinstance(
+        error, (httpx.TransportError, RateLimitError, TaskRefRegistryUnavailableError)
+    ):
         return True
     # Not every 429: a creation quota (``QuotaExceededError``) is a refusal
     # that lasts the day, and flagging for it would only repeat it.

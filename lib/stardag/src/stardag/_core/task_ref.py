@@ -337,7 +337,15 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
         """
         from stardag.registry import is_noop_registry, registry_provider
 
-        registry = registry if registry is not None else registry_provider.get()
+        if registry is None:
+            # The registry this very reference was last hydrated from, if
+            # any: a build hydrates a reference a task yields from the
+            # build's registry, and the task's own later ``ref.load()``
+            # must read that one, not the configured default.
+            bound: RegistryABC | None = vars(self).get(_BOUND_REGISTRY_KEY)
+            registry = bound if bound is not None else registry_provider.get()
+        else:
+            vars(self)[_BOUND_REGISTRY_KEY] = registry
         if is_noop_registry(registry):
             raise TaskRefHydrationError(
                 f"Cannot hydrate {self!r}: no registry is configured. A task "
@@ -529,6 +537,11 @@ def parametrized_ref_class(task_class: type) -> type[TaskRef[Any, Any]]:
     return result
 
 
+# Kept in a reference's ``__dict__`` (not a field: outside every dump, the
+# hash and equality, and not carried by ``model_copy`` or a pickle).
+_BOUND_REGISTRY_KEY = "_stardag_bound_registry"
+
+
 # -----------------------------------------------------------------------------
 # The per-process hydration memo
 # -----------------------------------------------------------------------------
@@ -676,6 +689,19 @@ def _resolve(value: Any, registry: Any, memo: dict[int, Any]) -> Any:
                     updates[name] = replaced
             if updates:
                 result = value.model_copy(update=updates)
+                if (
+                    isinstance(value, BaseTask)
+                    and isinstance(result, BaseTask)
+                    and result.id != value.id
+                ):
+                    raise TaskRefHydrationError(
+                        f"Hydrating the references in {type(value).__name__} "
+                        f"{value.id} would change its task id (to {result.id}): "
+                        "a field whose compat_default is a task, or contains "
+                        "tasks, compares the real task differently from its "
+                        "reference. Pass the hydrated task (ref.hydrate()) "
+                        "there, or drop the compat_default."
+                    )
     elif dataclasses.is_dataclass(value) and not isinstance(value, type):
         if contains_refs(value):
             changes = {}

@@ -85,6 +85,17 @@ class YieldsRef(sd.Task[str]):
         await self._save_aio("after the model")
 
 
+class YieldsAndLoadsRef(sd.Task[str]):
+    """Yields a reference, then loads it once resumed."""
+
+    model_id: str
+
+    async def run_aio(self):  # type: ignore[override]
+        model = TrainedModel.ref(self.model_id)
+        yield model
+        await self._save_aio(f"after {await model.load_aio()}")
+
+
 @pytest.fixture(autouse=True)
 def _fresh_memo():
     clear_hydration_memo()
@@ -212,3 +223,18 @@ def test_a_yielded_ref_is_hydrated_before_the_yield_is_registered(
     assert summary.status == BuildExitStatus.SUCCESS
     assert task.load() == "after the model"
     assert "task_class" not in json.dumps(_stored_bodies(registry))
+
+
+@pytest.mark.parametrize(
+    "engine",
+    [ENGINES["build_aio"], ENGINES["build_sequential_aio"]],
+    ids=["build_aio", "build_sequential_aio"],
+)
+def test_a_yielded_ref_loads_from_the_builds_registry_after_resumption(
+    engine, registry, trained
+):
+    """No configured registry: the reference the task yielded was hydrated
+    from the build's registry, and its own ``load()`` reads that one."""
+    task = YieldsAndLoadsRef(model_id=str(trained.id))
+    assert engine(task, registry).status == BuildExitStatus.SUCCESS
+    assert task.load() == "after model(6)"
