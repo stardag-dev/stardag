@@ -637,3 +637,94 @@ class TestReviewRoundTwo:
         assert len(both) == 2
         with pytest.raises(sd.TaskRefHydrationError, match="set"):
             resolve_refs(both, registry)
+
+
+class CustomLoad(sd.LoadableTask[int]):
+    """A ``LoadableTask`` with its own load, not a ``Task``."""
+
+    value: int
+
+    def complete(self) -> bool:
+        return True
+
+    def load(self) -> int:
+        return self.value
+
+    def run(self) -> None:
+        pass
+
+
+class PlainBase(sd.BaseTask):
+    """A plain ``BaseTask``: no declared loaded type."""
+
+    label: str
+
+    def complete(self) -> bool:
+        return True
+
+    def run(self) -> None:
+        pass
+
+
+class NeedsInt(sd.Task[float]):
+    number: sd.TaskLoads[int]
+
+    def run(self):
+        self._save(float(self.number.load()))
+
+
+class AnyUpstream(sd.Task[str]):
+    upstream: sd.SubClass[sd.BaseTask]
+
+    def run(self):
+        self._save("x")
+
+
+class TestEveryTaskClassHasRef:
+    def test_a_loadable_task_ref_keys_hydrates_and_loads(self):
+        real = CustomLoad(value=7)
+        ref = CustomLoad.ref(real.id)
+        assert type(ref).__name__ == "TaskRef[CustomLoad, int]"
+        assert NeedsInt(number=ref).id == NeedsInt(number=real).id
+        registry = InMemoryRegistry()
+        _store(registry, real)
+        assert ref.hydrate(registry) == real
+        with sd.registry_provider.override(registry):
+            assert ref.load() == 7
+
+    def test_a_plain_base_task_ref_fits_a_subclass_field(self):
+        real = PlainBase(label="p")
+        ref = PlainBase.ref(real.id)
+        assert AnyUpstream(upstream=ref).id == AnyUpstream(upstream=real).id
+        registry = InMemoryRegistry()
+        _store(registry, real)
+        (resolved,) = resolve_refs([AnyUpstream(upstream=ref)], registry)
+        assert resolved.upstream == real
+
+    def test_reference_line_for_every_kind_of_class(self):
+        for cls in (CustomLoad, PlainBase, TrainedModel):
+            assert reference_line(cls) == (
+                f"from {__name__} import {cls.__name__}",
+                cls.__name__,
+            )
+            assert hasattr(cls, "ref")
+
+
+class TestRoundThree:
+    def test_model_copy_with_an_update_is_refused(self, model):
+        ref = TrainedModel.ref(model.id)
+        with pytest.raises(
+            sd.TaskRefNotHydratedError, match=r"hydrate\(\)\.model_copy"
+        ):
+            ref.model_copy(update={"learning_rate": 0.9})
+        copied = ref.model_copy()
+        assert copied == ref and copied.id == model.id
+        assert type(copied) is type(ref)
+
+    def test_get_name_and_namespace_answer_for_the_referenced_class(self, model):
+        ref = TrainedModel.ref(model.id)
+        assert ref.get_name() == TrainedModel.get_name() == "TrainedModel"
+        assert ref.get_namespace() == TrainedModel.get_namespace()
+        assert PlainBase.ref(model.id).get_name() == "PlainBase"
+        with pytest.raises(TypeError, match="call it on a reference"):
+            TaskRef.get_name()

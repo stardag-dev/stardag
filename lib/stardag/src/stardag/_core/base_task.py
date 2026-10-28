@@ -21,6 +21,7 @@ from typing import (
 )
 
 if TYPE_CHECKING:
+    from stardag._core.task_ref import TaskRef
     from stardag.artifact import Artifact
     from stardag.registry import RegistryABC
 
@@ -35,7 +36,7 @@ from pydantic import (
     ValidationError,
     model_validator,
 )
-from typing_extensions import TypeAlias, Union
+from typing_extensions import Self, TypeAlias, Union
 
 from stardag._core.target_base import TargetType
 from stardag._core.task_id import _get_task_id_from_jsonable, instance_hash_of_body
@@ -480,6 +481,39 @@ class BaseTask(
         return self.artifacts()
 
     @classmethod
+    def ref(
+        cls,
+        task_id: UUID | str,
+        instance_id: UUID | str | None = None,
+    ) -> "TaskRef[Self, Any]":
+        """A reference to a task of this class that the registry holds.
+
+        Use it instead of re-composing a task from code whose defaults may
+        have moved on since it ran: the reference keeps pointing at that
+        exact task. Constructing it makes no registry call; its :attr:`id`
+        is ``task_id``, and a task given it as a dependency has the same id
+        as with the real task. A build hydrates it from the registry before
+        anything else; :meth:`TaskRef.hydrate` does so explicitly.
+
+        ``stardag tasks ref <task-id>`` prints this call for a registered
+        task.
+
+        Args:
+            task_id: The referenced task id.
+            instance_id: Pin one instance (recommended: its non-significant
+                fields are then fixed, and it is served from the local body
+                cache, offline). Default: the newest at hydration time.
+
+        Returns:
+            A ``TaskRef[Self, Any]``: for a class with no declared loaded
+            type (a plain ``BaseTask`` subclass), it fits any polymorphic
+            task field (``SubClass[BaseTask]``, ``TaskLoads[...]``).
+            ``LoadableTask`` (and so ``Task``) subclasses get the loaded
+            type instead.
+        """
+        return _make_ref(cls, task_id, instance_id)
+
+    @classmethod
     def has_dynamic_deps(cls) -> bool:
         # Check unwrapped functions since run/run_aio may be wrapped with precheck
         run_func = getattr(cls.run, "__wrapped__", cls.run)
@@ -708,6 +742,37 @@ class LoadableTask(BaseTask, abc.ABC, Generic[LoadedT_co]):
 
     __stardag_abstract__: ClassVar[bool] = True
 
+    @classmethod
+    def ref(
+        cls,
+        task_id: UUID | str,
+        instance_id: UUID | str | None = None,
+    ) -> "TaskRef[Self, LoadedT_co]":
+        """A reference to a task of this class that the registry holds.
+
+        Use it instead of re-composing a task from code whose defaults may
+        have moved on since it ran: the reference keeps pointing at that
+        exact task. Constructing it makes no registry call; its :attr:`id`
+        is ``task_id``, and a task given it as a dependency has the same id
+        as with the real task. A build hydrates it from the registry before
+        anything else; :meth:`TaskRef.hydrate` does so explicitly.
+
+        ``stardag tasks ref <task-id>`` prints this call for a registered
+        task.
+
+        Args:
+            task_id: The referenced task id.
+            instance_id: Pin one instance (recommended: its non-significant
+                fields are then fixed, and it is served from the local body
+                cache, offline). Default: the newest at hydration time.
+
+        Returns:
+            A ``TaskRef[Self, LoadedT]``, accepted wherever an
+            ``sd.TaskLoads[LoadedT]`` is, and rejected for another loaded
+            type.
+        """
+        return _make_ref(cls, task_id, instance_id)
+
     def load(self) -> LoadedT_co:
         """Load the output of this task (sync).
 
@@ -767,6 +832,18 @@ class TargetTask(BaseTask, Generic[TargetType]):
     def target(self) -> TargetType:
         """The task output target."""
         ...
+
+
+def _make_ref(
+    task_class: type[BaseTask], task_id: UUID | str, instance_id: UUID | str | None
+) -> Any:
+    from stardag._core.task_ref import parametrized_ref_class
+
+    return parametrized_ref_class(task_class)(
+        task_class=task_class,
+        task_id=UUID(str(task_id)),
+        instance_id=None if instance_id is None else UUID(str(instance_id)),
+    )
 
 
 def flatten_task_struct(task_struct: TaskStruct | None) -> list[BaseTask]:

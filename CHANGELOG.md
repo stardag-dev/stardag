@@ -45,8 +45,12 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   dependency has the same id as with the real task. `.hydrate()` reads the
   instance through `from_registry` (a pinned reference from the local body
   cache, offline after one read) and checks the class and the task id;
-  `complete()`, `target()` and `load()` delegate to it. See the new how-to,
-  "Reference Existing Tasks".
+  `complete()`, `target()` and `load()` delegate to it, and `get_name()` /
+  `get_namespace()` answer for the referenced class. Every task class has
+  `ref`: a `LoadableTask[T]` subclass gets `TaskRef[MyTask, T]`, a plain
+  `BaseTask` subclass `TaskRef[MyTask, Any]`. `ref.model_copy(update=...)`
+  is refused (derive from `ref.hydrate()`). See the new how-to, "Reference
+  Existing Tasks".
 - **New: builds hydrate references at start** (STA-148). `sd.build`,
   `build_aio`, the sequential builds, the Prefect build and the Modal
   triggers replace every

@@ -81,7 +81,11 @@ and the registry's stored body is the record of how it was constructed.
 - **Typed.** `TrainedModel.ref(...)` is a `TaskRef[TrainedModel, Model]`,
   a `Task[Model]`. A type checker accepts it wherever an
   `sd.TaskLoads[Model]` is expected and rejects it for any other loaded
-  type; `.hydrate()` returns a `TrainedModel`.
+  type; `.hydrate()` returns a `TrainedModel`. Every task class has
+  `.ref(...)`: a `LoadableTask[T]` subclass (custom target or `load()`)
+  gets a `TaskRef[MyTask, T]` too, and a plain `BaseTask` subclass, which
+  declares no loaded type, gets a `TaskRef[MyTask, Any]` that fits any
+  polymorphic task field (`sd.SubClass[sd.BaseTask]`).
 - **Free to construct.** It makes no registry call. Its `id` is the task id
   you gave it, and in a parent's hash it contributes `{"id": task_id}` —
   exactly what the real task contributes. So `Evaluate(model=ref)` has the
@@ -92,7 +96,11 @@ and the registry's stored body is the record of how it was constructed.
   `TrainedModel` with the referenced id. `complete()`, `target()` and
   `load()` hydrate and delegate, so `ref.load()` loads the model.
 - **A placeholder, not a proxy.** To read the referenced task's parameters,
-  call `.hydrate()` and read them off the result.
+  call `.hydrate()` and read them off the result. Class-level identity
+  (`get_name()`, `get_namespace()`) answers for the referenced class without
+  hydrating. To derive a new task from it, derive from the real one:
+  `ref.hydrate().model_copy(update=...)`; `ref.model_copy(update=...)` is
+  refused, since a reference has no parameters to update.
 
 ## Where a reference fits
 
@@ -154,9 +162,18 @@ loaded back.
 
 `sd.TaskRefHydrationError` names the reference and the reason:
 
-- **No registry configured, or the wrong one.** A reference is read from
-  the registry and environment the task was registered in; check the
-  active profile.
+- **No registry configured, or the wrong one.** A reference hydrates from
+  the registry and environment the build (or the active profile) uses.
+  Instance reads are scoped to one environment, so a reference to a task
+  registered in another environment of the same workspace does not hydrate:
+  it fails with `TaskRefHydrationError` saying the registry holds no such
+  task (or instance). Use the profile, or pass the registry, of the
+  environment the task was registered in.
+- **An old pinned instance on an older registry.** Against a registry that
+  predates `GET /instances/{id}`, a pinned instance is found through the
+  task's instance list, which serves the newest 500 instances only. An
+  instance older than that is reported as not found; upgrading the registry
+  fixes it.
 - **The registry cannot be reached.** An unpinned reference always asks the
   registry: pin it. A pinned one needs one online read before it is served
   from the local body cache (and every time, if the cache is turned off

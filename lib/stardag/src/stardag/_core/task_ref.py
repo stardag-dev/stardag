@@ -33,14 +33,17 @@ import threading
 import typing
 import warnings
 import weakref
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 from uuid import UUID
 
 import httpx
+from typing_extensions import Self
+
 from pydantic import (
     BaseModel,
+    ConfigDict,
     SerializationInfo,
     field_serializer,
     field_validator,
@@ -57,7 +60,7 @@ from stardag.target import LoadableSaveableFileSystemTarget
 if TYPE_CHECKING:
     from stardag.registry import RegistryABC
 
-TaskT = TypeVar("TaskT", bound=BaseTask)
+TaskT = TypeVar("TaskT", bound=BaseTask, covariant=True)
 
 
 class TaskRefNotHydratedError(StardagError):
@@ -85,6 +88,28 @@ class TaskRefRegistryUnavailableError(TaskRefHydrationError):
     answered with an outage (5xx, 429), after the client's own retries: a
     transient condition, not a verdict on the reference. A reactive tick
     retries it rather than excluding the task that built the reference."""
+
+
+class _ReferencedClassMethod:
+    """A class-level accessor (``get_name``, ``get_namespace``) that, read
+    off a reference, answers for the referenced class. ``TaskRef`` itself
+    is not a registered task class and has no identity of its own."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __get__(self, obj: Any, owner: Any = None) -> Callable[[], str]:
+        if obj is None:
+            name = self.name
+
+            def unbound() -> str:
+                raise TypeError(
+                    f"TaskRef.{name}() answers for the referenced class: call "
+                    "it on a reference, or on the task class itself."
+                )
+
+            return unbound
+        return getattr(obj.task_class, self.name)
 
 
 def unhydrated_ref_error(task: BaseTask) -> TaskRefNotHydratedError:
@@ -129,6 +154,7 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
     """
 
     __stardag_abstract__: ClassVar[bool] = True
+    model_config = ConfigDict(ignored_types=(_ReferencedClassMethod,))
 
     task_class: type
     task_id: UUID
@@ -204,6 +230,11 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
     def _contains_task_refs(self) -> bool:
         return True
 
+    # Class-level identity, answered for the referenced class (no I/O):
+    # generic code that walks a DAG and logs names works on a reference.
+    get_name = _ReferencedClassMethod("get_name")  # type: ignore[assignment]
+    get_namespace = _ReferencedClassMethod("get_namespace")  # type: ignore[assignment]
+
     def _hash_mode_finalize(self, data: dict[str, Any], info: SerializationInfo) -> Any:
         # What a real task contributes to its parent's hash.
         return {"id": str(self.task_id)}
@@ -226,6 +257,29 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
         if mode != "hash":
             raise unhydrated_ref_error(self)
         return data
+
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> Self:
+        """A copy of the reference; refused with an ``update``.
+
+        A reference has no parameters to update: its id is the pinned task
+        id whatever its fields say, so ``ref.model_copy(update=...)`` could
+        only return the same reference and silently drop the update, which
+        turns a ``model_copy`` derivation chain into copies of the
+        referenced task. Derive from the real task instead:
+        ``ref.hydrate().model_copy(update=...)``.
+        """
+        if update:
+            raise TaskRefNotHydratedError(
+                f"{self!r}.model_copy(update={dict(update)!r}): a task reference "
+                "has no parameters to update, so the update would be silently "
+                "dropped (the copy would still be the referenced task). Derive "
+                "from the real task: ref.hydrate().model_copy(update=...)."
+            )
+        return typing.cast(
+            Self, _rebuild_ref(self.task_class, self.task_id, self.instance_id)
+        )
 
     def __reduce__(self) -> tuple[Any, ...]:
         # A runtime-parametrized ``TaskRef[X, L]`` is not importable by
@@ -435,7 +489,7 @@ def _loaded_type(task_class: type) -> Any:
         origin, args, _ = _generic_meta(klass)
         if origin is None or not args:
             continue
-        if origin is Task:
+        if origin is Task or origin is LoadableTask:
             loaded = args[0]
         else:
             _, _, parameters = _generic_meta(origin)
@@ -444,7 +498,8 @@ def _loaded_type(task_class: type) -> Any:
                 (
                     _generic_meta(base)[1][0]
                     for base in origin.__mro__
-                    if _generic_meta(base)[0] is Task and _generic_meta(base)[1]
+                    if _generic_meta(base)[0] in (Task, LoadableTask)
+                    and _generic_meta(base)[1]
                 ),
                 None,
             )

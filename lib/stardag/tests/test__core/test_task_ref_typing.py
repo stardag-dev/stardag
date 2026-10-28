@@ -5,7 +5,7 @@ must be an error: its ``pyright: ignore`` would otherwise be reported as
 unnecessary (``reportUnnecessaryTypeIgnoreComment``, enabled above).
 """
 
-from typing import assert_type
+from typing import Any, assert_type
 
 import stardag as sd
 from stardag._core.task_ref import TaskRef
@@ -34,6 +34,43 @@ class Evaluate(sd.Task[float]):
         self._save(float(len(self.model.load())))
 
 
+class CustomLoad(sd.LoadableTask[int]):
+    """A ``LoadableTask`` with its own load, not a ``Task``."""
+
+    def complete(self) -> bool:
+        return True
+
+    def load(self) -> int:
+        return 1
+
+    def run(self) -> None:
+        pass
+
+
+class PlainBase(sd.BaseTask):
+    """A plain ``BaseTask``: no declared loaded type."""
+
+    def complete(self) -> bool:
+        return True
+
+    def run(self) -> None:
+        pass
+
+
+class NeedsInt(sd.Task[float]):
+    number: sd.TaskLoads[int]
+
+    def run(self) -> None:
+        self._save(float(self.number.load()))
+
+
+class AnyUpstream(sd.Task[str]):
+    upstream: sd.SubClass[sd.BaseTask]
+
+    def run(self) -> None:
+        self._save("x")
+
+
 def check_types() -> None:
     model_ref = TrainedModel.ref(ID, instance_id=ID)
     assert_type(model_ref, TaskRef[TrainedModel, str])
@@ -47,9 +84,20 @@ def check_types() -> None:
     Evaluate(model=model_ref)
     Evaluate(model=TrainedModel(data=data_ref))
 
+    # LoadableTask subclasses carry their loaded type; plain BaseTask
+    # subclasses have none (Any), and fit any polymorphic task field.
+    assert_type(CustomLoad.ref(ID), TaskRef[CustomLoad, int])
+    assert_type(CustomLoad.ref(ID).hydrate(), CustomLoad)
+    assert_type(PlainBase.ref(ID), TaskRef[PlainBase, Any])
+    NeedsInt(number=CustomLoad.ref(ID))
+    AnyUpstream(upstream=PlainBase.ref(ID))
+    AnyUpstream(upstream=CustomLoad.ref(ID))
+    assert_type(model_ref.get_name(), str)
+
     # Rejected where it does not.
     Evaluate(model=data_ref)  # pyright: ignore[reportArgumentType]
     TrainedModel(data=model_ref)  # pyright: ignore[reportArgumentType]
+    Evaluate(model=CustomLoad.ref(ID))  # pyright: ignore[reportArgumentType]
 
 
 def test_typing_module_imports() -> None:
