@@ -543,6 +543,19 @@ class TestRegister:
         assert exc.value.code == "invalid_tag"
         assert _only_build(registry).status == "registered"
 
+    async def test_a_bare_string_of_tags_is_refused_not_split(
+        self, default_in_memory_fs_target: Target
+    ):
+        registry = InMemoryRegistry()
+        _, _, root = _chain()
+        with pytest.raises(TypeError, match="sequence of strings"):
+            await sd.register_aio(
+                root,
+                registry=registry,
+                tags="prod",  # pyright: ignore[reportArgumentType]
+                echo=False,
+            )
+
     def test_the_sync_wrapper(self, default_in_memory_fs_target: Target, capsys):
         registry = InMemoryRegistry()
         _, _, root = _chain()

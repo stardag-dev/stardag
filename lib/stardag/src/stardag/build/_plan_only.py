@@ -359,7 +359,9 @@ async def _annotate(
         await asyncio.to_thread(
             registry.task_annotate,
             root.task_id,
-            tags=list(tags) if tags is not None else ...,
+            # Forwarded as given: the registry rejects a bare string rather
+            # than splitting it into characters.
+            tags=tags if tags is not None else ...,
             description=task_description if task_description is not None else ...,
         )
 

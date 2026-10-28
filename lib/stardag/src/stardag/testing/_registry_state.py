@@ -158,8 +158,6 @@ class TaskRow:
     #: Created by ``add_instance`` (a test seeding a body), which cannot
     #: know the output URI: the first registration of the task supplies it.
     seeded: bool = False
-    tags: list[str] = field(default_factory=list)
-    description: str | None = None
 
 
 @dataclass
