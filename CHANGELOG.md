@@ -4,10 +4,42 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
-## [Unreleased]
+## [0.30.0] — 2026-10-28
+
+SDK `0.30.0` and server `server-v0.9.0`: stable references to tasks. A typed
+`Task.ref`, a committed task store loaded with `from_store`, `sd.register` and
+plan-only builds, task tags and descriptions, task search, and a task diff
+view in the UI. Two SDK changes can break existing code: `stardag.TaskRef` is
+now the typed reference (the former dataclass is `stardag.TaskSlug`), and a
+task field named `ref` or `from_store` shadows the new methods. The server
+carries two migrations (task tags and description, with search indexes built
+concurrently; plan-only builds, with a new `registered` build status); once a
+`registered` build exists, rolling the image back needs the downgrade first.
+Tags, search, the instance read and plan-only builds need `server-v0.9.0`;
+references and the task store work against `server-v0.8.0`. See
+[RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **Breaking: the former `stardag.TaskRef` dataclass is `stardag.TaskSlug`**
+  (STA-148). `stardag.TaskRef` is now the typed reference above. The
+  dataclass (name, version, id and a `slug`) keeps its fields under the new
+  name, and `sd.TaskRef.from_task(task)` still returns one, with a
+  `DeprecationWarning`. Code constructing `sd.TaskRef(name=..., ...)`
+  directly now gets a `TypeError` naming `sd.TaskSlug`, and an
+  `isinstance(x, sd.TaskRef)` check for the old class no longer matches:
+  switch both to `sd.TaskSlug`. See RELEASE_NOTES.md.
+- **Breaking: a task field named `ref` now shadows the `ref` method**
+  (STA-148), which every task class has. Such a class still works, and its
+  field still holds its value, but pydantic warns at class definition
+  (`Field name "ref" ... shadows an attribute in parent`), pyright reports
+  an incompatible override of `ref` in that class, and the class has no
+  `.ref(...)`. Reference it with the new function form instead,
+  `sd.task_ref(MyTask, task_id, instance_id=...)`, or rename the field.
+- **Breaking: a task field named `from_store` now shadows the classmethod**
+  (STA-157), as a field named `ref` does: pydantic warns at class
+  definition and pyright reports an incompatible override. Use
+  `sd.task_from_store(MyTask, ...)` for such a class, or rename the field.
 - **New: `sd.task_from_body(body, expected_task_id=None)`** (STA-147), the
   public, documented way to rebuild a task from a stored instance body:
   compat-mode validation, the task id check, and an error naming the
@@ -36,30 +68,6 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   unreadable or mismatching entry is discarded and re-read. Writes are
   atomic. `stardag cache clear [--all]` empties it;
   `STARDAG_REGISTRY_CACHE=0` turns it off.
-- **Fixed: a non-release build reported a version counted from the server's
-  tags** (STA-167). The SDK takes its version from git (hatch-vcs), and the
-  SDK (`vX.Y.Z`) and server (`server-vX.Y.Z`) tags sit on the same commits,
-  but nothing restricted the lookup to the SDK's own. So a git install, an
-  editable install or an image built from a checkout reported e.g.
-  `0.7.1.dev77+g…` (from `server-v0.7.0`) instead of `0.28.1.dev77+g…`, and a
-  non-editable install built from a full checkout exactly at a release commit
-  could report the server's `0.8.0` instead of `0.29.0`. In that last case
-  `with_stardag_on_image` under the default `local_stardag_source="auto"`
-  pinned the Modal image to that old PyPI release. Published releases were
-  unaffected: the release build checks out only the pushed tag. The version
-  lookup now considers `v*` tags only; the server's version
-  (`scripts/server-version.sh`) already considered only `server-v*`.
-- **Fixed: a concurrency-limit delete could fail after it had succeeded**
-  (STA-174). When a delete's answer was lost (a timeout, a cut-short body,
-  a gateway error), the client's retry re-sent it, found no limit left to
-  delete, and raised `NotFoundError` for the delete the first attempt had
-  done. `concurrency_limit_delete` (and `stardag limits delete`) now reads
-  that 404 (`unknown_limit`) as success, only when it answers a retry of an
-  attempt that may have been delivered. A 404 on the first attempt still
-  raises, as does a 404 with any other code, and every other route is
-  unchanged: the other deletes (`build_clear_notify`,
-  `scheduler_lease_release`) answer a re-delivery normally and 404 only for
-  an unknown build.
 - **New: `Task.ref(task_id, instance_id=None)`, a typed reference to a
   registered task** (STA-148). Code can point at a task the registry
   already holds (a trained model, a dataset) by id, instead of re-composing
@@ -105,30 +113,6 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   stderr. An unpinned `TaskRef` and `from_registry` choose the same way,
   and `stardag tasks show` names the completing execution's instance.
   Against a registry without `GET /tasks/{id}/executions`, the newest.
-- **Changed: `from_registry` validates a body into the class it names**
-  (STA-148). A body of an unrelated class is refused by name rather than as
-  a task id mismatch, `Base.from_registry(...)` returns the concrete
-  subclass the task was registered as, and a nested task class whose
-  module is not imported is named.
-- **Deprecated: `AliasTask`** (STA-148), in favour of `Task.ref`.
-  Constructing one (or `AliasTask.from_registry`) emits a
-  `DeprecationWarning` once per process; validating a stored body never
-  does. It still works.
-- **Breaking: the former `stardag.TaskRef` dataclass is `stardag.TaskSlug`**
-  (STA-148). `stardag.TaskRef` is now the typed reference above. The
-  dataclass (name, version, id and a `slug`) keeps its fields under the new
-  name, and `sd.TaskRef.from_task(task)` still returns one, with a
-  `DeprecationWarning`. Code constructing `sd.TaskRef(name=..., ...)`
-  directly now gets a `TypeError` naming `sd.TaskSlug`, and an
-  `isinstance(x, sd.TaskRef)` check for the old class no longer matches:
-  switch both to `sd.TaskSlug`. See RELEASE_NOTES.md.
-- **Breaking: a task field named `ref` now shadows the `ref` method**
-  (STA-148), which every task class has. Such a class still works, and its
-  field still holds its value, but pydantic warns at class definition
-  (`Field name "ref" ... shadows an attribute in parent`), pyright reports
-  an incompatible override of `ref` in that class, and the class has no
-  `.ref(...)`. Reference it with the new function form instead,
-  `sd.task_ref(MyTask, task_id, instance_id=...)`, or rename the field.
 - **New: `sd.task_ref(task_class, task_id, instance_id=None)`** (STA-148),
   the function form of `task_class.ref(...)`: the same reference, typed as
   precisely (`TaskRef[MyTask, LoadedT]`, or `TaskRef[MyTask, Any]` for a
@@ -191,20 +175,6 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   registry. The store is that of the package whose code created the
   reference. An explicit `hydrate(registry=...)` skips it. Inside a remote
   container without the store, the registry is read as before.
-- **Fixed: `find_project_config` never returns `~/.stardag/config.toml`**,
-  which a working directory under the home directory used to find as a
-  project config.
-- **Breaking: a task field named `from_store` now shadows the classmethod**
-  (STA-157), as a field named `ref` does: pydantic warns at class
-  definition and pyright reports an incompatible override. Use
-  `sd.task_from_store(MyTask, ...)` for such a class, or rename the field.
-- **Fixed: a dropped connection to Modal could fail a build** (STA-169). An
-  existence check on an unmounted Modal Volume target lists the volume over
-  a streaming RPC, which Modal's client does not retry, so a reset stream
-  (`grpclib.exceptions.StreamTerminatedError`) escaped the check and ended
-  the build in discovery. The check now retries transient failures —
-  a reset stream, a connection error, `ServiceError`, `InternalError` —
-  under the same backoff and budget it already used for rate limits.
 - **Added: task annotations and task search** (STA-149).
   `registry.task_annotate(task_id, tags=..., description=...)` sets a
   task's tags and description: an omitted argument is left unchanged,
@@ -240,6 +210,49 @@ annotate <id>`, where `--tag` (or `--add-tag`) and `--remove-tag` edit
   `build_registered()`; `BuildInfo.plan_only`. **Needs a registry with
   plan-only builds** (this release's server); every other feature is
   unaffected against an older one.
+- **Changed: `from_registry` validates a body into the class it names**
+  (STA-148). A body of an unrelated class is refused by name rather than as
+  a task id mismatch, `Base.from_registry(...)` returns the concrete
+  subclass the task was registered as, and a nested task class whose
+  module is not imported is named.
+- **Deprecated: `AliasTask`** (STA-148), in favour of `Task.ref`.
+  Constructing one (or `AliasTask.from_registry`) emits a
+  `DeprecationWarning` once per process; validating a stored body never
+  does. It still works.
+- **Fixed: a non-release build reported a version counted from the server's
+  tags** (STA-167). The SDK takes its version from git (hatch-vcs), and the
+  SDK (`vX.Y.Z`) and server (`server-vX.Y.Z`) tags sit on the same commits,
+  but nothing restricted the lookup to the SDK's own. So a git install, an
+  editable install or an image built from a checkout reported e.g.
+  `0.7.1.dev77+g…` (from `server-v0.7.0`) instead of `0.28.1.dev77+g…`, and a
+  non-editable install built from a full checkout exactly at a release commit
+  could report the server's `0.8.0` instead of `0.29.0`. In that last case
+  `with_stardag_on_image` under the default `local_stardag_source="auto"`
+  pinned the Modal image to that old PyPI release. Published releases were
+  unaffected: the release build checks out only the pushed tag. The version
+  lookup now considers `v*` tags only; the server's version
+  (`scripts/server-version.sh`) already considered only `server-v*`.
+- **Fixed: a concurrency-limit delete could fail after it had succeeded**
+  (STA-174). When a delete's answer was lost (a timeout, a cut-short body,
+  a gateway error), the client's retry re-sent it, found no limit left to
+  delete, and raised `NotFoundError` for the delete the first attempt had
+  done. `concurrency_limit_delete` (and `stardag limits delete`) now reads
+  that 404 (`unknown_limit`) as success, only when it answers a retry of an
+  attempt that may have been delivered. A 404 on the first attempt still
+  raises, as does a 404 with any other code, and every other route is
+  unchanged: the other deletes (`build_clear_notify`,
+  `scheduler_lease_release`) answer a re-delivery normally and 404 only for
+  an unknown build.
+- **Fixed: `find_project_config` never returns `~/.stardag/config.toml`**,
+  which a working directory under the home directory used to find as a
+  project config.
+- **Fixed: a dropped connection to Modal could fail a build** (STA-169). An
+  existence check on an unmounted Modal Volume target lists the volume over
+  a streaming RPC, which Modal's client does not retry, so a reset stream
+  (`grpclib.exceptions.StreamTerminatedError`) escaped the check and ended
+  the build in discovery. The check now retries transient failures —
+  a reset stream, a connection error, `ServiceError`, `InternalError` —
+  under the same backoff and budget it already used for rate limits.
 
 ### Server
 
