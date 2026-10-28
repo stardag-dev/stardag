@@ -27,8 +27,11 @@ from stardag_integration_tests.registry_live._diagnostics import (
     CLASSIFICATION_FAILED,
     CONTAINER_SERVING,
     NON_TIMEOUT_MARKER_NAME,
+    REAL,
+    RETRYABLE,
     TIMEOUT_MARKER_NAME,
     BootProbe,
+    failure_class,
     record_non_timeout_failure,
     record_transport_timeout,
     transport_timeout,
@@ -924,3 +927,184 @@ def test_collection_failures_that_are_not_timeouts_are_left_alone(
     )
 
     assert list(tmp_path.iterdir()) == []
+
+
+# -- failure_class: the one decision the retry and the stop-early read --------
+#
+# Shared by the classifier that writes the retry markers and by the plugin
+# that stops a PR run at its first real failure (STA-172). The exclusions
+# above are what it inherits from ``transport_timeout``; these pin that it
+# does inherit them, and that the recycle is its only addition.
+
+
+def _wrapped_timeout() -> BaseException:
+    try:
+        try:
+            raise httpx.ReadTimeout("timed out", request=_REQUEST)
+        except httpx.ReadTimeout as timeout:
+            raise RuntimeError("build_start failed") from timeout
+    except RuntimeError as caught:
+        return caught
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(
+            _raised(httpx.ReadTimeout("timed out", request=_REQUEST)), id="timeout"
+        ),
+        pytest.param(
+            _raised(httpx.ConnectError("refused", request=_REQUEST)),
+            id="network-error",
+        ),
+        pytest.param(
+            _raised(httpx.RemoteProtocolError("cut short", request=_REQUEST)),
+            id="body-cut-short",
+        ),
+        pytest.param(_wrapped_timeout(), id="timeout-under-a-wrapper"),
+        pytest.param(
+            _raised(RegistryContainerRecycled("boot id changed")), id="recycle"
+        ),
+        pytest.param(
+            _raised(
+                ExceptionGroup(  # noqa: F821
+                    "teardown",
+                    [
+                        RegistryContainerRecycled("boot id changed"),
+                        httpx.ReadTimeout("timed out", request=_REQUEST),
+                    ],
+                )
+            ),
+            id="recycle-beside-a-timeout",
+        ),
+    ],
+)
+def test_the_two_retryable_failures(error: BaseException) -> None:
+    assert failure_class(error) == RETRYABLE
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(_raised(AssertionError("counter was 2")), id="assertion"),
+        pytest.param(
+            _raised(APIError("register failed", status_code=500)), id="status-error"
+        ),
+        pytest.param(
+            _raised(
+                httpx.HTTPStatusError(
+                    "401",
+                    request=_REQUEST,
+                    response=httpx.Response(401, request=_REQUEST),
+                )
+            ),
+            id="httpx-status-error",
+        ),
+        pytest.param(_raised(RuntimeError("no plan")), id="anything-else"),
+        pytest.param(
+            _raised(
+                ExceptionGroup(  # noqa: F821
+                    "teardown",
+                    [
+                        httpx.ReadTimeout("timed out", request=_REQUEST),
+                        RuntimeError("cleanup failed"),
+                    ],
+                )
+            ),
+            id="timeout-beside-a-real-failure",
+        ),
+        pytest.param(
+            _raised(
+                ExceptionGroup(  # noqa: F821
+                    "teardown",
+                    [
+                        RegistryContainerRecycled("boot id changed"),
+                        RuntimeError("cleanup failed"),
+                    ],
+                )
+            ),
+            id="recycle-beside-a-real-failure",
+        ),
+        pytest.param(None, id="no-exception-at-all"),
+    ],
+)
+def test_everything_else_is_real(error: BaseException | None) -> None:
+    assert failure_class(error) == REAL
+
+
+# -- A group's own cause and context are a chain, and carry the exclusions --
+
+
+def _group_chained_from(link: BaseException, *, explicit: bool) -> BaseException:
+    """A timeout-only group raised from (or while handling) ``link``."""
+    group = ExceptionGroup(  # noqa: F821
+        "teardown",
+        [
+            httpx.ReadTimeout("timed out", request=_REQUEST),
+            httpx.ReadTimeout("timed out again", request=_REQUEST),
+        ],
+    )
+    try:
+        try:
+            raise link
+        except BaseException as caught:
+            if explicit:
+                raise group from caught
+            raise group
+    except BaseException as raised:  # noqa: BLE001 - that is the point
+        return raised
+
+
+@pytest.mark.parametrize("explicit", [True, False], ids=["cause", "context"])
+@pytest.mark.parametrize(
+    "link",
+    [
+        pytest.param(lambda: AssertionError("counter was 2"), id="assertion"),
+        pytest.param(
+            lambda: APIError("register failed", status_code=500), id="status-error"
+        ),
+        pytest.param(
+            lambda: httpx.HTTPStatusError(
+                "401",
+                request=_REQUEST,
+                response=httpx.Response(401, request=_REQUEST),
+            ),
+            id="httpx-status-error",
+        ),
+    ],
+)
+def test_a_timeout_group_chained_from_a_real_result_is_real(link, explicit) -> None:
+    error = _group_chained_from(link(), explicit=explicit)
+    # The two consumers agree: the discriminator already rejects it.
+    assert transport_timeout(error) is None
+    assert failure_class(error) == REAL
+
+
+@pytest.mark.parametrize("explicit", [True, False], ids=["cause", "context"])
+def test_a_timeout_group_chained_from_a_recycle_stays_retryable(explicit) -> None:
+    error = _group_chained_from(
+        RegistryContainerRecycled("boot id changed"), explicit=explicit
+    )
+    assert failure_class(error) == RETRYABLE
+
+
+@pytest.mark.parametrize("explicit", [True, False], ids=["cause", "context"])
+def test_a_timeout_group_chained_from_a_plain_wrapper_stays_retryable(
+    explicit,
+) -> None:
+    # A non-timeout link that is not a real *result* does not veto, exactly
+    # as a wrapper does not veto in a chain.
+    error = _group_chained_from(RuntimeError("build_start failed"), explicit=explicit)
+    assert failure_class(error) == RETRYABLE
+
+
+def test_a_timeout_group_chained_from_a_group_with_a_real_member_is_real() -> None:
+    inner = ExceptionGroup(  # noqa: F821
+        "setup",
+        [
+            httpx.ReadTimeout("timed out", request=_REQUEST),
+            AssertionError("counter was 2"),
+        ],
+    )
+    error = _group_chained_from(inner, explicit=True)
+    assert failure_class(error) == REAL

@@ -1,26 +1,33 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useBreadcrumb } from "../context/BreadcrumbContext";
 import { useEnvironment } from "../context/EnvironmentContext";
 import { shortTaskId } from "../utils/ids";
+import { EMPTY_SEARCH, formatSearch, withTag } from "../utils/taskSearch";
 import { TaskDetail } from "./TaskDetail";
+import { TaskSearch } from "./TaskSearch";
 
 interface TaskPageProps {
-  // Null on `/tasks`: the lookup form.
+  // Null on `/tasks`: the search.
   taskId: string | null;
   onOpenTask: (taskId: string) => void;
   onOpenBuild?: (buildId: string) => void;
+  // Open the task search at a query string (`?tag=...`).
+  onSearchTasks?: (query: string) => void;
 }
 
 /**
- * A task page keyed by `task_id`, or — without one — a lookup by id. v2
- * keeps parameters on `task_instance.body` per scope and serves no search
- * over them yet, so tasks are reached from a build's plan, a pasted id, or
- * a link; the explorer returns with that route.
+ * A task page keyed by `task_id`, or — without one — the task search
+ * (name, namespace, tags, id prefix, free text). Search over task
+ * parameters is the explorer's, a later route.
  */
-export function TaskPage({ taskId, onOpenTask, onOpenBuild }: TaskPageProps) {
+export function TaskPage({
+  taskId,
+  onOpenTask,
+  onOpenBuild,
+  onSearchTasks,
+}: TaskPageProps) {
   const { activeEnvironment } = useEnvironment();
   const { setItems: setBreadcrumb } = useBreadcrumb();
-  const [input, setInput] = useState("");
 
   useEffect(() => {
     setBreadcrumb(
@@ -48,38 +55,22 @@ export function TaskPage({ taskId, onOpenTask, onOpenBuild }: TaskPageProps) {
           taskId={taskId}
           environmentId={activeEnvironment.id}
           onOpenBuild={onOpenBuild}
+          onSearchTag={
+            onSearchTasks
+              ? (tag) => onSearchTasks(formatSearch(withTag(EMPTY_SEARCH, tag)))
+              : undefined
+          }
         />
       </div>
     );
   }
+  // Keyed: a late read of the previous environment (the autocomplete seed
+  // included) can never land in the new one's search.
   return (
-    <div className="mx-auto max-w-xl space-y-3 p-6">
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          const id = input.trim();
-          if (id) onOpenTask(id);
-        }}
-        className="flex gap-2"
-      >
-        <input
-          aria-label="Task id"
-          placeholder="Task id…"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          className="min-w-0 flex-1 rounded-md border border-gray-300 px-3 py-1.5 font-mono text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100"
-        />
-        <button
-          type="submit"
-          className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700"
-        >
-          Open
-        </button>
-      </form>
-      <p className="text-sm text-gray-500 dark:text-gray-400">
-        Open a task by its id; tasks are also listed per build, in its plan. Search over
-        task parameters returns in a later release.
-      </p>
-    </div>
+    <TaskSearch
+      key={activeEnvironment.id}
+      environmentId={activeEnvironment.id}
+      onOpenTask={onOpenTask}
+    />
   );
 }

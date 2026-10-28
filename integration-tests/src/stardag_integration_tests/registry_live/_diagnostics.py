@@ -62,6 +62,7 @@ from .diagnose import BODY_CUT_SHORT
 from ._harness import (
     CLASSIFICATION_FAILED,
     Deployment,
+    RegistryContainerRecycled,
     read_boot_id,
     record_recycle,
 )
@@ -264,6 +265,76 @@ def probe_boot(
         boot_id=boot_id,
         error=None,
     )
+
+
+# The two answers ``failure_class`` gives. Strings rather than an enum
+# because they travel: the xdist worker that classified a failure hands the
+# answer to the controller on the report itself, and a report's user
+# properties are serialized across that boundary.
+RETRYABLE = "retryable"
+REAL = "real"
+
+
+def failure_class(error: BaseException | None) -> str:
+    """Whether a failure entitles the run to its retry: ``RETRYABLE`` or ``REAL``.
+
+    **The one decision both consumers read**, so they cannot drift apart:
+    the classifier in the tier's conftest, which writes the markers CI
+    keys its retry on, and the stop-early plugin (``_stop_early``), which
+    ends a PR run at its first failure that no retry could rescue.
+
+    Exactly two failures are retryable, and the list ends there:
+
+    - a **transport fault** -- no complete HTTP response arrived --
+      exactly as ``transport_timeout`` defines it, with its two
+      exclusions (an HTTP error status, an assertion);
+    - ``RegistryContainerRecycled``, whose own recovery re-provisions,
+      because a lost database explains every failure in the run.
+
+    Everything else is real, and that includes a failed report carrying
+    **no exception at all** (``error is None``): a strict ``xfail`` that
+    passed. Dropping it would leave the run retryable over an XPASS.
+    """
+    if error is None:
+        return REAL
+    return RETRYABLE if _retryable(error, set()) else REAL
+
+
+def _retryable(error: BaseException, groups_seen: set[int]) -> bool:
+    """One failure, or a group of independent ones, every one retryable.
+
+    A group is read member by member, as ``transport_timeout`` reads one:
+    pytest builds a group from several failing fixture finalizers, so a
+    recycle check and a cleanup that timed out can arrive together, and
+    each is retryable on its own terms. Any real member vetoes the group.
+
+    **A group's own cause and context are read too**, as a chain: they
+    describe the group, so an assertion or an HTTP error status anywhere
+    on them vetoes it exactly as it vetoes a timeout in
+    ``transport_timeout``. Without that, a group of timeouts raised while
+    handling an assertion was retryable here and rejected there -- so it
+    neither stopped the run nor left a marker forbidding the retry. A
+    recycle on those links stays exempt, as it is everywhere else.
+    """
+    members = _group_members(error)
+    if members is None:
+        if isinstance(error, RegistryContainerRecycled):
+            return True
+        return transport_timeout(error) is not None
+    if id(error) in groups_seen:
+        return True
+    groups_seen.add(id(error))
+    if not all(_retryable(member, groups_seen) for member in members):
+        return False
+    for linked in _chain(error):
+        if linked is error or isinstance(linked, RegistryContainerRecycled):
+            continue
+        if _group_members(linked) is not None:
+            if not _retryable(linked, groups_seen):
+                return False
+        elif _carries_http_status(linked) or isinstance(linked, AssertionError):
+            return False
+    return True
 
 
 def transport_timeout(error: BaseException) -> BaseException | None:

@@ -185,6 +185,13 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   (STA-157), as a field named `ref` does: pydantic warns at class
   definition and pyright reports an incompatible override. Use
   `sd.task_from_store(MyTask, ...)` for such a class, or rename the field.
+- **Fixed: a dropped connection to Modal could fail a build** (STA-169). An
+  existence check on an unmounted Modal Volume target lists the volume over
+  a streaming RPC, which Modal's client does not retry, so a reset stream
+  (`grpclib.exceptions.StreamTerminatedError`) escaped the check and ended
+  the build in discovery. The check now retries transient failures —
+  a reset stream, a connection error, `ServiceError`, `InternalError` —
+  under the same backoff and budget it already used for rate limits.
 - **Added: task annotations and task search** (STA-149).
   `registry.task_annotate(task_id, tags=..., description=...)` sets a
   task's tags and description: an omitted argument is left unchanged,
@@ -279,6 +286,19 @@ annotate <id>`, where `--tag` (or `--add-tag`) and `--remove-tag` edit
   highlights the matched characters, opens their ancestors and steps
   through the matches best first. Keyboard: arrows move and fold, `c`
   copies the focused value and `p` its path.
+- **Added: task search and annotation editing** (STA-152). `/tasks` is now
+  a search over `GET /tasks`: free text, a task-id prefix (anything that
+  looks like the start of an id, or `id:<prefix>`), exact name and
+  namespace, tags (all of them; `#tag` in the box, or click a tag) and
+  status, with "Load more" paging. The search lives in the URL, so it can
+  be shared and Back walks through it. Autocomplete suggests names,
+  namespaces and tags already seen in the environment, and recent searches;
+  there is no server suggestion route. The task page shows and edits the
+  task's tags and description in place (validated as the server normalises
+  them, rolled back if a save is refused), and a "Reference in code" box
+  copies `MyTask.ref("<task_id>", instance_id="<instance_id>")` for a
+  chosen instance, with an info link to the docs. No import line: a task's
+  namespace is not an import path.
 - Plan-only builds: a `registered` badge, and a plan-only build still
   `pending` (its driver died before it finished registering) is labelled
   "registration incomplete" (STA-150).

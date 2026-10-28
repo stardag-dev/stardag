@@ -299,8 +299,11 @@ export interface TaskInstance {
   created_at: string;
 }
 
-/** A completion with its instances in the environment, newest first. */
-export interface Task {
+/**
+ * A completion without its instances, as `GET /tasks` lists them and
+ * `PATCH /tasks/{id}` returns it.
+ */
+export interface TaskSummary {
   task_id: string;
   task_namespace: string;
   task_name: string;
@@ -319,7 +322,31 @@ export interface Task {
   claim_build_id: string | null;
   // The current execution (the claim's, while running).
   execution_id: string | null;
+  // Annotations: normalised tags (sorted) and a description. Mutable, set
+  // by `PATCH /tasks/{id}`, outside every hash. Optional on the wire for an
+  // older server, which sends neither.
+  tags?: string[];
+  description?: string | null;
+}
+
+/** A completion with its instances in the environment, newest first. */
+export interface Task extends TaskSummary {
   instances: TaskInstance[];
+}
+
+/** `GET /tasks`: most recent status change first, a page at a time. */
+export interface TaskListResponse {
+  tasks: TaskSummary[];
+  // Pass back as `cursor` (with the same filters); null on the last page.
+  next_cursor: string | null;
+}
+
+/** `PATCH /tasks/{id}`: an omitted field is left as it is. */
+export interface TaskAnnotations {
+  // Replaces the whole set; `[]` clears it.
+  tags?: string[];
+  // `null` or `""` clears it.
+  description?: string | null;
 }
 
 // ---- The event log ----
