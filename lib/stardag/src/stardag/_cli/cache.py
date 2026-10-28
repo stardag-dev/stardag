@@ -42,7 +42,7 @@ def cache_clear(
     registry, and clearing a local cache must work offline. Select another
     environment through its profile, or use ``--all``."""
     if all_partitions:
-        removed = _instance_cache.clear()
+        removed = _clear_or_exit(None)
         console.print(
             f"Removed {removed} cached instance bod{'y' if removed == 1 else 'ies'} "
             f"from {_instance_cache.cache_root()}."
@@ -57,8 +57,19 @@ def cache_clear(
             "partition."
         )
         raise typer.Exit(1)
-    removed = _instance_cache.clear(partition)
+    removed = _clear_or_exit(partition)
     console.print(
         f"Removed {removed} cached instance bod{'y' if removed == 1 else 'ies'} "
         f"from {_instance_cache.cache_root() / partition}."
     )
+
+
+def _clear_or_exit(partition: str | None) -> int:
+    """Clear, or report what could not be deleted and exit 1."""
+    try:
+        return _instance_cache.clear(partition)
+    except _instance_cache.CacheClearError as e:
+        error_console.print(f"[bold red]Cache clear incomplete:[/bold red] {e}")
+        for path, error in e.failed[:10]:
+            error_console.print(f"  {path}: {error}")
+        raise typer.Exit(1) from None

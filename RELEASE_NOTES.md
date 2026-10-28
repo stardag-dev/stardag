@@ -6,7 +6,24 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
-## Unreleased
+## v0.29.0 — Reactive builds that recover
+
+Released 2026-10-28 together with the registry server `server-v0.8.0`. Three
+behaviour changes can affect existing code; each has its own section below.
+
+### Upgrading
+
+- **Redeploy each Modal app** with `stardag modal deploy` after upgrading.
+  The tick and worker changes below (reconciliation, the worker rule,
+  resilience under the rate limit, the `retries` warning) run inside the
+  deployed app, so an app deployed with 0.28.0 keeps its old behaviour.
+- **The server upgrade** is one additive migration (one nullable column).
+  Against a `server-v0.7.0` registry the SDK keeps working, but upgrade
+  the server to get reconciliation: the older registry refuses the
+  conditional end of an unspawned claim, and a tick that is refused stops
+  reconciling for the rest of its run, recorded calls included. What it
+  leaves is left to the claim's TTL, as in 0.28.0. Self-hosted deployments upgrade with
+  `stardag self-host upgrade`, which now defaults to `0.8.0`.
 
 ### `stardag.TaskRef` is now the typed task reference; the old one is `TaskSlug`
 
@@ -102,6 +119,87 @@ Without it:
   (`stardag.cancellation_requested()`), and the preemption and timeout
   classification of an interrupted task, which is then recorded as an
   ordinary failure. Nothing is reported twice.
+
+### A raw value passed to `Depends[T]` is rejected under PEP 563
+
+In a module with `from __future__ import annotations`, `@task` read every
+parameter annotation as a string and never saw the `Depends` marker. A
+`Depends[T]` parameter then accepted a raw value as well as a task, and a
+correctly typed class task warned of a bogus generic mismatch. The decorator
+now resolves the annotations first, so such a module behaves exactly like
+one without the import: the warning is gone, and **passing a raw value where
+a `Depends[T]` task is expected is now rejected**, as it always was without
+the future import. Pass the task that produces the value instead.
+
+### A reactive worker whose start went unrecorded runs nothing
+
+A reactive tick now reconciles its build's claims at most once a minute. A
+claim whose Modal call returned or raised without reporting is ended and its
+task re-run or failed; a claim whose spawn never recorded a ref is ended after
+10 minutes (`unspawned_grace_seconds`), so a tick that died between claim and
+spawn no longer holds a task for the claim's full TTL.
+
+What makes the second case safe is a new rule for the worker: **a Modal worker
+whose start report gets no answer reads the ledger, and does not run the task
+unless its own ref is recorded there.** It reports nothing, and the tick
+re-drives the task, so a container that landed late can never run alongside
+its replacement. This is the one exception to stardag's fail-open start.
+
+`Runner` keeps the rule. A custom run function keeps the old claim-TTL
+behaviour for unspawned claims unless it declares `keeps_worker_rule = True`,
+which it should do only if it delegates to a `Runner`. The reconcile round is
+tuned by the new `TickConfig` settings `reconcile_interval_seconds` (60) and
+`unspawned_grace_seconds` (600).
+
+### The rate limit is retried, and the tick backs off under it
+
+The SDK re-sent a registry 429 only for the v1 code, so under the v2 server
+every rate-limited write failed at once, end reports and lease releases
+included, and orphaned claims stalled builds until the claims expired. A
+rate-limited request is now waited out (at least the server's `Retry-After`,
+at most about 150 s in total) and re-sent on every route. Waits are logged
+and counted under `HTTP 429` in `transport_retry_counts()`.
+
+A tick no longer abandons its other claims when one member's call fails. It
+admits spawns adaptively: after a rate-limited pass it admits half as many,
+growing back per clean pass. **The default `max_concurrent_actions` drops from
+50 to 16.** A tick that ends on a registry outage leaves its build flagged and
+spawns nothing; time-based recovery from there is the watchdog's, so deploy it
+for unattended builds. On the server side, the writes that finish running work
+(end reports, claim and lease renewals, lease release, notify) no longer
+count against the ordinary write limit.
+
+### `retries=` on a worker: what it recovers, and a deploy warning
+
+Under the default `Runner`, Modal's `retries` does **not** re-run a task that
+raised: the worker records the failure, which ends the execution. A retry
+re-runs the task only when the attempt recorded nothing (an exception before
+the failure report, or a function timeout the task did not catch). The docs
+said otherwise and are corrected. `stardag modal deploy` now warns about a
+self-reporting worker with `retries` above zero; it is a warning, not a
+refusal. Retry transient errors inside the task, and a real failure with
+`stardag tasks retry` or a re-trigger. `FunctionSettings.retries` also accepts
+a `modal.Retries` now.
+
+### Other fixes
+
+- A deployed resident builder (`build_spawn`, `build_remote`,
+  `build_trigger(reactive=False)`) claims detached executions with the
+  worker's timeout plus grace instead of the registry's one-hour default, so a
+  task running longer than an hour no longer loses its claim mid-run.
+- A hybrid `sd.build()` with Modal workers no longer fails a task that already
+  succeeded with "The claim moved on while the execution was being started".
+- `model_copy(deep=True, update=...)` works on pydantic 2.14 for a task with a
+  non-copyable cached value.
+- A detached claim always names its executor, so `stardag builds stop` and the
+  UI give a definite reason for each execution.
+
+### New public API
+
+- `TaskExecutorABC.detached_executor_name()`, `reconciles()` and
+  `probe_detached()` (implemented for Modal).
+- `reports_lifecycle` and `keeps_worker_rule` attributes on a run function.
+- `TickConfig.reconcile_interval_seconds` and `unspawned_grace_seconds`.
 
 ---
 

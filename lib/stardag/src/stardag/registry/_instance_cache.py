@@ -34,7 +34,6 @@ import hashlib
 import json
 import logging
 import os
-import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -180,17 +179,58 @@ def discard(partition: str, instance_id: UUID | str) -> bool:
     return _unlink(_entry_path(partition, instance_id))
 
 
+class CacheClearError(OSError):
+    """Some cache entries could not be deleted. ``removed`` counts the
+    entries that were; ``failed`` lists the ones still there."""
+
+    def __init__(self, removed: int, failed: list[tuple[Path, OSError]]):
+        self.removed = removed
+        self.failed = failed
+        first, error = failed[0]
+        super().__init__(
+            f"Could not delete {len(failed)} cached instance "
+            f"bod{'y' if len(failed) == 1 else 'ies'} (first: {first}: {error}); "
+            f"{removed} removed."
+        )
+
+
 def clear(partition: str | None = None) -> int:
     """Delete one partition's entries, or every partition's (``None``).
-    Returns the number of entries removed."""
+    Returns the number of entries removed.
+
+    Raises:
+        CacheClearError: An entry could not be deleted. A clear must not
+            report entries as removed while later loads can still read them.
+    """
     root = cache_root()
     targets = [_partition_dir(partition)] if partition is not None else [root]
     removed = 0
+    failed: list[tuple[Path, OSError]] = []
     for target in targets:
         if not target.exists():
             continue
-        removed += sum(1 for p in target.rglob("*.json") if p.is_file())
-        shutil.rmtree(target, ignore_errors=True)
+        for path in sorted(target.rglob("*.json")):
+            if not path.is_file():
+                continue
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as e:
+                failed.append((path, e))
+            else:
+                removed += 1
+        # Best effort: the directories left behind are empty, or hold only
+        # what could not be deleted (reported above), or stray temp files.
+        for directory in sorted(
+            (d for d in target.rglob("*") if d.is_dir()), reverse=True
+        ):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+    if failed:
+        raise CacheClearError(removed, failed)
     return removed
 
 
