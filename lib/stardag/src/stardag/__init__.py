@@ -59,6 +59,7 @@ from stardag._core.task_ref import (
     TaskRefRegistryUnavailableError,
     clear_hydration_memo,
     resolve_refs,
+    task_ref,
 )
 from stardag._core.validate import LoadValidator
 from stardag._core.task_loads import TaskLoads
@@ -148,6 +149,7 @@ __all__ = [
     "TaskRefRegistryUnavailableError",
     "TaskSlug",
     "resolve_refs",
+    "task_ref",
     "clear_hydration_memo",
     "TaskLoads",
     "TaskStruct",

@@ -307,7 +307,10 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
 
     def __repr__(self) -> str:
         pinned = f", instance_id={str(self.instance_id)!r}" if self.instance_id else ""
-        return f"{self.task_class.__name__}.ref({str(self.task_id)!r}{pinned})"
+        name = self.task_class.__name__
+        if ref_is_shadowed(self.task_class):
+            return f"sd.task_ref({name}, {str(self.task_id)!r}{pinned})"
+        return f"{name}.ref({str(self.task_id)!r}{pinned})"
 
     # -- hydration ------------------------------------------------------------
 
@@ -784,6 +787,26 @@ def reference_line(task_class: type) -> tuple[str | None, str]:
     return f"from {module} import {bound.partition('.')[0]}", bound
 
 
+def ref_is_shadowed(task_class: type) -> bool:
+    """Whether ``task_class`` declares a field named ``ref``, which hides
+    the ``ref`` method: such a class is referenced with
+    ``sd.task_ref(task_class, ...)``."""
+    return "ref" in (getattr(task_class, "model_fields", None) or {})
+
+
+def reference_call(
+    prefix: str, task_class: type | None, task_id: str, instance_id: str | None
+) -> str:
+    """The expression referencing a task, given the expression ``prefix``
+    naming its class (from :func:`reference_line`): ``Prefix.ref(...)``,
+    or ``sd.task_ref(Prefix, ...)`` for a class whose ``ref`` is shadowed
+    by a field."""
+    pinned = f', instance_id="{instance_id}"' if instance_id else ""
+    if task_class is not None and ref_is_shadowed(task_class):
+        return f'sd.task_ref({prefix}, "{task_id}"{pinned})'
+    return f'{prefix}.ref("{task_id}"{pinned})'
+
+
 def _bound_name(task_class: type, module_name: str) -> str | None:
     """The name ``task_class`` is reachable under from its module: its
     qualified name when that resolves to it, else a public module
@@ -806,3 +829,64 @@ def _bound_name(task_class: type, module_name: str) -> str | None:
         if value is task_class and not attribute.startswith("_"):
             return attribute
     return None
+
+
+# -----------------------------------------------------------------------------
+# The function form
+# -----------------------------------------------------------------------------
+
+_RefT_co = TypeVar("_RefT_co", bound=BaseTask, covariant=True)
+_RefL_co = TypeVar("_RefL_co", covariant=True)
+_RefB = TypeVar("_RefB", bound=BaseTask)
+
+
+class _LoadableTaskClass(typing.Protocol[_RefT_co, _RefL_co]):
+    """A task class seen statically: what it builds (``model_validate``
+    returns an instance of it) and what it loads (its ``load``). How
+    :func:`task_ref` reads both type arguments off one class argument."""
+
+    @property
+    def model_validate(self) -> Callable[..., _RefT_co]: ...
+
+    @property
+    def load(self) -> Callable[[Any], _RefL_co]: ...
+
+
+@typing.overload
+def task_ref(
+    task_class: _LoadableTaskClass[_RefT_co, _RefL_co],
+    task_id: UUID | str,
+    instance_id: UUID | str | None = None,
+) -> TaskRef[_RefT_co, _RefL_co]: ...
+
+
+@typing.overload
+def task_ref(
+    task_class: type[_RefB],
+    task_id: UUID | str,
+    instance_id: UUID | str | None = None,
+) -> TaskRef[_RefB, Any]: ...
+
+
+def task_ref(
+    task_class: Any,
+    task_id: UUID | str,
+    instance_id: UUID | str | None = None,
+) -> Any:
+    """``task_class.ref(task_id, instance_id)``, as a function.
+
+    The same reference, typed the same way (``TaskRef[MyTask, LoadedT]``
+    for a class that loads, ``TaskRef[MyTask, Any]`` for a plain
+    ``BaseTask`` subclass), for a class on which ``.ref`` is not the method:
+    one declaring a field named ``ref`` shadows it. Never reads
+    ``task_class.ref``.
+
+    Raises:
+        TypeError: ``task_class`` is not a task class, or is itself a
+            ``TaskRef``.
+    """
+    from stardag._core.base_task import _make_ref
+
+    if not (isinstance(task_class, type) and issubclass(task_class, BaseTask)):
+        raise TypeError(f"task_ref() needs a task class, got {task_class!r}")
+    return _make_ref(task_class, task_id, instance_id)

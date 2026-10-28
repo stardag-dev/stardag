@@ -10,7 +10,9 @@ each write is all-or-nothing, and the frontier is computed from the same
 rows the transitions write.
 
 Time is ``registry.clock`` (UTC-aware ``datetime``), replaceable so a test
-can let a claim lapse. Every call is recorded (:meth:`calls_to`) for
+can let a claim lapse. ``add_deployment`` and ``add_instance`` seed rows a
+build would otherwise have written (an instance body, for a test that
+hydrates a ``Task.ref`` or calls ``from_registry``). Every call is recorded (:meth:`calls_to`) for
 assertions.
 """
 
@@ -53,6 +55,8 @@ from stardag.testing._registry_state import (
     BuildRow,
     DeploymentRow,
     Event,
+    InstanceRow,
+    TaskRow,
     refuse,
     settings_hash,
 )
@@ -87,6 +91,63 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
         if activated and kind == "modal":
             self.deployment_activate(row.id)
         return row.id
+
+    def add_instance(
+        self,
+        body: Mapping[str, Any],
+        *,
+        task_id: str | UUID | None = None,
+        instance_id: UUID | None = None,
+        deployment_id: UUID | None = None,
+    ) -> TaskInstanceInfo:
+        """Seed one instance body, as if a build had registered it, without
+        running one: what a test of ``Task.ref`` / ``from_registry`` needs.
+
+        ``body`` is an instance body (``task.instance_body()``, or one read
+        from a registry). The task row is created when missing, with the
+        identity a registration would give it; ``task_id`` defaults to the
+        id the body recomputes to (its classes must be imported), and an
+        explicit one files the body under that id even if it recomputes to
+        another (to test a mismatch). Returns the instance, newest of its
+        task: an unpinned reference hydrates from it, a pinned one with its
+        ``id``.
+        """
+        from stardag._core.rehydrate import task_from_body
+        from stardag._core.task_id import canonical_body_json, instance_hash_of_body
+        from stardag.build._registration import _output_uri
+        from stardag.polymorphic import NAME_KEY, NAMESPACE_KEY
+
+        body = dict(body)
+        try:
+            task = task_from_body(body)
+        except Exception:
+            if task_id is None:
+                raise
+            task = None
+        if task_id is not None:
+            resolved_id = str(task_id)
+        else:
+            assert task is not None
+            resolved_id = str(task.id)
+        if resolved_id not in self.tasks:
+            self.tasks[resolved_id] = TaskRow(
+                resolved_id,
+                str(body.get(NAMESPACE_KEY, "")),
+                str(body.get(NAME_KEY, "")),
+                body.get("version"),
+                _output_uri(task) if task is not None else None,
+                status_at=self.now(),
+            )
+        row = InstanceRow(
+            instance_id or new_id(),
+            deployment_id or new_id(),
+            settings_hash({}),
+            str(instance_hash_of_body(canonical_body_json(body))),
+            resolved_id,
+            body,
+        )
+        self.instances[row.id] = row
+        return self.task_instance_get(row.id)
 
     def status_of(self, task_id: object) -> str:
         return self.task(str(task_id)).status

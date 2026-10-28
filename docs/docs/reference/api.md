@@ -22,6 +22,7 @@ Auto-generated API documentation from source code.
         - TaskRef
         - TaskSlug
         - resolve_refs
+        - task_ref
         - clear_hydration_memo
         - task_from_body
         - TaskRefHydrationError

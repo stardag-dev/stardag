@@ -71,6 +71,33 @@ class AnyUpstream(sd.Task[str]):
         self._save("x")
 
 
+def check_function_form() -> None:
+    """``sd.task_ref`` is as precise as the method."""
+    assert_type(sd.task_ref(TrainedModel, ID), TaskRef[TrainedModel, str])
+    assert_type(sd.task_ref(TrainedModel, ID).hydrate(), TrainedModel)
+    assert_type(sd.task_ref(CustomLoad, ID), TaskRef[CustomLoad, int])
+    assert_type(sd.task_ref(PlainBase, ID), TaskRef[PlainBase, Any])
+    Evaluate(model=sd.task_ref(TrainedModel, ID))
+    NeedsInt(number=sd.task_ref(CustomLoad, ID))
+    AnyUpstream(upstream=sd.task_ref(PlainBase, ID))
+    Evaluate(model=sd.task_ref(Dataset, ID))  # pyright: ignore[reportArgumentType]
+
+
+def check_shadowed_ref() -> None:
+    """A field named ``ref`` is an incompatible override of the method
+    (the documented breaking case); ``sd.task_ref`` still types the
+    reference. Never run: a class body here would warn at import."""
+
+    class ShadowsRef(sd.Task[int]):
+        ref: str = "main"  # pyright: ignore[reportIncompatibleMethodOverride]
+
+        def run(self) -> None:
+            self._save(1)
+
+    assert_type(sd.task_ref(ShadowsRef, ID), TaskRef[ShadowsRef, int])
+    NeedsInt(number=sd.task_ref(ShadowsRef, ID))
+
+
 def check_types() -> None:
     model_ref = TrainedModel.ref(ID, instance_id=ID)
     assert_type(model_ref, TaskRef[TrainedModel, str])

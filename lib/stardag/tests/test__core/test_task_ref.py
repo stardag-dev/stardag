@@ -23,6 +23,7 @@ from stardag._core.task_ref import (
     TaskRef,
     clear_hydration_memo,
     contains_refs,
+    reference_call,
     reference_line,
     resolve_refs,
 )
@@ -104,37 +105,8 @@ def _fresh_memo():
 
 
 def _store(registry: InMemoryRegistry, task: sd.BaseTask) -> UUID:
-    """Register ``task`` as one instance (no build): the row a build would
-    have written. Returns the instance id."""
-    instance_id = uuid4()
-    registry.instances[instance_id] = _instance_row(instance_id, task)
-    registry.tasks.setdefault(str(task.id), _task_row(registry, task))
-    return instance_id
-
-
-def _instance_row(instance_id: UUID, task: sd.BaseTask):
-    from stardag.testing._registry_state import InstanceRow
-
-    return InstanceRow(
-        id=instance_id,
-        deployment_id=uuid4(),
-        settings_hash="s",
-        instance_hash=str(task.instance_hash),
-        task_id=str(task.id),
-        body=task.instance_body(),
-    )
-
-
-def _task_row(registry: InMemoryRegistry, task: sd.BaseTask):
-    from stardag.testing._registry_state import TaskRow
-
-    return TaskRow(
-        task_id=str(task.id),
-        task_namespace=task.get_namespace(),
-        task_name=task.get_name(),
-        version=task.version,
-        output_uri=None,
-    )
+    """Seed ``task`` as one instance (no build). Returns the instance id."""
+    return registry.add_instance(task.instance_body()).id
 
 
 @pytest.fixture
@@ -766,3 +738,55 @@ class TestRoundFour:
 
         assert is_registry_outage(TaskRefRegistryUnavailableError("down"))
         assert not is_registry_outage(sd.TaskRefHydrationError("no such task"))
+
+
+class TestFunctionFormAndSeeding:
+    def test_task_ref_is_the_method_as_a_function(self, model):
+        assert sd.task_ref(TrainedModel, model.id) == TrainedModel.ref(model.id)
+        assert type(sd.task_ref(CustomLoad, model.id)) is type(CustomLoad.ref(model.id))
+        with pytest.raises(TypeError, match="needs a task class"):
+            sd.task_ref(int, model.id)  # type: ignore[call-overload]
+
+    def test_task_ref_works_when_a_field_shadows_ref(self):
+        with pytest.warns(UserWarning, match="shadows an attribute"):
+
+            class Checkout(sd.Task[int]):
+                ref: str = "main"  # pyright: ignore[reportIncompatibleMethodOverride]
+
+                def run(self):
+                    self._save(1)
+
+        real = Checkout(ref="v1")
+        assert real.ref == "v1"
+        reference = sd.task_ref(Checkout, real.id)
+        assert NeedsInt(number=reference).id == NeedsInt(number=real).id
+        assert repr(reference).startswith("sd.task_ref(Checkout, ")
+        registry = InMemoryRegistry()
+        _store(registry, real)
+        assert reference.hydrate(registry) == real
+        assert reference_call("Checkout", Checkout, "t", "i") == (
+            'sd.task_ref(Checkout, "t", instance_id="i")'
+        )
+
+    def test_add_instance_seeds_pinned_and_newest_reads(self, model):
+        registry = InMemoryRegistry()
+        older = registry.add_instance(
+            model.model_copy(update={"notes": "older"}).instance_body()
+        )
+        newest = registry.add_instance(model.instance_body())
+        assert older.task_id == newest.task_id == str(model.id)
+        pinned = TrainedModel.from_registry(model.id, registry, instance_id=older.id)
+        assert pinned.instance_body()["notes"] == "older"
+        newest_task = TrainedModel.from_registry(model.id, registry)
+        assert newest_task.instance_body()["notes"] == "first"
+        assert TrainedModel.ref(model.id, older.id).hydrate(registry).notes == "older"
+        info = registry.task_get(str(model.id))
+        assert info.task_name == "TrainedModel"
+        assert info.output_uri == model.target().uri
+
+    def test_add_instance_can_file_a_body_under_another_id(self, model):
+        registry = InMemoryRegistry()
+        stale = model.model_copy(update={"learning_rate": 0.9})
+        seeded = registry.add_instance(stale.instance_body(), task_id=model.id)
+        with pytest.raises(sd.TaskRefHydrationError, match="does not match"):
+            TrainedModel.ref(model.id, seeded.id).hydrate(registry)

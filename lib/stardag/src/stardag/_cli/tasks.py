@@ -348,14 +348,14 @@ def tasks_ref(
         instance_id = str(task.instances[0].id)
     else:
         _fail(StardagError(f"Task {task_id} has no instance to reference."))
-    from stardag._core.task_ref import reference_line
+    from stardag._core.task_ref import reference_call, reference_line
 
     cls = _registered_class(task.task_namespace, task.task_name)
     if cls is not None:
         import_line, prefix = reference_line(cls)
     else:
         import_line, prefix = None, task.task_name
-    ref_line = f'{prefix}.ref("{task.task_id}", instance_id="{instance_id}")'
+    ref_line = reference_call(prefix, cls, task.task_id, instance_id)
     if json_output:
         emit_json(
             {

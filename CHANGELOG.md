@@ -88,9 +88,22 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   directly now gets a `TypeError` naming `sd.TaskSlug`, and an
   `isinstance(x, sd.TaskRef)` check for the old class no longer matches:
   switch both to `sd.TaskSlug`. See RELEASE_NOTES.md.
-- **Note: a task field named `ref`** now shadows `Task.ref`: pydantic
-  warns at class definition, the field still works, and that class loses
-  `.ref(...)`.
+- **Breaking: a task field named `ref` now shadows the `ref` method**
+  (STA-148), which every task class has. Such a class still works, and its
+  field still holds its value, but pydantic warns at class definition
+  (`Field name "ref" ... shadows an attribute in parent`), pyright reports
+  an incompatible override of `ref` in that class, and the class has no
+  `.ref(...)`. Reference it with the new function form instead,
+  `sd.task_ref(MyTask, task_id, instance_id=...)`, or rename the field.
+- **New: `sd.task_ref(task_class, task_id, instance_id=None)`** (STA-148),
+  the function form of `task_class.ref(...)`: the same reference, typed as
+  precisely (`TaskRef[MyTask, LoadedT]`, or `TaskRef[MyTask, Any]` for a
+  plain `BaseTask` subclass), and usable when a field shadows `ref`.
+  `stardag tasks ref` prints it for such a class.
+- **New: `InMemoryRegistry.add_instance(body, *, task_id=None,
+instance_id=None)`** (STA-148) seeds an instance body without running a
+  build, so a test can hydrate a `Task.ref` (pinned or not) or call
+  `from_registry` against it.
 - **Corrected: a worker's `retries=` does not recover a task that raises**
   (STA-154). The docs and the `FunctionSettings.retries` docstring said
   Modal's retry covers an exception raised inside the container. Under the

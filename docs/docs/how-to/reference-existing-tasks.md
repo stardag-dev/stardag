@@ -187,6 +187,41 @@ loaded back.
   included, must be imported; the error names the missing namespace and
   class.
 
+## A class with a field named `ref`
+
+Every task class has the `ref` method, so a task that declares a field
+named `ref` (a git ref, say) shadows it: pydantic warns when the class is
+defined, a type checker reports the field as an incompatible override, and
+`MyTask.ref(...)` is the field, not the method. Reference such a class with
+the function form, which does the same and is typed the same:
+
+```{.python notest}
+import stardag as sd
+
+checkout = sd.task_ref(Checkout, "6f1c...", instance_id="0193...")
+```
+
+`sd.task_ref` works for any task class, so code that references classes it
+does not control can use it throughout. `stardag tasks ref` prints it for a
+class whose `ref` is shadowed.
+
+## Testing code that uses references
+
+`stardag.testing.InMemoryRegistry` holds instances without a server.
+`add_instance` seeds one from an instance body, without running a build,
+so a reference hydrates from it:
+
+```{.python notest}
+from stardag.testing import InMemoryRegistry
+
+registry = InMemoryRegistry()
+seeded = registry.add_instance(TrainedModel(...).instance_body())
+
+model = TrainedModel.ref(seeded.task_id, instance_id=seeded.id)
+assert model.hydrate(registry).learning_rate == 3e-4
+sd.build(Evaluate(model=model), registry=registry)
+```
+
 ## Migrating from `AliasTask`
 
 `AliasTask` is deprecated. It needed the loaded type pickled into its body,
