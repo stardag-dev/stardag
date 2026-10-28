@@ -30,11 +30,13 @@ So:
 1. The worker classifies its own failure, on the report (the exception
    does not survive the trip to the controller; the classification does,
    as a user property). A worker whose own item failed for real stops
-   itself at once.
+   itself at once, and drops a **stop file** whose path every worker was
+   handed at startup. Each worker checks for it after every item and
+   stops before starting the next.
 2. The controller, which sees every worker's reports, records the first
-   real failure, stops its scheduler, and drops a **stop file** whose
-   path every worker was handed at startup. Each worker checks for it
-   after every item and stops before starting the next.
+   real failure, writes the stop file as well (a crashed worker's report
+   is synthesized on the controller, with no worker to write it), stops
+   its scheduler, and writes the diagnostics marker.
 
 Without xdist (``-n0``) the one process is both, and pytest's own loop
 honours ``session.shouldstop``.
@@ -178,17 +180,16 @@ class StopAtRealFailure:
         # Anything else is real, including no classification at all.
         self.stopped_at = _describe(report)
         reason = f"stopped at the first real failure: {self.stopped_at}"
-        if self._is_worker:
-            # This worker's own item: stop it now, without waiting on the
-            # controller to round-trip the stop file.
-            self._stop(reason)
-            return
+        # The stop file is published from *both* sides. The worker whose
+        # item failed writes it at once, so a peer finishing between this
+        # report and the controller processing it cannot start a queued
+        # scenario in that gap; the controller writes it too, which covers a
+        # failure no worker classified (a crash report it synthesized).
         self._stop(reason)
-        if self._stop_file is not None:
-            try:
-                self._stop_file.write_text(reason + "\n")
-            except OSError as failure:  # pragma: no cover - best effort
-                print(f"Could not write the stop file: {failure}", file=sys.stderr)
+        self._publish_stop(reason)
+        if self._is_worker:
+            # The marker and the scheduler are the controller's.
+            return
         # The scheduler stops handing out items. Under the tier's numbers it
         # has usually handed out everything already -- the stop file above is
         # what holds the workers -- but a larger collection would not have.
@@ -196,6 +197,14 @@ class StopAtRealFailure:
         if dsession is not None and not getattr(dsession, "shouldstop", True):
             dsession.shouldstop = reason
         self._write_marker(report, kind)
+
+    def _publish_stop(self, reason: str) -> None:
+        if self._stop_file is None:
+            return
+        try:
+            self._stop_file.write_text(reason + "\n")
+        except OSError as failure:  # pragma: no cover - best effort
+            print(f"Could not write the stop file: {failure}", file=sys.stderr)
 
     def _write_marker(self, report: pytest.TestReport, kind: object) -> None:
         directory = os.environ.get(DIAGNOSTICS_DIR_ENV, "").strip()

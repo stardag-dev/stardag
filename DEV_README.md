@@ -392,8 +392,8 @@ would never start the scenarios the stop skipped.
 `LoadScheduling` hands every worker its items up front — about two each in
 this tier, so everything is on a worker before the first scenario ends — and
 a controller-side stop (or `--maxfail`) only queues a shutdown _behind_ them.
-So the worker that failed stops itself, and the controller drops a stop file
-every worker checks before starting its next item.
+So the worker that failed stops itself and drops a stop file, which every
+worker checks before starting its next item; the controller writes it too.
 `registry_live/_stop_early.py` carries the mechanism, and
 `tests/test_registry_live_stop_early.py` proves it with a real `pytest -n 2`
 over dummy scenarios. It is enabled by `STARDAG_REGISTRY_LIVE_STOP_AT_REAL_FAILURE=1`,
