@@ -88,9 +88,10 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   only from an explicit `registry=` (they need no local registry
   otherwise), and refuse references without one; `build_trigger` hydrates
   from the registry it creates the build in. A reference cannot be
-  serialized except into its parent's task id: an instance body, a Modal
-  payload or a plain `model_dump()` of a task holding one raises
-  (`sd.TaskRefNotHydratedError`). Hydration failures, including an
+  serialized except into its parent's task id: an instance body or a Modal
+  payload of a task holding one raises `sd.TaskRefNotHydratedError` (a
+  plain `model_dump()` fails too, as pydantic's
+  `PydanticSerializationError` wrapping it). Hydration failures, including an
   unreachable registry, raise `sd.TaskRefHydrationError`, a
   `TaskRehydrationError`; an outage (unreachable, 5xx, 429) is the subclass
   `sd.TaskRefRegistryUnavailableError`, which a reactive tick retries rather

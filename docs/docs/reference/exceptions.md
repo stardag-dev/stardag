@@ -261,9 +261,11 @@ to one. See [Stable References to Tasks](../concepts/task-references.md).
   registry could not be reached (unreachable, 5xx, 429). Pin the
   reference, so it is served from the local body cache after one read.
 - **`TaskRefNotHydratedError`**: a task holding an unhydrated reference was
-  serialized (an instance body, a Modal payload, `model_dump()`). Hydrate
-  first, with `ref.hydrate()` or `sd.resolve_refs(tasks)`; builds do it for
-  you.
+  serialized into an instance body or a Modal payload. Hydrate first, with
+  `ref.hydrate()` or `sd.resolve_refs(tasks)`; builds do it for you. A
+  plain pydantic `model_dump()` / `model_dump_json()` fails for the same
+  reason, but surfaces as `pydantic_core.PydanticSerializationError`
+  wrapping it.
 - **`TaskStoreError`**: the committed task store could not be read or
   written: no store configured, no body of the task, a missing file, or a
   hand-edited one. See

@@ -92,11 +92,11 @@ re-keys (new task id: a new, unbuilt task) as soon as a factory or a default
 it is built from changes. The durable record is the stored instance body,
 read back in compat mode. Pick the handle by use:
 
-| Use                                                               | Handle                                                                               |
-| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| Pinned, long-lived instance in code (key dataset, trained model)  | `MyTask.from_store(task_id, instance_hash=...)`: committed task store, **eager**     |
-| Ad hoc (a notebook loading an asset already built in this env)    | `MyTask.ref(task_id, instance_id=...)` (lazy) or `MyTask.from_registry(...)` (eager) |
-| A body you hold yourself (`tasks show --json`, `instance_body()`) | `sd.task_from_body(body, expected_task_id=...)`                                      |
+| Use                                                                                      | Handle                                                                               |
+| ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Pinned, long-lived instance in code (key dataset, trained model)                         | `MyTask.from_store(task_id, instance_hash=...)`: committed task store, **eager**     |
+| Ad hoc (a notebook loading an asset already built in this env)                           | `MyTask.ref(task_id, instance_id=...)` (lazy) or `MyTask.from_registry(...)` (eager) |
+| A body you hold yourself (`instances[i].body` of `tasks show --json`, `instance_body()`) | `sd.task_from_body(body, expected_task_id=...)`                                      |
 
 Key instances should also be **registered and annotated in the production
 environment** (or whichever matters) so they stay searchable there: the
@@ -115,7 +115,8 @@ task_description="...")` (see Build Options below) — prints a pinned
    status), or `stardag tasks list --tag T --namespace NS -s TEXT`.
 4. Pin: `stardag tasks ref <id>` (prints `MyTask.ref(...)`; the UI's
    "Reference in code" copies the same) or `stardag tasks ref <id> --write`
-   / `sd.write_to_store(task)` (store copy; prints `from_store(...)`).
+   (store copy; prints `from_store(...)`) / `sd.write_to_store(tasks)`
+   (returns `StoredTask`s; `print(stored)` gives the line).
 5. Use; test offline (store with `STARDAG_NO_REGISTRY=1`, or
    `InMemoryRegistry.add_instance`).
 6. Compare two instances (e.g. before moving a pin): the UI's **Compare**
@@ -137,8 +138,9 @@ the package.
 
 **Unpinned selection** (`ref`/`from_registry` without `instance_id`, and the
 default of `stardag tasks ref`): for a completed task, the instance its
-completing execution ran; otherwise the newest. Pin unless the choice
-should be made again on every load.
+completing execution ran; otherwise the newest. `from_registry` asks every
+call; an unpinned **ref** memoizes its first hydration for the process (per
+class, task id, registry) until `sd.clear_hydration_memo()`. Pin.
 
 ### Task.ref (Reference Registered Tasks)
 
@@ -164,7 +166,8 @@ deprecated in favour of it.
   `sd.Depends[T]` and build roots, **not** a field annotated with the
   concrete class.
 - Serializing a task holding an unhydrated ref (instance body, Modal
-  payload, `model_dump()`) raises `sd.TaskRefNotHydratedError`. Hydration
+  payload) raises `sd.TaskRefNotHydratedError`; a plain `model_dump()`
+  raises pydantic's `PydanticSerializationError` wrapping it. Hydration
   failures raise `sd.TaskRefHydrationError` (an outage:
   `sd.TaskRefRegistryUnavailableError`).
 - `build_spawn` / `build_remote` hydrate only from an explicit `registry=`

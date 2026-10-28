@@ -135,9 +135,10 @@ execution ran; otherwise the newest. `--instance newest` and
 stderr. The task page in the registry UI has the `ref(...)` line behind a
 **Reference in code** copy button.
 
-For a task object you hold, built or not, `sd.write_to_store(task)` writes
-it into the store with no registry involved and prints its `from_store(...)`
-line. Prefer `stardag tasks ref --write` for anything that ran: the file
+For a task object you hold, built or not, `sd.write_to_store(tasks)` writes
+it into the store with no registry involved. It returns one `StoredTask` per
+root, whose `str()` is the `from_store(...)` line:
+`(stored,) = sd.write_to_store(task); print(stored)`. Prefer `stardag tasks ref --write` for anything that ran: the file
 then records the registry instance it was read as.
 
 ### 5. Use it
@@ -154,7 +155,7 @@ model = TrainedModel.ref("6f1c...", instance_id="0193...")
 sd.build(Evaluate(model=model))  # same task id as with the real model
 ```
 
-Lines printed by `--write` and `write_to_store` pin by `instance_hash`
+The `from_store(...)` lines from `--write` and `write_to_store` pin by `instance_hash`
 alone: it is the stored file's verified address. A reference is a
 `Task[Model]` placeholder, so it fits `sd.TaskLoads[Model]` fields and
 `sd.Depends[Model]` parameters, but not a field annotated with the concrete
@@ -164,8 +165,11 @@ class; `ref.hydrate()` returns the real task. See
 Without `instance_id` / `instance_hash`, the choice is made at load time:
 `ref` and `from_registry` take, for a completed task, the instance its
 completing execution ran, else the newest; `from_store` needs the store to
-hold exactly one body of the task. Pin unless you want the choice made
-again on every load.
+hold exactly one body of the task. `from_registry` asks again on every
+call; an unpinned **reference** keeps its first hydration for the rest of
+the process (per class, task id and registry), so a later completion is
+not picked up until `sd.clear_hydration_memo()`. Pin unless you want the
+choice made again.
 
 ### 6. Test offline
 
@@ -270,8 +274,9 @@ and [Which store a call reads](../how-to/committed-task-store.md#which-store-a-c
 ## Bodies you keep yourself
 
 `sd.task_from_body(body, expected_task_id=...)` rebuilds a task from an
-instance body you hold — the output of `stardag tasks show <task-id> --json`,
-or a saved `task.instance_body()` — with the same compat-mode rules and
+instance body you hold — one instance's `body` from the `instances` of
+`stardag tasks show <task-id> --json` (not the whole response), or a saved
+`task.instance_body()` — with the same compat-mode rules and
 identity check as every handle above.
 
 ## Migrating

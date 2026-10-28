@@ -188,8 +188,9 @@ pass `task_id=` as well and it reads the instance from its task instead.
 
 ### Validating a stored body
 
-To rebuild a task from a body you hold yourself, for example the output of
-`stardag tasks show <task-id> --json` or a saved `task.instance_body()`,
+To rebuild a task from a body you hold yourself, for example one instance's
+`body` from the `instances` of `stardag tasks show <task-id> --json`, or a
+saved `task.instance_body()`,
 use `sd.task_from_body`. It applies the same compat-mode rules and, given
 `expected_task_id`, the same identity check:
 
