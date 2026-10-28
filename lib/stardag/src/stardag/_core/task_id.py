@@ -18,6 +18,18 @@ from stardag.utils.resource_provider import resource_provider
 if TYPE_CHECKING:
     from stardag._core.base_task import BaseTask
 
+
+def same_task_id(a: "UUID | str", b: "UUID | str") -> bool:
+    """Whether two task ids name the same task, compared as UUIDs, so a
+    differently formatted string (upper case, braces, no hyphens) of the
+    same id compares equal. Falls back to string equality for a value that
+    is not a UUID."""
+    try:
+        return UUID(str(a)) == UUID(str(b))
+    except ValueError:
+        return str(a) == str(b)
+
+
 # Never change this value, it is used to generate stable UUID5 ids for tasks
 _DEFAULT_TASK_UUID5_NAMESPACE = UUID("9ca26b27-f7ee-4044-8b3c-e335dc5778dc")
 

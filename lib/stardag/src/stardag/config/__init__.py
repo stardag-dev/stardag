@@ -28,6 +28,8 @@ Environment Variables (highest priority):
     STARDAG_API_KEY          - API key for authentication
     STARDAG_TARGET_ROOTS     - JSON dict of target roots (override)
     STARDAG_NO_REGISTRY      - Set to 1/true to force offline/local mode
+    STARDAG_REGISTRY_CACHE   - Set to 0/false to turn off the local cache of
+                               instance bodies (~/.stardag/registry-cache/)
 """
 
 # Public API — only symbols that external consumers should use.

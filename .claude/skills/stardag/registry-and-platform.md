@@ -218,6 +218,7 @@ stardag tasks check <task-id> --module mypkg.tasks    # run complete() locally; 
 stardag tasks retry <task-id> [--build <build-id>]    # FAILED -> PENDING (refused on COMPLETED)
 stardag tasks cancel <task-id> [--build <build-id>]   # release one claim; stops nothing
 stardag tasks exclude <plan-id> <task-id> --reason TEXT
+stardag cache clear [--all]                           # local instance-body cache (~/.stardag/registry-cache/)
 ```
 
 ### Concurrency Limits
