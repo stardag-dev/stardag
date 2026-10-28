@@ -49,6 +49,17 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   unaffected: the release build checks out only the pushed tag. The version
   lookup now considers `v*` tags only; the server's version
   (`scripts/server-version.sh`) already considered only `server-v*`.
+- **Fixed: a concurrency-limit delete could fail after it had succeeded**
+  (STA-174). When a delete's answer was lost (a timeout, a cut-short body,
+  a gateway error), the client's retry re-sent it, found no limit left to
+  delete, and raised `NotFoundError` for the delete the first attempt had
+  done. `concurrency_limit_delete` (and `stardag limits delete`) now reads
+  that 404 (`unknown_limit`) as success, only when it answers a retry of an
+  attempt that may have been delivered. A 404 on the first attempt still
+  raises, as does a 404 with any other code, and every other route is
+  unchanged: the other deletes (`build_clear_notify`,
+  `scheduler_lease_release`) answer a re-delivery normally and 404 only for
+  an unknown build.
 - **New: `Task.ref(task_id, instance_id=None)`, a typed reference to a
   registered task** (STA-148). Code can point at a task the registry
   already holds (a trained model, a dataset) by id, instead of re-composing

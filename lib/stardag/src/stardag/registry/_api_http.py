@@ -167,6 +167,14 @@ class Request(Generic[T]):
     # one. A rate-limit refusal is re-sent regardless: it was never
     # delivered (see ``_RATE_LIMIT_CODES``).
     retry: bool = True
+    # The 404 code that means "already done" for this route, when a retry
+    # of an attempt that may have been delivered gets it: a delete re-sent
+    # after its answer was lost finds nothing left to delete, because the
+    # first delivery deleted it (STA-174). Such a 404 is then read as
+    # success (``parse(None)``). A 404 on an attempt with no possibly
+    # delivered predecessor still raises -- the thing was never there --
+    # as does any 404 on a route that leaves this unset.
+    gone_code: str | None = None
 
 
 def gzip_json_body(body: object) -> tuple[bytes | None, dict[str, str]]:
@@ -286,6 +294,28 @@ def _retry_after_seconds(response: httpx.Response) -> int:
         return max(int(response.headers.get("Retry-After", 1)), 1)
     except (TypeError, ValueError):
         return 1
+
+
+def _already_gone(request: Request[Any], error: NotFoundError, lost: int) -> bool:
+    """Whether a 404 is the answer to an earlier delivery of this request
+    that landed but whose answer was lost (see ``Request.gone_code``).
+
+    ``lost`` counts the attempts retried as lost, and any of them may have
+    been delivered -- one that timed out or was cut short may have run, and
+    a gateway error may come back after the app answered -- whatever came
+    between (a rate-limit refusal was never
+    delivered, but does not undo an earlier attempt that was).
+    """
+    if request.gone_code is None or lost == 0 or error.code != request.gone_code:
+        return False
+    logger.warning(
+        "Registry %s %s answered 404 %s after a retry of an attempt whose "
+        "answer was lost; reading it as already done by that attempt.",
+        request.method,
+        request.path,
+        error.code,
+    )
+    return True
 
 
 def _json_or_none(response: httpx.Response) -> Any:
@@ -497,6 +527,11 @@ class HTTPTransport:
                 continue
             try:
                 self.raise_for_error(response, request.operation)
+            except NotFoundError as e:
+                if not _already_gone(request, e, transient):
+                    raise
+                _delivered_no_earlier_than.set(anchor)
+                return request.parse(None)
             except RateLimitError as e:
                 delay = _rate_limit_delay(
                     e.retry_after, rate_limited + 1, rate_limit_waited
@@ -546,6 +581,11 @@ class HTTPTransport:
                 continue
             try:
                 self.raise_for_error(response, request.operation)
+            except NotFoundError as e:
+                if not _already_gone(request, e, transient):
+                    raise
+                _delivered_no_earlier_than.set(anchor)
+                return request.parse(None)
             except RateLimitError as e:
                 delay = _rate_limit_delay(
                     e.retry_after, rate_limited + 1, rate_limit_waited
