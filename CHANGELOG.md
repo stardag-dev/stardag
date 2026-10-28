@@ -185,6 +185,13 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   (STA-157), as a field named `ref` does: pydantic warns at class
   definition and pyright reports an incompatible override. Use
   `sd.task_from_store(MyTask, ...)` for such a class, or rename the field.
+- **Fixed: a dropped connection to Modal could fail a build** (STA-169). An
+  existence check on an unmounted Modal Volume target lists the volume over
+  a streaming RPC, which Modal's client does not retry, so a reset stream
+  (`grpclib.exceptions.StreamTerminatedError`) escaped the check and ended
+  the build in discovery. The check now retries transient failures —
+  a reset stream, a connection error, `ServiceError`, `InternalError` —
+  under the same backoff and budget it already used for rate limits.
 - **Added: task annotations and task search** (STA-149).
   `registry.task_annotate(task_id, tags=..., description=...)` sets a
   task's tags and description: an omitted argument is left unchanged,
