@@ -13,8 +13,8 @@ below take effect only once a Modal app is **redeployed with the new SDK**. The
 server carries one additive migration
 (`workspaces.max_write_requests_per_minute`), and its images now install
 their dependencies from the lockfile. The SDK keeps working against a
-`server-v0.7.0` registry; only the tick's conditional end of an unspawned
-claim stays inert there. See [RELEASE_NOTES.md](RELEASE_NOTES.md).
+`server-v0.7.0` registry, but reconciliation does not: there a tick stops
+reconciling at the first unspawned claim it tries to end. See [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
@@ -207,8 +207,10 @@ deploy` now **warns** about a worker with `retries` above zero (an `int`
   landed late can never run alongside its replacement. The same holds for
   a reactive worker that cannot create its lifecycle reporter, and for one
   whose call id is not readable inside its container. The conditional end
-  needs a registry that supports it; against an older one the tick leaves
-  unspawned claims to their TTL. New executor hooks:
+  needs a registry that supports it. An older one refuses it, and the tick
+  that is refused stops reconciling for the rest of its run, including the
+  probes of recorded calls, so their lost reports are left to the claim's
+  TTL as before; the next tick starts reconciling again. New executor hooks:
   `TaskExecutorABC.reconciles()` and `probe_detached()`, implemented for
   Modal. The tick summary counts `reconciled`.
 

@@ -18,9 +18,11 @@ behaviour changes can affect existing code; each has its own section below.
   resilience under the rate limit, the `retries` warning) run inside the
   deployed app, so an app deployed with 0.28.0 keeps its old behaviour.
 - **The server upgrade** is one additive migration (one nullable column).
-  Against a `server-v0.7.0` registry the SDK keeps working; the tick's
-  conditional end of an unspawned claim is refused there, and such claims are
-  left to their TTL as before. Self-hosted deployments upgrade with
+  Against a `server-v0.7.0` registry the SDK keeps working, but upgrade
+  the server to get reconciliation: the older registry refuses the
+  conditional end of an unspawned claim, and a tick that is refused stops
+  reconciling for the rest of its run, recorded calls included. What it
+  leaves is left to the claim's TTL, as in 0.28.0. Self-hosted deployments upgrade with
   `stardag self-host upgrade`, which now defaults to `0.8.0`.
 
 ### A missing `run()` is reported at construction, not class definition
