@@ -277,17 +277,27 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
                 "dropped (the copy would still be the referenced task). Derive "
                 "from the real task: ref.hydrate().model_copy(update=...)."
             )
-        return typing.cast(
+        return self._copy_identity()
+
+    def _copy_identity(self) -> Self:
+        """A fresh reference with this one's identity and its anchor (the
+        file of the code that created it, which decides its task store);
+        not the registry a hydration bound."""
+        from stardag._core.task_store_read import REF_ANCHOR_KEY
+
+        copied = typing.cast(
             Self, _rebuild_ref(self.task_class, self.task_id, self.instance_id)
         )
+        anchor = vars(self).get(REF_ANCHOR_KEY)
+        if anchor is not None:
+            vars(copied)[REF_ANCHOR_KEY] = anchor
+        return copied
 
     def __deepcopy__(self, memo: dict[int, Any] | None = None) -> Self:
         """A fresh reference with the same identity. Only the identity is
         copied: not the registry a hydration bound, which may hold
         uncopyable state (a lock)."""
-        copied = typing.cast(
-            Self, _rebuild_ref(self.task_class, self.task_id, self.instance_id)
-        )
+        copied = self._copy_identity()
         if memo is not None:
             memo[id(self)] = copied
         return copied
@@ -295,7 +305,9 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
     def __reduce__(self) -> tuple[Any, ...]:
         # A runtime-parametrized ``TaskRef[X, L]`` is not importable by
         # name, so rebuild through ``ref`` (pickled by reference to the
-        # referenced class) rather than by class.
+        # referenced class) rather than by class. The anchor is not pickled:
+        # a process that unpickles a reference (a remote worker) has no
+        # checkout of the creating code to anchor at.
         return (_rebuild_ref, (self.task_class, self.task_id, self.instance_id))
 
     def __str__(self) -> str:
@@ -357,14 +369,22 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
                 is of another class or no longer recomputes to the task id.
                 A subclass of :class:`~stardag.TaskRehydrationError`.
         """
-        from stardag._core.task_store import hydrate_from_store
+        return self._hydrate(registry, use_store=registry is None)
+
+    def _hydrate(self, registry: RegistryABC | None, *, use_store: bool) -> TaskT:
+        """:meth:`hydrate`. ``use_store``: consult the task store first --
+        not for an explicit ``hydrate(registry=...)``, which asks for that
+        registry, but always for build-start hydration, which passes the
+        build's registry only as the fallback."""
+        from stardag._core.task_store_read import hydrate_from_store, store_note
         from stardag.registry import is_noop_registry, registry_provider
 
-        # The project's committed task store, when configured and holding
-        # the body, comes first: no registry, no network.
-        stored = hydrate_from_store(self)
-        if stored is not None:
-            return typing.cast(TaskT, stored)
+        # The package's committed task store, when one applies and holds the
+        # body, comes first: no registry, no network.
+        if use_store:
+            stored = hydrate_from_store(self)
+            if stored is not None:
+                return typing.cast(TaskT, stored)
         if registry is None:
             # The registry this very reference was last hydrated from, if
             # any: a build hydrates a reference a task yields from the
@@ -379,6 +399,7 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
                 f"Cannot hydrate {self!r}: no registry is configured. A task "
                 "reference is read from the registry that holds the task (run "
                 "'stardag auth login', or configure a profile or API key)."
+                + (store_note(self) if use_store else "")
             )
         key = (self.task_class, self.task_id, self.instance_id)
         memo = _memo_for(registry)
@@ -602,7 +623,7 @@ def _key_lock(registry: Any, key: Any) -> threading.Lock:
 def clear_hydration_memo() -> None:
     """Forget every hydrated reference (tests, or a long-lived process that
     wants an unpinned reference to read the newest instance again)."""
-    from stardag._core.task_store import clear_store_memo
+    from stardag._core.task_store_read import clear_store_memo
 
     with _MEMO_LOCK:
         _MEMO.clear()
@@ -707,7 +728,7 @@ def _resolve(value: Any, registry: Any, memo: dict[int, Any]) -> Any:
     if isinstance(value, TaskRef):
         # The hydrated task may itself hold references: a field added since
         # its body was stored, defaulting to one.
-        result = _resolve(value.hydrate(registry), registry, memo)
+        result = _resolve(value._hydrate(registry, use_store=True), registry, memo)
     elif isinstance(value, BaseModel):
         if contains_refs(value):
             updates = {}

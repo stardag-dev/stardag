@@ -292,7 +292,8 @@ def _registered_class(namespace: str, name: str) -> type | None:
         return BaseTask._registry().get_class(TypeId(namespace=namespace, name=name))
     except KeyError:
         pass
-    # The project's configured task modules ([project] task_modules), once.
+    # The package's configured task modules ([tool.stardag] task_modules in
+    # the pyproject.toml found from the working directory), once.
     from stardag._core.task_imports import import_project_task_modules
 
     if not import_project_task_modules():
@@ -318,7 +319,8 @@ def tasks_ref(
         "-m",
         help="Import path of a module defining the task's class, to also print "
         "its import (repeatable; patterns like 'pkg.tasks.*' are expanded). "
-        "Not needed for classes the project's [project] task_modules cover.",
+        "Not needed for classes the [tool.stardag] task_modules of the "
+        "package you run it in cover.",
     ),
     write: bool = typer.Option(
         False,
@@ -330,8 +332,11 @@ def tasks_ref(
     store: Optional[str] = typer.Option(
         None,
         "--store",
-        help="The task store directory for --write. Default: [project] "
-        "task_store in .stardag/config.toml, or STARDAG_TASK_STORE.",
+        help="The task store directory for --write (relative paths resolve "
+        "against the package root, as in the printed line), or "
+        "'pkg:<package>/<dir>'. Default: [tool.stardag] task_store in the "
+        "pyproject.toml found from the working directory, or "
+        "STARDAG_TASK_STORE.",
     ),
     stardag_profile: Optional[str] = _PROFILE_OPTION,
     stardag_env: Optional[str] = _ENV_OPTION,
@@ -346,11 +351,40 @@ def tasks_ref(
     ``--write``.
 
     With ``--write``, the instance body is checked to rehydrate to the task
-    id (its classes imported through ``-m`` or the project's
+    id (its classes imported through ``-m`` or the package's
     ``task_modules``), written into the committed task store with every
     nested task's body, and the line printed is the eager reader,
     ``Task.from_store(...)``.
+
+    The package settings (store, task modules) are those of the
+    ``pyproject.toml`` found from the working directory: run it in the
+    package you write to.
     """
+    from stardag._core.anchor import anchored
+
+    with anchored():
+        _tasks_ref(
+            task_id,
+            instance,
+            module,
+            write,
+            store,
+            stardag_profile,
+            stardag_env,
+            json_output,
+        )
+
+
+def _tasks_ref(
+    task_id: str,
+    instance: Optional[str],
+    module: list[str],
+    write: bool,
+    store: Optional[str],
+    stardag_profile: Optional[str],
+    stardag_env: Optional[str],
+    json_output: bool,
+) -> None:
     if store is not None and not write:
         _fail(StardagError("--store is only used with --write."))
     if module:
@@ -393,7 +427,7 @@ def tasks_ref(
                 task.task_id,
                 instance_id=instance_id,
                 registry=registry,
-                store=store_root.root,
+                store=store,
             )
     except StardagError as e:
         _fail(e)
@@ -443,7 +477,8 @@ def tasks_ref(
     if cls is None:
         error_console.print(
             f"[dim]Note: pass -m <module> (the module defining {prefix}), or "
-            "list it under [project] task_modules in .stardag/config.toml, to "
+            "list it under [tool.stardag] task_modules in the package's "
+            "pyproject.toml, to "
             "print its import.[/dim]",
             highlight=False,
         )

@@ -5,9 +5,10 @@ One file per distinct instance body::
 
     <store>/<label>/<task_id>/<instance_hash>.json
 
-``<label>`` is ``<namespace>.<Name>``, or ``<Name>`` for the root namespace
-(characters outside ``[A-Za-z0-9_.-]`` replaced by ``_``). It is there for a
-human browsing the store; lookups go by task id and instance hash only.
+``<label>`` is ``<namespace>.<Name>``, or ``<Name>`` for the root namespace,
+escaped to be a safe directory name on every platform (see :func:`label`).
+It is there for a human browsing the store; lookups go by task id and
+instance hash only.
 
 A file is an **envelope** around the body::
 
@@ -23,10 +24,14 @@ A file is an **envelope** around the body::
     }
 
 - **Pointers.** A nested task in the body is replaced by
-  ``{"__stardag_task": {"task_id": ..., "instance_hash": ...}}``, and its own
-  body is stored in its own file. The instance hash, not only the task id,
-  is the address: two downstreams may embed the same completion with
-  different non-significant fields, which are two bodies.
+  ``{"__stardag_task": {"task": <label>, "task_id": ..., "instance_hash":
+  ...}}``, and its own body is stored in its own file, at
+  ``<task>/<task_id>/<instance_hash>.json``: a reader follows it by that
+  rule. The instance hash, not only the task id, is the address: two
+  downstreams may embed the same completion with different
+  non-significant fields, which are two bodies. ``task`` is the readable
+  class label, for browsing; it is checked against the target file's
+  namespace and name on read, and a mismatch is refused.
 - **Lossless.** A nested task's sub-body in a canonical instance body is
   that task's own canonical instance body, so the pointer's instance hash
   is the hash of exactly the bytes it replaced, and re-inlining every
@@ -36,6 +41,11 @@ A file is an **envelope** around the body::
 - **Deterministic.** Keys of the body are sorted, the envelope's keys come
   in a fixed order, two-space indentation, a trailing newline: the same
   content is the same bytes, so diffs are minimal.
+- **What looks like a task is stored as one.** A nested dict carrying the
+  ``__namespace`` / ``__name`` keys of a registered task class is split
+  into its own file, even in a plain ``dict`` field. Lossless all the same.
+- **Verified vs metadata.** Only ``body`` is verified, against the file's
+  address (its instance hash); every other envelope field is metadata.
 - **``module``** is the ``__module__`` of the live class that wrote the
   file: an import hint for a reader in a fresh process (``None`` for a
   class defined in ``__main__``). Never derived from the namespace.
@@ -80,25 +90,55 @@ def is_pointer(value: Any) -> bool:
     return isinstance(value, dict) and len(value) == 1 and POINTER_KEY in value
 
 
-def pointer(task_id: str, instance_hash: str) -> dict[str, Any]:
-    return {POINTER_KEY: {"instance_hash": instance_hash, "task_id": task_id}}
+def pointer(task: str, task_id: str, instance_hash: str) -> dict[str, Any]:
+    """A pointer to a nested task's file, ``<task>/<task_id>/<instance_hash>.json``.
+    ``task`` is the readable class label (:func:`label`), for browsing; the
+    task id and instance hash are the address."""
+    return {
+        POINTER_KEY: {
+            "instance_hash": instance_hash,
+            "task": task,
+            "task_id": task_id,
+        }
+    }
 
 
 def pointer_address(value: dict[str, Any]) -> tuple[str, str]:
+    """``(task_id, instance_hash)``: the authoritative part of a pointer."""
     inner = value[POINTER_KEY]
     if not (
         isinstance(inner, dict)
         and isinstance(inner.get("task_id"), str)
         and isinstance(inner.get("instance_hash"), str)
+        and isinstance(inner.get("task"), str)
     ):
         raise TaskStoreError(f"Malformed task store pointer: {value!r}")
     return inner["task_id"], inner["instance_hash"]
 
 
+def pointer_label(value: dict[str, Any]) -> str:
+    return value[POINTER_KEY]["task"]
+
+
+_WINDOWS_RESERVED = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
 def label(namespace: str, name: str) -> str:
-    """The directory naming a class in the store (for humans only)."""
+    """The directory naming a class in the store (for humans browsing it
+    only: lookups never read it). Safe on every platform: characters
+    outside ``[A-Za-z0-9_.-]`` become ``_``, a leading dot (``.``, ``..``,
+    a hidden directory) is escaped with ``_``, as is a name Windows
+    reserves (``CON``, ``NUL``, ``COM1``, ..., with or without an
+    extension)."""
     raw = f"{namespace}.{name}" if namespace else name
-    return re.sub(r"[^A-Za-z0-9_.-]", "_", raw) or "_"
+    text = re.sub(r"[^A-Za-z0-9_.-]", "_", raw) or "_"
+    if text.startswith(".") or text.split(".", 1)[0].upper() in _WINDOWS_RESERVED:
+        text = "_" + text
+    return text
 
 
 def hash_of(body: Any) -> str:
@@ -273,7 +313,9 @@ def normalize(
                 info = identify(value, sub_hash)
                 if info is not None:
                     store(value, info)
-                    memo[sub_json] = pointer(info.task_id, sub_hash)
+                    memo[sub_json] = pointer(
+                        label(info.namespace, info.name), info.task_id, sub_hash
+                    )
                     return memo[sub_json]
             return {k: walk(v) for k, v in value.items()}
         if isinstance(value, list):
@@ -303,6 +345,15 @@ def denormalize(
         if is_pointer(value):
             task_id, instance_hash = pointer_address(value)
             nested = load(task_id, instance_hash, envelope.task_id)
+            expected = pointer_label(value)
+            if label(nested.namespace, nested.name) != expected:
+                raise TaskStoreError(
+                    f"The stored body of task {envelope.task_id} points to "
+                    f"{expected} {task_id}, but that file holds a "
+                    f"{label(nested.namespace, nested.name)}. The pointer's "
+                    "task name is for reading only and must match the file it "
+                    "points to; the file was edited by hand."
+                )
             return denormalize(nested, load, memo)
         if isinstance(value, dict):
             return {k: walk(v) for k, v in value.items()}

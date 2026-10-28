@@ -11,13 +11,20 @@ module path. Two sources of modules instead:
    store reader imports the hint of every class not yet registered before
    validating. A hint that fails to import (the module moved) is not fatal:
    the next source, or the final error, takes over.
-2. **The project's ``task_modules``** (:func:`import_project_task_modules`):
-   patterns in ``[project] task_modules`` of ``.stardag/config.toml``, in
-   the grammar of ``StardagApp(task_modules=...)``. Imported once per
-   process, lazily: the first time rehydration misses a class
+2. **The package's ``task_modules``** (:func:`import_project_task_modules`):
+   ``[tool.stardag] task_modules`` in the ``pyproject.toml`` that applies to
+   the call (:mod:`stardag._core.anchor`), in the grammar of
+   ``StardagApp(task_modules=...)``. Imported once per process and pattern
+   set, lazily: the first time rehydration misses a class
    (:func:`stardag._core.rehydrate.task_from_body`, ``from_registry``, a
    ``TaskRef`` hydration, ``from_store``), after which the lookup is retried
    once.
+
+No lock is held while user modules import: a module whose import itself
+rehydrates (in the importing thread or one it waits for) cannot deadlock on
+it. The importing thread's own nested misses do not re-import; another
+thread missing meanwhile waits for the import, bounded by
+``_WAIT_SECONDS``, then retries either way.
 """
 
 from __future__ import annotations
@@ -32,13 +39,13 @@ from stardag.polymorphic import TypeId
 
 logger = logging.getLogger(__name__)
 
+_WAIT_SECONDS = 60.0
 _LOCK = threading.Lock()
-_IMPORT_LOCK = threading.RLock()
-_importing_thread: int | None = None
-# The patterns last imported, or None: imported at most once per distinct
-# configuration in a process.
-_imported_for: tuple[str, ...] | None = None
-_expansion_error: str | None = None
+# Per pattern set: done, or in progress (an Event set when done, and the
+# importing thread's id).
+_done: set[tuple[str, ...]] = set()
+_in_progress: dict[tuple[str, ...], tuple[threading.Event, int]] = {}
+_expansion_errors: dict[tuple[str, ...], str] = {}
 _hint_failures: dict[str, str] = {}
 
 
@@ -67,41 +74,50 @@ def import_module_hints(hints: typing.Iterable[tuple[str, str, str | None]]) -> 
 
 
 def project_task_module_patterns() -> tuple[str, ...]:
-    """The configured ``[project] task_modules`` patterns."""
-    from stardag.config.project import get_project_config
+    """The ``[tool.stardag] task_modules`` patterns that apply to the
+    current call (see :func:`stardag._core.anchor.call_anchors`)."""
+    from stardag._core.anchor import call_anchors
+    from stardag.config.project import ProjectConfigError, resolve_project_config
 
-    return get_project_config().task_modules
+    try:
+        return resolve_project_config(call_anchors()).task_modules
+    except ProjectConfigError as e:
+        logger.warning("Package settings could not be read: %s", e)
+        return ()
 
 
 def import_project_task_modules() -> bool:
-    """Import the project's ``task_modules``, once per process (per
-    configuration). Whether they are imported, i.e. whether a lookup that
-    just missed is worth retrying: true after this call's import, and
-    after another thread's (a concurrent miss waits for it). Never raises:
-    an unexpandable pattern is kept for :func:`import_note`."""
-    global _importing_thread
+    """Import the applicable ``task_modules``, once per process and pattern
+    set. Whether they are imported now, i.e. whether a lookup that just
+    missed is worth retrying. Never raises: an unexpandable pattern is kept
+    for :func:`import_note`."""
     patterns = project_task_module_patterns()
     if not patterns:
         return False
-    if _importing_thread == threading.get_ident():
-        # A module being imported rehydrates a body itself: no recursion.
-        return False
-    # Held for the whole import: a concurrent miss waits for it, then
-    # retries against the classes it registered.
-    with _IMPORT_LOCK:
-        if _imported_for == patterns:
-            return True
-        _importing_thread = threading.get_ident()
-        try:
-            return _import_project_task_modules(patterns)
-        finally:
-            _importing_thread = None
-
-
-def _import_project_task_modules(patterns: tuple[str, ...]) -> bool:
-    global _imported_for, _expansion_error
+    me = threading.get_ident()
+    event = threading.Event()
     with _LOCK:
-        _imported_for = patterns
+        if patterns in _done:
+            return True
+        running = _in_progress.get(patterns)
+        if running is None:
+            _in_progress[patterns] = (event, me)
+    if running is not None:
+        event, owner = running
+        if owner == me:
+            return False  # a module being imported rehydrates: no recursion
+        event.wait(_WAIT_SECONDS)
+        return True
+    try:
+        return _import(patterns)
+    finally:
+        with _LOCK:
+            _done.add(patterns)
+            _in_progress.pop(patterns, None)
+        event.set()
+
+
+def _import(patterns: tuple[str, ...]) -> bool:
     from stardag.build._task_modules import (
         TaskModulesError,
         expand_task_module_patterns,
@@ -112,11 +128,9 @@ def _import_project_task_modules(patterns: tuple[str, ...]) -> bool:
         modules = expand_task_module_patterns(patterns)
     except TaskModulesError as e:
         with _LOCK:
-            _expansion_error = str(e)
-        logger.warning("Project task_modules could not be expanded: %s", e)
+            _expansion_errors[patterns] = str(e)
+        logger.warning("task_modules could not be expanded: %s", e)
         return False
-    with _LOCK:
-        _expansion_error = None
     import_task_modules(modules)
     return True
 
@@ -130,18 +144,22 @@ def import_note() -> str:
     if not patterns:
         note = (
             " To have such classes imported on demand, list the modules that "
-            "define them under [project] task_modules in .stardag/config.toml "
-            '(e.g. task_modules = ["my_project.tasks.*"]).'
+            "define them under [tool.stardag] task_modules in the pyproject.toml "
+            'of their package (e.g. task_modules = ["my_package.tasks.*"]).'
         )
     else:
-        note = f" The project's task_modules {list(patterns)} were imported."
-        if _expansion_error:
+        with _LOCK:
+            expansion_error = _expansion_errors.get(patterns)
+        if expansion_error:
             note = (
-                f" The project's task_modules {list(patterns)} could not be "
-                f"expanded: {_expansion_error}"
+                f" The configured task_modules {list(patterns)} could not be "
+                f"expanded: {expansion_error}"
             )
         else:
-            note += import_failure_note()
+            note = (
+                f" The configured task_modules {list(patterns)} were imported."
+                + import_failure_note()
+            )
     with _LOCK:
         hints = dict(_hint_failures)
     if hints:
@@ -151,8 +169,8 @@ def import_note() -> str:
 
 
 def _reset_for_tests() -> None:
-    global _imported_for, _expansion_error
     with _LOCK:
-        _imported_for = None
-        _expansion_error = None
+        _done.clear()
+        _in_progress.clear()
+        _expansion_errors.clear()
         _hint_failures.clear()

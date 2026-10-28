@@ -2,34 +2,30 @@
 task instances a code base pins.
 
 For pinned, long-lived instances in code (a key dataset, a trained model),
-the recommended handle is a body stored in the project, loaded eagerly::
+the recommended handle is a body stored with the package, loaded eagerly::
 
-    MODEL = TrainedModel.from_store("6f1c...", instance_id="0193...")
+    MODEL = TrainedModel.from_store("6f1c...", instance_id="0193...", instance_hash="7a2e...")
 
-The store is a directory in the repository (``[project] task_store`` in
-``.stardag/config.toml``), holding one normalized, content-addressed file
-per distinct instance body (format: :mod:`stardag._core.task_store_format`).
-Two writers fill it:
+The store is a directory in the package (``[tool.stardag] task_store`` in
+its ``pyproject.toml``, see :mod:`stardag.config.project`), holding one
+normalized, content-addressed file per distinct instance body (format:
+:mod:`stardag._core.task_store_format`). This module locates a store and
+reads and writes its files; :mod:`stardag._core.task_store_read` loads
+tasks from it and :mod:`stardag._core.task_store_write` fills it.
 
-- :func:`write_to_store` (``sd.write_to_store``): from task objects in hand,
-  no registry needed, so a spec not built yet can be pinned too;
-- :func:`write_from_registry` (``stardag tasks ref <id> --write``): reads an
-  instance body from the registry, checks it rehydrates to its task id, and
-  writes its tree.
-
-:func:`load_from_store` (``MyTask.from_store``, ``sd.task_from_store``)
-reads one back: it re-inlines every pointer, imports each stored class's
-module hint, validates in compat mode and checks the task id. No registry,
-profile or network is involved, which is what makes a test suite reading
-the store hermetic.
-
-The registry stays the record of what ran; the store is a reviewed copy.
+Trust model: a store is code. Reading one imports the module each file
+names as its class's import hint, so point ``store=`` (or the config) only
+at a store you would run the code of: a reviewed one in your repository or
+an installed package. Only a file's ``body`` is verified (against its
+content address); ``task_id``, ``namespace``, ``name``, ``module`` and
+``sources`` are unverified metadata.
 """
 
 from __future__ import annotations
 
 import contextlib
 import hashlib
+import logging
 import os
 import tempfile
 import threading
@@ -38,17 +34,20 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from stardag._core.base_task import BaseTask
-from stardag._core.task_store_format import (
-    Envelope,
-    TaskStoreError,
-    denormalize,
-    label,
-)
+from stardag._core.task_store_format import Envelope, TaskStoreError, label
 
-_WRITE_HINT = (
+logger = logging.getLogger(__name__)
+
+WRITE_HINT = (
     "Write it with 'stardag tasks ref {task_id} --write' (from the registry) "
     "or sd.write_to_store(task) (from a task object)."
+)
+_MARKER_TEXT = (
+    "# A stardag task store: one file per stored instance body. Written by\n"
+    "# stardag; files are content-addressed and must not be edited by hand.\n"
+    "# This file marks the directory, so an installed package's store is\n"
+    "# found without its pyproject.toml. Ship it with the package data.\n"
+    "format = 1\n"
 )
 
 
@@ -65,31 +64,63 @@ class AmbiguousStoredTaskError(TaskStoreError):
 # -----------------------------------------------------------------------------
 
 
-def configured_store() -> Path | None:
-    """The configured store directory (``[project] task_store`` or
-    ``STARDAG_TASK_STORE``), or ``None``."""
-    from stardag.config.project import get_project_config
+def project_config(anchors: typing.Iterable[Path | None] = ()) -> Any:
+    from stardag.config.project import ProjectConfigError, resolve_project_config
 
-    return get_project_config().task_store
+    try:
+        return resolve_project_config(anchors)
+    except ProjectConfigError as e:
+        raise TaskStoreError(str(e)) from e
 
 
-def resolve_store(store: str | os.PathLike[str] | None) -> TaskStore:
-    """The store at ``store`` (relative to the working directory), else the
-    configured one.
+def configured_store(anchors: typing.Iterable[Path | None] = ()) -> Path | None:
+    """The store configured for a call anchored at ``anchors`` (see
+    :func:`stardag.config.project.resolve_project_config`), or ``None``."""
+    return project_config(anchors).task_store
+
+
+def resolve_store(
+    store: str | os.PathLike[str] | None,
+    anchors: typing.Iterable[Path | None] = (),
+) -> TaskStore:
+    """The store at ``store``, else the configured one.
+
+    An explicit relative ``store`` resolves against the root of the
+    package settings that apply (the ``pyproject.toml``'s directory), as a
+    configured ``task_store`` does, and against the working directory when
+    none apply. ``pkg:<package>/<path>`` names a directory inside a package.
 
     Raises:
         TaskStoreNotConfiguredError: Neither is set.
     """
+    from stardag.config.project import ProjectConfigError, resolve_store_spec
+
+    config = project_config(anchors)
     if store is not None:
-        return TaskStore(Path(store).expanduser().absolute())
-    configured = configured_store()
-    if configured is None:
+        try:
+            return TaskStore(resolve_store_spec(store, config.root))
+        except ProjectConfigError as e:
+            raise TaskStoreError(str(e)) from e
+    if config.task_store is None:
         raise TaskStoreNotConfiguredError(
             "No task store configured. Pass store=<directory>, set task_store "
-            "under [project] in .stardag/config.toml (relative to the project "
-            "root), or set STARDAG_TASK_STORE."
+            "under [tool.stardag] in the package's pyproject.toml (relative to "
+            "that file, or 'pkg:<package>/<dir>'), or set STARDAG_TASK_STORE."
         )
-    return TaskStore(configured)
+    return TaskStore(config.task_store)
+
+
+# -----------------------------------------------------------------------------
+# The store
+# -----------------------------------------------------------------------------
+
+_INDEX_LOCK = threading.Lock()
+_INDEXES: dict[Path, dict[tuple[str, str], Path]] = {}
+
+
+def clear_index_cache() -> None:
+    with _INDEX_LOCK:
+        _INDEXES.clear()
 
 
 class TaskStore:
@@ -109,25 +140,50 @@ class TaskStore:
             / f"{envelope.instance_hash}.json"
         )
 
-    def index(self) -> dict[tuple[str, str], Path]:
+    def index(self, *, fresh: bool = False) -> dict[tuple[str, str], Path]:
         """Every stored body by ``(task_id, instance_hash)``, from the file
-        layout alone (nothing is read). Files and directories that are not
-        part of the layout (a README) are ignored."""
+        layout alone (nothing is read). Files and directories outside the
+        layout (a README, the marker) are ignored.
+
+        Memoized per process and store; writes in this process keep it
+        current, and a lookup that misses re-walks once (``fresh=True``),
+        so files added on disk meanwhile are found."""
+        key = self.root
+        if not fresh:
+            with _INDEX_LOCK:
+                cached = _INDEXES.get(key)
+            if cached is not None:
+                return cached
         found: dict[tuple[str, str], Path] = {}
-        if not self.root.is_dir():
-            return found
-        for class_dir in self.root.iterdir():
-            if not class_dir.is_dir() or class_dir.name.startswith("."):
-                continue
-            for task_dir in class_dir.iterdir():
-                task_id = _uuid_or_none(task_dir.name)
-                if task_id is None or not task_dir.is_dir():
+        if self.root.is_dir():
+            for class_dir in self.root.iterdir():
+                if not class_dir.is_dir() or class_dir.name.startswith("."):
                     continue
-                for path in task_dir.glob("*.json"):
-                    instance_hash = _uuid_or_none(path.stem)
-                    if instance_hash is not None:
-                        found[(task_id, instance_hash)] = path
+                for task_dir in class_dir.iterdir():
+                    task_id = _uuid_or_none(task_dir.name)
+                    if task_id is None or not task_dir.is_dir():
+                        continue
+                    for path in task_dir.glob("*.json"):
+                        instance_hash = _uuid_or_none(path.stem)
+                        if instance_hash is not None:
+                            found[(task_id, instance_hash)] = path
+        with _INDEX_LOCK:
+            _INDEXES[key] = found
         return found
+
+    def lookup(self, task_id: str, instance_hash: str) -> Path | None:
+        path = self.index().get((task_id, instance_hash))
+        if path is None or not path.exists():
+            path = self.index(fresh=True).get((task_id, instance_hash))
+        return path
+
+    def paths_of(self, task_id: str) -> list[Path]:
+        paths = sorted(p for (tid, _), p in self.index().items() if tid == task_id)
+        if not paths or not all(p.exists() for p in paths):
+            paths = sorted(
+                p for (tid, _), p in self.index(fresh=True).items() if tid == task_id
+            )
+        return paths
 
     def read(self, path: Path) -> Envelope:
         """The envelope in ``path``, checked against its address."""
@@ -154,8 +210,17 @@ class TaskStore:
                 legitimate update.
         """
         path = self.path_for(envelope)
-        with _address_lock(path):
-            return self._write_locked(path, envelope, source)
+        with _store_lock(self.root):
+            written = self._write_locked(path, envelope, source)
+            marker = self.root / _marker_name()
+            if not marker.exists():
+                _atomic_write(marker, _MARKER_TEXT)
+        if written is not None:
+            with _INDEX_LOCK:
+                cached = _INDEXES.get(self.root)
+                if cached is not None:
+                    cached[(envelope.task_id, envelope.instance_hash)] = path
+        return written
 
     def _write_locked(
         self, path: Path, envelope: Envelope, source: dict[str, Any]
@@ -170,10 +235,13 @@ class TaskStore:
                     "control, or delete it and write it again."
                 )
             updated = existing.with_source(source)
-            if updated is None and existing.module == envelope.module:
+            # A known module hint is never replaced by none (a rewrite from
+            # a class defined in __main__).
+            module = envelope.module or existing.module
+            if updated is None and existing.module == module:
                 return None
             updated = updated or existing
-            updated.module = envelope.module
+            updated.module = module
         else:
             envelope.sources = [source]
             updated = envelope
@@ -187,15 +255,19 @@ class TaskStore:
         instance_id: str | None = None,
         instance_hash: str | None = None,
     ) -> Envelope | None:
-        """The stored body of ``task_id`` matching the given instance id or
-        hash, or the only one stored; ``None`` when none matches.
+        """The stored body of ``task_id`` with the given instance hash and/or
+        recorded as the given instance id, or the only one stored; ``None``
+        when none matches.
+
+        The instance hash is verified (it is the file's content address);
+        the instance id is matched against ``sources``, unverified
+        metadata. Given both, the body must satisfy both.
 
         Raises:
             AmbiguousStoredTaskError: Several bodies are stored for the task
                 and neither an instance id nor a hash picks one.
         """
-        index = self.index()
-        candidates = sorted(p for (tid, _), p in index.items() if tid == task_id)
+        candidates = self.paths_of(task_id)
         if instance_hash is not None:
             candidates = [p for p in candidates if p.stem == instance_hash]
         envelopes = [self.read(p) for p in candidates]
@@ -219,19 +291,33 @@ class TaskStore:
         return envelopes[0] if envelopes else None
 
 
+def _marker_name() -> str:
+    from stardag.config.project import STORE_MARKER
+
+    return STORE_MARKER
+
+
+# -----------------------------------------------------------------------------
+# File I/O
+# -----------------------------------------------------------------------------
+
+_THREAD_LOCK = threading.RLock()
+
+
 @contextlib.contextmanager
-def _address_lock(path: Path) -> typing.Iterator[None]:
-    """Serialize the read-merge-replace of one store file, across threads
-    and processes (an advisory ``flock`` on a sibling lock file where the
-    platform has one): two writers adding different sources to one body
-    must not overwrite each other's addition. The lock file lives in the
-    temporary directory, keyed by the file's path, so nothing but store
-    files ever appears in the (committed) store."""
-    digest = hashlib.sha256(str(path.absolute()).encode("utf-8")).hexdigest()[:32]
+def _store_lock(root: Path) -> typing.Iterator[None]:
+    """Serialize writes to one store, across threads and processes (an
+    advisory ``flock`` where the platform has one): two writers adding
+    different sources to one body must not overwrite each other's addition.
+
+    One lock file per store (keyed by its resolved path), under the
+    temporary directory, so nothing but store files ever appears in the
+    committed store and lock files do not accumulate per stored body."""
+    key = str(root.resolve())
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
     lock_dir = Path(tempfile.gettempdir()) / "stardag-task-store-locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_dir / f"{digest}.lock"
-    with _THREAD_LOCK, open(lock_path, "a") as handle:
+    with _THREAD_LOCK, open(lock_dir / f"{digest}.lock", "a") as handle:
         try:
             import fcntl
         except ImportError:  # pragma: no cover (Windows: threads only)
@@ -244,7 +330,15 @@ def _address_lock(path: Path) -> typing.Iterator[None]:
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-_THREAD_LOCK = threading.RLock()
+def _current_umask() -> int:
+    # Read once: setting the umask to read it is process-wide, and racy if
+    # done per write.
+    mask = os.umask(0o022)
+    os.umask(mask)
+    return mask
+
+
+_UMASK = _current_umask()
 
 
 def _uuid_or_none(text: str) -> str | None:
@@ -255,11 +349,15 @@ def _uuid_or_none(text: str) -> str | None:
 
 
 def _atomic_write(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically, with the mode an ordinary file
+    gets (``0o666 & ~umask``), not ``mkstemp``'s ``0o600``: a store copied
+    into a container image must be readable by its user."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
+        os.chmod(tmp, 0o666 & ~_UMASK)
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -269,202 +367,7 @@ def _atomic_write(path: Path, text: str) -> None:
         raise
 
 
-# -----------------------------------------------------------------------------
-# Reading
-# -----------------------------------------------------------------------------
-
-
-def load_from_store(
-    cls: type[BaseTask],
-    task_id: UUID | str,
-    *,
-    instance_id: UUID | str | None = None,
-    instance_hash: UUID | str | None = None,
-    store: str | os.PathLike[str] | TaskStore | None = None,
-) -> BaseTask:
-    """``cls.from_store(...)``: see there."""
-    task_store = store if isinstance(store, TaskStore) else resolve_store(store)
-    tid = _uuid_str(task_id, "task_id")
-    envelope = task_store.select(
-        tid,
-        instance_id=None
-        if instance_id is None
-        else _uuid_str(instance_id, "instance_id"),
-        instance_hash=(
-            None if instance_hash is None else _uuid_str(instance_hash, "instance_hash")
-        ),
-    )
-    if envelope is None:
-        which = (
-            f" with instance id {instance_id}"
-            if instance_id is not None
-            else f" with instance hash {instance_hash}"
-            if instance_hash is not None
-            else ""
-        )
-        raise TaskStoreError(
-            f"The task store at {task_store.root} holds no body of task {tid}"
-            f"{which}. " + _WRITE_HINT.format(task_id=tid)
-        )
-    return load_envelope(cls, envelope, task_store)
-
-
-def load_envelope(
-    cls: type[BaseTask], envelope: Envelope, task_store: TaskStore
-) -> BaseTask:
-    """Re-inline, import the hints, validate, check class and task id."""
-    from stardag._core import task_imports
-    from stardag._core.rehydrate import TaskRehydrationError, _validate_for
-
-    index = task_store.index()
-    seen: dict[tuple[str, str], Envelope] = {
-        (envelope.task_id, envelope.instance_hash): envelope
-    }
-
-    def load(task_id: str, instance_hash: str, referenced_from: str) -> Envelope:
-        key = (task_id, instance_hash)
-        if key in seen:
-            return seen[key]
-        path = index.get(key)
-        if path is None:
-            raise TaskStoreError(
-                f"The stored body of task {referenced_from} points to task "
-                f"{task_id} (instance hash {instance_hash}), which is not in "
-                f"the task store at {task_store.root}. The store is incomplete: "
-                "write the whole tree again. "
-                + _WRITE_HINT.format(task_id=referenced_from)
-            )
-        seen[key] = task_store.read(path)
-        return seen[key]
-
-    body = denormalize(envelope, load)
-    task_imports.import_module_hints(
-        (e.namespace, e.name, e.module) for e in seen.values()
-    )
-    try:
-        task = _validate_for(cls, body, allow_aliased=False)
-        rehydrated_id = str(task.id)
-    except TaskRehydrationError as e:
-        raise type(e)(
-            f"Cannot load task {envelope.task_id} from the task store: {e}"
-        ) from e
-    except Exception as e:
-        raise TaskRehydrationError(
-            f"Cannot load task {envelope.task_id} from the task store: {e}"
-        ) from e
-    if rehydrated_id != envelope.task_id:
-        from stardag._core.rehydrate import _id_mismatch_message
-
-        raise TaskRehydrationError(
-            "Cannot load from the task store: "
-            + _id_mismatch_message(task, rehydrated_id, envelope.task_id)
-        )
-    return task
-
-
-_TaskT = typing.TypeVar("_TaskT", bound=BaseTask)
-
-
-def task_from_store(
-    task_class: type[_TaskT],
-    task_id: UUID | str,
-    instance_id: UUID | str | None = None,
-    *,
-    instance_hash: UUID | str | None = None,
-    store: str | os.PathLike[str] | None = None,
-) -> _TaskT:
-    """``task_class.from_store(...)``, as a function: for a class on which
-    ``from_store`` is not the method (one declaring a field of that name
-    shadows it). Never reads ``task_class.from_store``. See
-    :meth:`BaseTask.from_store <stardag.BaseTask.from_store>`.
-
-    Raises:
-        TypeError: ``task_class`` is not a task class.
-    """
-    if not (isinstance(task_class, type) and issubclass(task_class, BaseTask)):
-        raise TypeError(f"task_from_store() needs a task class, got {task_class!r}")
-    return typing.cast(
-        _TaskT,
-        load_from_store(
-            task_class,
-            task_id,
-            instance_id=instance_id,
-            instance_hash=instance_hash,
-            store=store,
-        ),
-    )
-
-
-def find_in_store(
-    cls: type[BaseTask], task_id: UUID, instance_id: UUID | None
-) -> BaseTask | None:
-    """The task from the configured store when it holds the body a reference
-    points to: for a pinned reference, a body recorded under that instance
-    id; for an unpinned one, the only body of the task. ``None`` when no
-    store is configured or it has no such body (read the registry then)."""
-    root = configured_store()
-    if root is None:
-        return None
-    task_store = TaskStore(root)
-    try:
-        envelope = task_store.select(
-            str(task_id),
-            instance_id=None if instance_id is None else str(instance_id),
-        )
-    except AmbiguousStoredTaskError:
-        return None  # several bodies stored: not "exactly one"
-    if envelope is None:
-        return None
-    return load_envelope(cls, envelope, task_store)
-
-
-_STORE_MEMO_LOCK = threading.Lock()
-_STORE_MEMO: dict[tuple[Path, Any, UUID, UUID | None], BaseTask] = {}
-
-
-def hydrate_from_store(ref: Any) -> BaseTask | None:
-    """A ``TaskRef``'s task from the configured store (see
-    :func:`find_in_store`), checked like a registry read; ``None`` when the
-    store does not serve it. Memoized per process, like hydration.
-
-    Raises:
-        TaskRefHydrationError: The store holds the body but it cannot be
-            loaded, or is of another class or task id.
-    """
-    from stardag._core.rehydrate import TaskRehydrationError
-    from stardag._core.task_ref import TaskRefHydrationError
-
-    root = configured_store()
-    if root is None:
-        return None
-    key = (root, ref.task_class, ref.task_id, ref.instance_id)
-    with _STORE_MEMO_LOCK:
-        cached = _STORE_MEMO.get(key)
-    if cached is not None:
-        return cached
-    try:
-        task = find_in_store(ref.task_class, ref.task_id, ref.instance_id)
-    except (TaskStoreError, TaskRehydrationError) as e:
-        raise TaskRefHydrationError(
-            f"Cannot hydrate {ref!r} from the task store at {root}: {e}"
-        ) from e
-    if task is None:
-        return None
-    if not isinstance(task, ref.task_class) or task.id != ref.task_id:
-        raise TaskRefHydrationError(
-            f"Cannot hydrate {ref!r}: the task store's body is a "
-            f"{type(task).__qualname__} with task id {task.id}."
-        )
-    with _STORE_MEMO_LOCK:
-        return _STORE_MEMO.setdefault(key, task)
-
-
-def clear_store_memo() -> None:
-    with _STORE_MEMO_LOCK:
-        _STORE_MEMO.clear()
-
-
-def _uuid_str(value: UUID | str, what: str) -> str:
+def uuid_str(value: UUID | str, what: str) -> str:
     try:
         return str(UUID(str(value)))
     except ValueError as e:

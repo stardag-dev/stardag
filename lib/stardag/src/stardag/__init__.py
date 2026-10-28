@@ -53,7 +53,7 @@ from stardag._core.rehydrate import (
     task_from_registry_data,
 )
 from stardag._core.task import Task, get_default_relpath
-from stardag._core.task_store import task_from_store
+from stardag._core.task_store_read import task_from_store
 from stardag._core.task_store_format import TaskStoreError
 from stardag._core.task_store_write import StoredTask, write_to_store
 from stardag._core.task_ref import (

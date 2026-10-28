@@ -52,7 +52,11 @@ Pattern grammar
 ---------------
 
 A pattern is either an exact module (``"a.b.c"``) or a trailing recursive
-wildcard (``"a.b.*"``, matching ``a.b`` and everything below it). A ``*``
+wildcard (``"a.b.*"``, matching ``a.b`` and everything below it). Either
+may be prefixed with ``!`` to **exclude** what it matches from what the
+other patterns include (``"!a.b.deploy"``, ``"!a.b.scripts.*"``), whatever
+the order: a deploy entry point that needs deploy-time environment at
+import, say, under an otherwise recursive pattern. A ``*``
 anywhere but the final component, an empty pattern, or a component that is
 not a valid identifier is a :class:`TaskModulesError` — a malformed pattern
 must never degrade into a silent no-match, because the symptom would be a
@@ -118,14 +122,41 @@ def validate_task_module_patterns(
     return tuple(sorted(validated))
 
 
+_EXCLUDE_PREFIX = "!"
+
+
+def _split_excludes(patterns: typing.Iterable[str]) -> tuple[list[str], list[str]]:
+    includes: list[str] = []
+    excludes: list[str] = []
+    for pattern in patterns:
+        if pattern.startswith(_EXCLUDE_PREFIX):
+            excludes.append(pattern[len(_EXCLUDE_PREFIX) :])
+        else:
+            includes.append(pattern)
+    return includes, excludes
+
+
+def _matches(module_name: str, pattern: str) -> bool:
+    if pattern.endswith(_WILDCARD_SUFFIX):
+        root = pattern[: -len(_WILDCARD_SUFFIX)]
+        return module_name == root or module_name.startswith(root + ".")
+    return module_name == pattern
+
+
 def _validate_one(pattern: str) -> None:
-    problem = _pattern_problem(pattern)
+    body = (
+        pattern[len(_EXCLUDE_PREFIX) :]
+        if pattern.startswith(_EXCLUDE_PREFIX)
+        else pattern
+    )
+    problem = _pattern_problem(body)
     if problem is None:
         return
     raise TaskModulesError(
         f"Invalid task_modules pattern {pattern!r}: {problem}. A pattern is "
         'either an exact module ("my_pkg.tasks.ingest") or a package '
-        'followed by a trailing recursive wildcard ("my_pkg.tasks.*").'
+        'followed by a trailing recursive wildcard ("my_pkg.tasks.*"), '
+        'optionally prefixed with "!" to exclude it ("!my_pkg.tasks.deploy").'
     )
 
 
@@ -172,14 +203,10 @@ def module_is_covered(module_name: str, patterns: typing.Sequence[str]) -> bool:
     """
     if module_is_main(module_name):
         return False
-    for pattern in patterns:
-        if pattern.endswith(_WILDCARD_SUFFIX):
-            root = pattern[: -len(_WILDCARD_SUFFIX)]
-            if module_name == root or module_name.startswith(root + "."):
-                return True
-        elif module_name == pattern:
-            return True
-    return False
+    includes, excludes = _split_excludes(patterns)
+    if any(_matches(module_name, p) for p in excludes):
+        return False
+    return any(_matches(module_name, p) for p in includes)
 
 
 def suggested_pattern_for(module_name: str) -> str:
@@ -212,14 +239,15 @@ def expand_task_module_patterns(
             fail loudly at deploy time rather than expand to nothing).
     """
     modules: set[str] = set()
-    for pattern in validate_task_module_patterns(patterns):
+    includes, excludes = _split_excludes(validate_task_module_patterns(patterns))
+    for pattern in includes:
         if not pattern.endswith(_WILDCARD_SUFFIX):
             modules.add(pattern)
             continue
         root = pattern[: -len(_WILDCARD_SUFFIX)]
         modules.add(root)
         modules.update(_iter_submodules(root, pattern))
-    return sorted(modules)
+    return sorted(m for m in modules if not any(_matches(m, p) for p in excludes))
 
 
 def _iter_submodules(root: str, pattern: str) -> typing.Iterator[str]:

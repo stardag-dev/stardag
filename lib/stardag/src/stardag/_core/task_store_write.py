@@ -19,7 +19,7 @@ from uuid import UUID
 
 from stardag._core.base_task import BaseTask, TaskStruct, flatten_task_struct
 from stardag._core.instance import reachable_models
-from stardag._core.task_store import TaskStore, _uuid_str, resolve_store
+from stardag._core.task_store import TaskStore, project_config, resolve_store, uuid_str
 from stardag._core.task_store_format import NestedTask, TaskStoreError, normalize
 
 if typing.TYPE_CHECKING:
@@ -80,16 +80,18 @@ def reader_call(
     instance_hash: str | None,
     store: str | None = None,
 ) -> str:
-    """``Prefix.from_store("<task-id>", instance_id=...)``, pinned to the
-    registry instance when known and to the instance hash otherwise; or
+    """``Prefix.from_store("<task-id>", instance_id=..., instance_hash=...)``,
+    pinned to the registry instance when known and always to the instance
+    hash (the verified one); or
     ``sd.task_from_store(Prefix, ...)`` for a class whose ``from_store``
     is shadowed by a field."""
+    # Both when known: the instance id is matched against unverified
+    # metadata (``sources``); the hash is the file's verified address.
+    pinned = ""
     if instance_id is not None:
-        pinned = f', instance_id="{instance_id}"'
-    elif instance_hash is not None:
-        pinned = f', instance_hash="{instance_hash}"'
-    else:
-        pinned = ""
+        pinned += f', instance_id="{instance_id}"'
+    if instance_hash is not None:
+        pinned += f', instance_hash="{instance_hash}"'
     if store is not None:
         pinned += f", store={json.dumps(store)}"
     fields = getattr(task_class, "model_fields", None) or {}
@@ -99,16 +101,36 @@ def reader_call(
 
 
 def store_argument(
-    store: str | os.PathLike[str] | None, task_store: TaskStore
+    store: str | os.PathLike[str] | None,
+    task_store: TaskStore,
+    anchors: typing.Sequence[Path | None],
 ) -> str | None:
-    """The ``store=`` a printed reader line needs: ``store`` as given (so a
-    relative path stays relative), unless it resolves to the configured
-    store, which the reader finds by itself."""
-    from stardag._core.task_store import configured_store
+    """The ``store=`` a printed reader line needs: ``store`` exactly as given
+    (a relative path stays relative, and resolves the same in the reader),
+    unless it resolves to the store configured for the same anchors, which
+    the reader finds by itself. An absolute path outside the package whose
+    settings apply is machine-specific: printed, with a warning."""
+    import warnings
 
-    if store is None or configured_store() == task_store.root:
+    if store is None:
         return None
-    return os.fspath(store)
+    config = project_config(anchors)
+    if config.task_store is not None and config.task_store == task_store.root:
+        return None
+    text = os.fspath(store)
+    if (
+        Path(text).is_absolute()
+        and config.root is not None
+        and not task_store.root.is_relative_to(config.root)
+    ):
+        warnings.warn(
+            f"The task store {text} is an absolute path outside the package, so "
+            "the printed from_store(..., store=...) line only works on this "
+            "machine. Configure [tool.stardag] task_store in the package's "
+            "pyproject.toml, or pass a path relative to it, or 'pkg:<package>/<dir>'.",
+            stacklevel=3,
+        )
+    return text
 
 
 def module_hint(cls: type) -> str | None:
@@ -225,8 +247,11 @@ def write_to_store(
         TaskRefNotHydratedError: A task holds an unhydrated ``TaskRef``
             (``sd.resolve_refs`` it first).
     """
-    task_store = resolve_store(store)
+    from stardag._core.anchor import call_anchors
+
     roots = flatten_task_struct(tasks)
+    anchors = call_anchors(*(type(t) for t in roots[:1]))
+    task_store = resolve_store(store, anchors)
     source = {"kind": "local", **_stamp()}
     results: list[StoredTask] = []
     for task in roots:
@@ -241,7 +266,7 @@ def write_to_store(
                 instance_id=None,
                 path=path,
                 written=tuple(written),
-                store_argument=store_argument(store, task_store),
+                store_argument=store_argument(store, task_store, anchors),
             )
         )
     return results
@@ -253,6 +278,7 @@ def write_from_registry(
     instance_id: UUID | str | None = None,
     registry: RegistryABC | None = None,
     store: str | os.PathLike[str] | None = None,
+    anchors: typing.Sequence[Path | None] = (),
 ) -> StoredTask:
     """Read an instance body from the registry and write its tree into the
     store (``stardag tasks ref <task-id> --write``).
@@ -267,6 +293,8 @@ def write_from_registry(
         instance_id: The instance to write. Default: the newest.
         registry: Default: the configured registry.
         store: Default: the configured store.
+        anchors: Where the store config is looked up from. Default: the
+            working directory (the CLI writes into the package it runs in).
 
     Raises:
         TaskStoreError: The body does not rehydrate to the task id (the
@@ -276,9 +304,9 @@ def write_from_registry(
     from stardag._core.rehydrate import task_from_body
     from stardag.registry import registry_provider
 
-    task_store = resolve_store(store)
+    task_store = resolve_store(store, anchors)
     registry = registry or registry_provider.get()
-    tid = _uuid_str(task_id, "task_id")
+    tid = uuid_str(task_id, "task_id")
     if instance_id is not None:
         instance = registry.task_instance_get(instance_id, task_id=tid)
         if instance.task_id is not None and str(UUID(instance.task_id)) != tid:
@@ -316,7 +344,7 @@ def write_from_registry(
         instance_id=instance.id,
         path=path,
         written=tuple(written),
-        store_argument=store_argument(store, task_store),
+        store_argument=store_argument(store, task_store, anchors),
     )
 
 

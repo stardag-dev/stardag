@@ -523,7 +523,7 @@ class BaseTask(
         instance_hash: UUID | str | None = None,
         store: "str | os.PathLike[str] | None" = None,
     ) -> Self:
-        """The task of this class stored in the project's committed task
+        """The task of this class stored in the package's committed task
         store, loaded eagerly: the real task object (fields readable,
         ``model_copy`` derivations work).
 
@@ -535,16 +535,30 @@ class BaseTask(
         call.
 
         Every class in the stored tree is imported from the module recorded
-        with it, or, failing that, from the project's ``task_modules``.
+        with it, or, failing that, from the package's ``task_modules``.
         Validated in compat mode, then checked to be an instance of this
-        class with ``task_id``.
+        class with ``task_id``; a mismatch names the deepest nested task
+        whose id moved.
+
+        The store is the calling package's: ``STARDAG_TASK_STORE`` if set,
+        else ``[tool.stardag] task_store`` in the ``pyproject.toml`` found
+        walking up from the calling module's file, then from this class's
+        module, then from the working directory (frames inside the
+        ``stardag`` package are not callers). So a constant pinned in one
+        package reads that package's store wherever it is imported from.
 
         Args:
             task_id: The task id.
-            instance_id: Pick the body recorded as this registry instance.
-            instance_hash: Pick the body with this instance hash.
-            store: The store directory. Default: ``[project] task_store`` in
-                ``.stardag/config.toml`` (or ``STARDAG_TASK_STORE``).
+            instance_id: Pick the body recorded as this registry instance
+                (matched against the file's ``sources``, unverified
+                metadata).
+            instance_hash: Pick the body with this instance hash (the
+                file's verified content address). Given with
+                ``instance_id``, the body must match both; the printed lines
+                pass both.
+            store: The store directory, or ``"pkg:<package>/<dir>"``. A
+                relative path resolves against the package root (the
+                ``pyproject.toml``'s directory), as the configured one does.
 
         Raises:
             TaskStoreError: No store is configured; it holds no matching
@@ -553,7 +567,7 @@ class BaseTask(
             TaskRehydrationError: The body does not validate, is of another
                 class, or no longer recomputes to ``task_id``.
         """
-        from stardag._core.task_store import load_from_store
+        from stardag._core.task_store_read import load_from_store
 
         return load_from_store(  # type: ignore[return-value]
             cls,
@@ -887,13 +901,19 @@ class TargetTask(BaseTask, Generic[TargetType]):
 def _make_ref(
     task_class: type[BaseTask], task_id: UUID | str, instance_id: UUID | str | None
 ) -> Any:
+    from stardag._core.anchor import caller_file
     from stardag._core.task_ref import parametrized_ref_class
+    from stardag._core.task_store_read import REF_ANCHOR_KEY
 
-    return parametrized_ref_class(task_class)(
+    ref = parametrized_ref_class(task_class)(
         task_class=task_class,
         task_id=UUID(str(task_id)),
         instance_id=None if instance_id is None else UUID(str(instance_id)),
     )
+    # Which package's task store serves it: the code creating it. Kept
+    # outside the fields (not dumped, hashed, compared or pickled).
+    vars(ref)[REF_ANCHOR_KEY] = caller_file()
+    return ref
 
 
 def flatten_task_struct(task_struct: TaskStruct | None) -> list[BaseTask]:

@@ -143,38 +143,40 @@ def test_an_instance_of_another_task_is_refused(fake_registry, running_build):
 
 
 def test_write_stores_the_tree_and_prints_the_reader(
-    fake_registry, running_build, tmp_path
+    fake_registry, running_build, tmp_path, monkeypatch
 ):
     import stardag as sd
 
+    monkeypatch.chdir(tmp_path)
     root = running_build.root
     (newest, *_) = _instances_of(fake_registry, str(root.id))
-    result = invoke("tasks", "ref", root.id, "--write", "--store", tmp_path)
+    result = invoke("tasks", "ref", root.id, "--write", "--store", "pins")
     assert result.exit_code == 0, result.output
+    expected = (
+        f'SyncOnlyTask.from_store("{root.id}", instance_id="{newest}", '
+        f'instance_hash="{root.instance_hash}", store="pins")'
+    )
+    # The store is printed as given: relative, not this machine's path.
     assert result.stdout.splitlines() == [
         "from stardag.utils.testing.helper_tasks import SyncOnlyTask",
-        f'SyncOnlyTask.from_store("{root.id}", instance_id="{newest}", '
-        f"store={json.dumps(str(tmp_path))})",
+        expected,
     ]
     assert "Wrote 2 file(s)" in result.stderr
     loaded = sd.task_from_store(
-        sd.BaseTask, root.id, instance_id=newest, store=tmp_path
+        sd.BaseTask, root.id, instance_id=newest, store=tmp_path / "pins"
     )
     assert loaded == root
-    again = invoke("tasks", "ref", root.id, "--write", "--store", tmp_path, "--json")
+    again = invoke("tasks", "ref", root.id, "--write", "--store", "pins", "--json")
     payload = json.loads(again.stdout)
     assert payload["store"]["written"] == []
-    assert payload["store"]["from_store"] == (
-        f'SyncOnlyTask.from_store("{root.id}", instance_id="{newest}", '
-        f"store={json.dumps(str(tmp_path))})"
-    )
+    assert payload["store"]["from_store"] == expected
 
 
 def test_write_uses_the_configured_store(fake_registry, running_build, tmp_path):
-    from stardag.config.project import ProjectConfig, project_config_provider
+    from stardag.config.project import ProjectConfig, project_config_override
 
     leaf = running_build.leaf
-    with project_config_provider.override(ProjectConfig(task_store=tmp_path)):
+    with project_config_override(ProjectConfig(task_store=tmp_path)):
         result = invoke("tasks", "ref", leaf.id, "--write")
     assert result.exit_code == 0, result.output
     assert list(tmp_path.rglob(f"{leaf.instance_hash}.json"))

@@ -1,5 +1,5 @@
 """Import resolution in a fresh process: module hints recorded in the task
-store, and the project's ``[project] task_modules`` imported lazily on a
+store, and the package's ``[tool.stardag] task_modules`` imported lazily on a
 rehydration miss. Each scenario runs in a subprocess that never imports
 the task module by hand.
 
@@ -100,8 +100,9 @@ def _write_model(project: Path) -> dict[str, str]:
 
 
 def _configure(project: Path, table: str) -> None:
-    (project / ".stardag").mkdir(exist_ok=True)
-    (project / ".stardag" / "config.toml").write_text(f"[project]\n{table}\n")
+    (project / "pyproject.toml").write_text(
+        f'[project]\nname = "storetest"\n\n[tool.stardag]\n{table}\n'
+    )
 
 
 def test_module_hints_make_from_store_work_with_no_imports(project):
@@ -202,7 +203,7 @@ def test_without_task_modules_the_error_says_how_to_configure_them(project):
     assert result.returncode != 0
     assert "TaskClassNotRegisteredError" in result.stderr
     assert "identity.only" in result.stderr
-    assert "[project] task_modules" in result.stderr
+    assert "[tool.stardag] task_modules" in result.stderr
 
 
 def test_uncovering_task_modules_are_named_in_the_error(project):
@@ -253,7 +254,7 @@ def test_a_concurrent_miss_waits_for_the_import_and_retries(monkeypatch):
 
     from stardag._core import task_imports
     from stardag.build import _task_modules
-    from stardag.config.project import ProjectConfig, project_config_provider
+    from stardag.config.project import ProjectConfig, project_config_override
 
     started = threading.Event()
 
@@ -264,7 +265,7 @@ def test_a_concurrent_miss_waits_for_the_import_and_retries(monkeypatch):
 
     monkeypatch.setattr(_task_modules, "import_task_modules", slow_import)
     results: list[bool] = []
-    with project_config_provider.override(ProjectConfig(task_modules=("json",))):
+    with project_config_override(ProjectConfig(task_modules=("json",))):
         first = threading.Thread(
             target=lambda: results.append(task_imports.import_project_task_modules())
         )
@@ -273,3 +274,53 @@ def test_a_concurrent_miss_waits_for_the_import_and_retries(monkeypatch):
         results.append(task_imports.import_project_task_modules())
         first.join()
     assert results == [True, True]
+
+
+def test_excluded_modules_are_not_imported(project):
+    """A recursive pattern with an exclusion skips a deploy entry point that
+    cannot be imported outside its deploy environment."""
+    written = _write_model(project)
+    (project / "src" / "storetest_pkg" / "deploy.py").write_text(
+        "raise RuntimeError('needs the deploy environment')\n"
+    )
+    _configure(project, 'task_modules = ["storetest_pkg.*", "!storetest_pkg.deploy"]')
+    result = _run(
+        project,
+        f"""
+        import json, sys
+        import stardag as sd
+
+        body = json.loads({json.dumps(json.dumps(written["body"]))})
+        print(type(sd.task_from_body(body)).__name__)
+        assert "storetest_pkg.deploy" not in sys.modules
+        """,
+    )
+    assert _ok(result) == "TrainedModel"
+    assert "deploy" not in result.stderr
+
+
+def test_a_module_that_rehydrates_at_import_does_not_deadlock(project):
+    """task_modules imports a module whose own import rehydrates a body:
+    its nested miss is not re-imported (no recursion, no lock held), and
+    the outer lookup succeeds once the import finishes."""
+    written = _write_model(project)
+    (project / "src" / "storetest_pkg" / "a_pins.py").write_text(
+        "import json\n"
+        "import stardag as sd\n"
+        f"BODY = json.loads({json.dumps(json.dumps(written['body']))})\n"
+        "PINNED = sd.task_from_body(BODY)\n"
+    )
+    _configure(project, 'task_modules = ["storetest_pkg.*"]')
+    out = _ok(
+        _run(
+            project,
+            f"""
+            import json
+            import stardag as sd
+
+            body = json.loads({json.dumps(json.dumps(written["body"]))})
+            print(type(sd.task_from_body(body)).__name__)
+            """,
+        )
+    )
+    assert out == "TrainedModel"

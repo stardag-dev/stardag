@@ -28,7 +28,7 @@ from stardag._core.task_store_format import (
     hash_of,
 )
 from stardag._core.task_store_write import write_from_registry
-from stardag.config.project import ProjectConfig, project_config_provider
+from stardag.config.project import ProjectConfig, project_config_override
 from stardag.testing import InMemoryRegistry
 from stardag.testing import test_harness as harness
 
@@ -151,6 +151,7 @@ def test_a_shared_upstream_is_stored_once(tmp_path):
     assert root["body"]["by_name"]["x"] == {
         POINTER_KEY: {
             "instance_hash": str(shared.instance_hash),
+            "task": f"{__name__}.Dataset",
             "task_id": str(shared.id),
         }
     }
@@ -307,7 +308,7 @@ def test_several_bodies_need_a_pick(tmp_path):
 
 
 def test_no_store_configured_is_a_clear_error():
-    with pytest.raises(TaskStoreNotConfiguredError, match=r"\[project\]"):
+    with pytest.raises(TaskStoreNotConfiguredError, match=r"\[tool.stardag\]"):
         Dataset.from_store(uuid4())
     with pytest.raises(TaskStoreNotConfiguredError):
         sd.write_to_store(Dataset(size=1))
@@ -315,7 +316,7 @@ def test_no_store_configured_is_a_clear_error():
 
 def test_the_configured_store_is_used(tmp_path):
     model = TrainedModel(data=Dataset(size=3))
-    with project_config_provider.override(ProjectConfig(task_store=tmp_path)):
+    with project_config_override(ProjectConfig(task_store=tmp_path)):
         (stored,) = sd.write_to_store(model)
         assert TrainedModel.from_store(model.id) == model
     assert stored.path.is_relative_to(tmp_path)
@@ -330,7 +331,7 @@ def test_the_function_form_reads_a_class_shadowing_the_classmethod(tmp_path):
 
 def test_the_printed_lines(tmp_path):
     model = TrainedModel(data=Dataset(size=3))
-    with project_config_provider.override(ProjectConfig(task_store=tmp_path)):
+    with project_config_override(ProjectConfig(task_store=tmp_path)):
         (stored,) = sd.write_to_store(model, store=tmp_path)
     assert str(stored).splitlines() == [
         f"from {__name__} import TrainedModel",
@@ -396,11 +397,12 @@ def _seeded(task: sd.BaseTask) -> tuple[InMemoryRegistry, UUID]:
 def test_write_from_registry_records_the_instance(tmp_path):
     model = TrainedModel(data=Dataset(size=3))
     registry, instance_id = _seeded(model)
-    with project_config_provider.override(ProjectConfig(task_store=tmp_path)):
+    with project_config_override(ProjectConfig(task_store=tmp_path)):
         stored = write_from_registry(model.id, registry=registry)
     assert stored.instance_id == instance_id
     assert stored.call == (
-        f'TrainedModel.from_store("{model.id}", instance_id="{instance_id}")'
+        f'TrainedModel.from_store("{model.id}", instance_id="{instance_id}", '
+        f'instance_hash="{model.instance_hash}")'
     )
     root = json.loads(stored.path.read_text())
     (source,) = root["sources"]
@@ -451,7 +453,7 @@ def test_a_body_that_does_not_rehydrate_is_not_written(tmp_path):
 
 @pytest.fixture
 def configured_store(tmp_path) -> typing.Iterator[Path]:
-    with project_config_provider.override(ProjectConfig(task_store=tmp_path)):
+    with project_config_override(ProjectConfig(task_store=tmp_path)):
         yield tmp_path
 
 
@@ -517,3 +519,216 @@ def test_provenance_is_the_clients_own_scope_not_the_ambient_profile():
         "workspace": "ws-id",
         "environment": "env-id",
     }
+
+
+# -----------------------------------------------------------------------------
+# Verified vs metadata, paths, modes, labels
+# -----------------------------------------------------------------------------
+
+
+def test_swapped_sources_are_caught_by_the_printed_hash(tmp_path):
+    """``sources`` is unverified metadata: swapping the instance ids of two
+    bodies (a bad merge) misleads a lookup by instance id alone, and the
+    printed line, which also passes the verified hash, refuses it."""
+    plain, annotated = Dataset(size=3), Dataset(size=3, note="kept")
+    registry = InMemoryRegistry()
+    a, b = uuid4(), uuid4()
+    registry.add_instance(body=plain.instance_body(), task_id=plain.id, instance_id=a)
+    registry.add_instance(
+        body=annotated.instance_body(), task_id=annotated.id, instance_id=b
+    )
+    stored_a = write_from_registry(
+        plain.id, instance_id=a, registry=registry, store=tmp_path
+    )
+    stored_b = write_from_registry(
+        plain.id, instance_id=b, registry=registry, store=tmp_path
+    )
+    for stored, other in ((stored_a, b), (stored_b, a)):
+        data = json.loads(stored.path.read_text())
+        data["sources"][0]["instance_id"] = str(other)
+        stored.path.write_text(json.dumps(data))
+    # By id alone: the unverified record decides (documented).
+    assert Dataset.from_store(plain.id, instance_id=a, store=tmp_path).note == "kept"
+    # By id and hash, as printed: refused, not the other body.
+    with pytest.raises(sd.TaskStoreError, match="holds no body"):
+        Dataset.from_store(
+            plain.id,
+            instance_id=a,
+            instance_hash=plain.instance_hash,
+            store=tmp_path,
+        )
+
+
+def test_a_pointer_naming_another_class_is_refused(tmp_path):
+    model = TrainedModel(data=Dataset(size=3))
+    (stored,) = sd.write_to_store(model, store=tmp_path)
+    data = json.loads(stored.path.read_text())
+    data["body"]["data"][POINTER_KEY]["task"] = "something.Else"
+    stored.path.write_text(json.dumps(data))
+    with pytest.raises(sd.TaskStoreError, match="holds a"):
+        TrainedModel.from_store(model.id, store=tmp_path)
+
+
+def test_a_relative_store_resolves_against_the_package_root(tmp_path, monkeypatch):
+    package = tmp_path / "pkg"
+    package.mkdir()
+    monkeypatch.chdir(tmp_path)  # not the package root
+    model = TrainedModel(data=Dataset(size=3))
+    with project_config_override(ProjectConfig(root=package)):
+        (stored,) = sd.write_to_store(model, store="pins")
+        assert stored.path.is_relative_to(package / "pins")
+        assert stored.call.endswith(', store="pins")')
+        assert TrainedModel.from_store(model.id, store="pins") == model
+
+
+def test_the_configured_store_is_not_printed(tmp_path):
+    model = TrainedModel(data=Dataset(size=3))
+    with project_config_override(
+        ProjectConfig(root=tmp_path, task_store=tmp_path / "s")
+    ):
+        (stored,) = sd.write_to_store(model, store="s")
+    assert "store=" not in stored.call
+
+
+def test_an_absolute_store_outside_the_package_warns(tmp_path):
+    package = tmp_path / "pkg"
+    package.mkdir()
+    model = TrainedModel(data=Dataset(size=3))
+    with project_config_override(ProjectConfig(root=package)):
+        with pytest.warns(UserWarning, match="absolute path outside the package"):
+            sd.write_to_store(model, store=tmp_path / "elsewhere")
+
+
+def test_files_get_an_ordinary_mode(tmp_path):
+    import os
+
+    mask = os.umask(0o022)
+    os.umask(mask)
+    sd.write_to_store(TrainedModel(data=Dataset(size=3)), store=tmp_path)
+    for path in _store_files(tmp_path):
+        assert path.stat().st_mode & 0o777 == 0o666 & ~mask
+
+
+@pytest.mark.parametrize(
+    "namespace,name,expected",
+    [
+        ("", ".", "_."),
+        ("", "..", "_.."),
+        ("", ".hidden", "_.hidden"),
+        ("", "CON", "_CON"),
+        ("", "nul", "_nul"),
+        ("", "Com1", "_Com1"),
+        ("lpt9", "Model", "_lpt9.Model"),
+        ("", "Aux.txt", "_Aux.txt"),
+        ("", "Console", "Console"),
+        ("a b", "Model", "a_b.Model"),
+    ],
+)
+def test_labels_are_safe_directory_names(namespace, name, expected):
+    from stardag._core.task_store_format import label
+
+    assert label(namespace, name) == expected
+
+
+def test_a_known_module_hint_is_never_replaced_by_none(tmp_path):
+    model = TrainedModel(data=Dataset(size=3))
+    (stored,) = sd.write_to_store(model, store=tmp_path)
+    store = TaskStore(tmp_path)
+    envelope = store.read(stored.path)
+    envelope.module = None
+    assert store.write(envelope, {"kind": "local"}) is None
+    assert json.loads(stored.path.read_text())["module"] == __name__
+
+
+def test_files_added_on_disk_are_found_after_a_cached_index(tmp_path):
+    import shutil
+
+    first, second = tmp_path / "first", tmp_path / "second"
+    model, other = TrainedModel(data=Dataset(size=3)), Dataset(size=9)
+    sd.write_to_store(model, store=first)
+    sd.write_to_store(other, store=second)
+    assert TrainedModel.from_store(model.id, store=first) == model  # index cached
+    shutil.copytree(second, first, dirs_exist_ok=True)  # e.g. a git pull
+    assert Dataset.from_store(other.id, store=first) == other
+
+
+def test_concurrent_processes_keep_every_instance_id(tmp_path):
+    """Two processes adding sources to one body serialize on the store's
+    lock: no addition is lost."""
+    import os
+    import subprocess
+    import sys
+    import textwrap
+
+    script = tmp_path / "writer.py"
+    script.write_text(
+        textwrap.dedent(
+            f"""
+            import sys, uuid
+            sys.path.insert(0, {str(Path(__file__).parent)!r})
+            import stardag as sd
+            from stardag._core.task_store_write import write_from_registry
+            from stardag.testing import InMemoryRegistry
+            from test_task_store import Dataset
+
+            task = Dataset(size=3)
+            registry = InMemoryRegistry()
+            for _ in range(15):
+                iid = uuid.uuid4()
+                registry.add_instance(body=task.instance_body(), task_id=task.id, instance_id=iid)
+                write_from_registry(task.id, instance_id=iid, registry=registry, store=sys.argv[1])
+            """
+        )
+    )
+    env = {k: v for k, v in os.environ.items() if not k.startswith("STARDAG_")}
+    env.update(STARDAG_NO_REGISTRY="1", HOME=str(tmp_path))
+    store = tmp_path / "store"
+    procs = [
+        subprocess.Popen([sys.executable, str(script), str(store)], env=env)
+        for _ in range(2)
+    ]
+    assert [p.wait(timeout=120) for p in procs] == [0, 0]
+    (path,) = list(store.rglob("*.json"))
+    assert len(json.loads(path.read_text())["sources"]) == 30
+
+
+# -----------------------------------------------------------------------------
+# References: which source serves them
+# -----------------------------------------------------------------------------
+
+
+def test_an_explicit_registry_skips_the_store(configured_store):
+    stored_body = Dataset(size=3, note="from the store")
+    sd.write_to_store(stored_body)
+    registry, instance_id = _seeded(Dataset(size=3, note="from the registry"))
+    ref = Dataset.ref(stored_body.id)
+    assert ref.hydrate(registry).note == "from the registry"
+    sd.clear_hydration_memo()
+    assert Dataset.ref(stored_body.id).hydrate().note == "from the store"
+
+
+def test_a_failed_hydration_says_which_store_was_checked(configured_store):
+    with pytest.raises(sd.TaskRefHydrationError) as e:
+        Dataset.ref(uuid4()).hydrate()
+    assert f"The task store at {configured_store} holds no body" in str(e.value)
+
+
+def test_a_failed_hydration_says_no_store_is_configured():
+    with pytest.raises(sd.TaskRefHydrationError, match="No task store is configured"):
+        Dataset.ref(uuid4()).hydrate()
+
+
+def test_a_ref_keeps_its_anchor_on_copies_but_not_in_pickles():
+    import copy
+    import pickle
+
+    from stardag._core.task_store_read import REF_ANCHOR_KEY
+
+    ref = Dataset.ref(uuid4())
+    assert vars(ref)[REF_ANCHOR_KEY] == Path(__file__).absolute()
+    assert vars(copy.deepcopy(ref))[REF_ANCHOR_KEY] == Path(__file__).absolute()
+    assert vars(ref.model_copy())[REF_ANCHOR_KEY] == Path(__file__).absolute()
+    assert REF_ANCHOR_KEY not in vars(pickle.loads(pickle.dumps(ref)))
+    other = Dataset.ref(ref.task_id)
+    vars(other)[REF_ANCHOR_KEY] = Path("/elsewhere.py")
+    assert other == ref  # not compared
