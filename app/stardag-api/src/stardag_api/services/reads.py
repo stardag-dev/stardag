@@ -10,8 +10,12 @@
   body under one scope — newest first. Which body to rehydrate is the
   caller's choice (they are different constructions of one promise). The
   claim's holder is named by plan and build.
-- ``GET /tasks`` (:func:`list_tasks`): completions by status, most recent
-  status change first, a page at a time (triage).
+- ``GET /tasks`` (:func:`list_tasks`): completions, most recent status
+  change first, a page at a time, filtered by status (triage) and for
+  discovery by name, namespace, tags, task-id prefix and free text.
+- ``GET /instances/{instance_id}`` (:func:`get_instance`): one instance by
+  its row id, with the completion it realises — the read a pinned task
+  reference hydrates from.
 - ``GET /tasks/{task_id}/events`` and ``GET /builds/{id}/events``
   (:func:`list_events`): the append-only log, oldest first. The status
   columns are one row per task, overwritten by whoever wrote last; the log
@@ -28,7 +32,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Select, func, select, tuple_
+from sqlalchemy import Select, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import (
@@ -159,6 +163,10 @@ class TaskView:
     claim_build_id: UUID | None
     #: The current execution (the claim's, while RUNNING).
     execution_id: UUID | None
+    #: Annotations (``services/annotations.py``): normalised tags and a
+    #: description, mutable and outside every hash.
+    tags: list[str] = field(default_factory=list)
+    description: str | None = None
     instances: list[InstanceView] = field(default_factory=list)
 
     @classmethod
@@ -183,6 +191,8 @@ class TaskView:
             claim_plan_id=task.claim_plan_id,
             claim_build_id=claim_build_id,
             execution_id=task.execution_id,
+            tags=list(task.tags or []),
+            description=task.description,
             instances=instances or [],
         )
 
@@ -238,6 +248,36 @@ def _with_claim_build(stmt: Select[tuple[Task]]) -> Select[tuple[Task, UUID | No
     )
 
 
+_LIKE_ESCAPE = "\\"
+
+_MAX_CODE_POINT = 0x10FFFF
+_SURROGATES = range(0xD800, 0xE000)
+
+
+def _prefix_successor(prefix: str) -> str | None:
+    """The least string greater than every string starting with ``prefix``,
+    in bytewise (UTF-8, so code point) order; ``None`` if there is none.
+
+    The last character incremented (over the surrogates, which UTF-8 cannot
+    encode); a trailing U+10FFFF has no successor, so it is dropped and the
+    one before it incremented instead."""
+    chars = list(prefix)
+    while chars:
+        code = ord(chars.pop()) + 1
+        if code <= _MAX_CODE_POINT:
+            if code in _SURROGATES:
+                code = _SURROGATES.stop
+            return "".join(chars) + chr(code)
+    return None
+
+
+def _like_escape(value: str) -> str:
+    """``value`` matched literally inside a ``LIKE`` pattern."""
+    for char in (_LIKE_ESCAPE, "%", "_"):
+        value = value.replace(char, _LIKE_ESCAPE + char)
+    return value
+
+
 @dataclass(frozen=True)
 class TaskPage:
     tasks: list[TaskView]
@@ -249,20 +289,78 @@ async def list_tasks(
     environment_id: UUID,
     *,
     status: TaskStatus | None = None,
+    namespace: str | None = None,
+    name: str | None = None,
+    tags: list[str] | None = None,
+    id_prefix: str | None = None,
+    q: str | None = None,
     limit: int = 100,
     cursor: str | None = None,
 ) -> TaskPage:
-    """Completions, most recent status change first, a page at a time,
-    optionally of one status — triage's "what is FAILED / RUNNING here"
-    (``ix_task_environment_status``). Without instances: ``GET
-    /tasks/{task_id}`` carries those. ``status_at`` is written at
-    registration and by every transition, so every task has one."""
+    """Completions, most recent status change first, a page at a time.
+    Without instances: ``GET /tasks/{task_id}`` carries those.
+    ``status_at`` is written at registration and by every transition, so
+    every task has one.
+
+    Every filter given must hold (they AND together):
+
+    - ``status``: one global status — triage's "what is FAILED / RUNNING
+      here" (``ix_task_environment_status``);
+    - ``namespace`` / ``name``: exact ``task_namespace`` / ``task_name``
+      (``""`` is the root namespace);
+    - ``tags``: **all of** them (``tags @> ARRAY[...]``, ``ix_task_tags``),
+      already normalised by the caller;
+    - ``id_prefix``: ``task_id`` starts with it;
+    - ``q``: case-insensitive substring of the name, the namespace or the
+      description.
+
+    ``%`` and ``_`` in ``q`` match themselves; ``id_prefix`` is a range,
+    not a pattern. Indexes
+    (``models/task.py``): ``ix_task_environment_status_at`` for the order
+    and keyset, ``ix_task_search_trgm`` for ``q`` (3+ characters),
+    ``ix_task_environment_task_id_prefix`` for ``id_prefix``,
+    ``ix_task_tags`` for ``tags``.
+
+    The filters only narrow the set: the order and the keyset cursor
+    (``(status_at, id)``) are those of the unfiltered listing, so pass the
+    same filters with each cursor. The cursor is a position, not a
+    snapshot: a task whose status changes while a caller pages moves to the
+    front (its ``status_at`` advances), so it is not seen again on a later
+    page if it was already passed, and is skipped if it was not reached
+    yet. Tasks that do not change are each listed exactly once."""
     limit = max(1, min(limit, MAX_LIST_LIMIT))
     stmt = _with_claim_build(select(Task)).where(
         Task.environment_id == environment_id, Task.status_at.is_not(None)
     )
     if status is not None:
         stmt = stmt.where(Task.status == status)
+    if namespace is not None:
+        stmt = stmt.where(Task.task_namespace == namespace)
+    if name is not None:
+        stmt = stmt.where(Task.task_name == name)
+    if tags:
+        stmt = stmt.where(Task.tags.contains(tags))
+    # Each pattern is built here and bound as ONE parameter: the planner
+    # derives an index condition from a pattern it can see (a custom plan),
+    # never from ``'%' || $1 || '%'`` assembled at run time.
+    if id_prefix:
+        # A range in ``text_pattern_ops``' bytewise order rather than ``LIKE
+        # 'p%'``: ``ix_task_environment_task_id_prefix`` serves it under any
+        # plan, a generic one included, where ``LIKE $1`` has no prefix the
+        # planner could extract.
+        stmt = stmt.where(Task.task_id.op("~>=~")(id_prefix))
+        upper = _prefix_successor(id_prefix)
+        if upper is not None:
+            stmt = stmt.where(Task.task_id.op("~<~")(upper))
+    if q:
+        pattern = f"%{_like_escape(q)}%"
+        stmt = stmt.where(
+            or_(
+                Task.task_name.ilike(pattern, escape=_LIKE_ESCAPE),
+                Task.task_namespace.ilike(pattern, escape=_LIKE_ESCAPE),
+                Task.description.ilike(pattern, escape=_LIKE_ESCAPE),
+            )
+        )
     if cursor is not None:
         at, after_id = decode_cursor(cursor)
         stmt = stmt.where(tuple_(Task.status_at, Task.id) < (at, after_id))
@@ -285,6 +383,60 @@ async def list_tasks(
             if last is not None and last.status_at is not None
             else None
         ),
+    )
+
+
+@dataclass(frozen=True)
+class InstanceDetailView:
+    """One instance with the completion it realises (``task_id``)."""
+
+    id: UUID
+    task_id: str
+    deployment_id: UUID
+    settings_hash: UUID
+    instance_hash: str
+    body: dict[str, Any]
+    created_at: datetime
+    expanded_at: datetime | None
+
+
+async def get_instance(
+    session: AsyncSession, environment_id: UUID, instance_id: UUID
+) -> InstanceDetailView:
+    """One instance of the caller's environment by its row id. 404
+    ``unknown_instance`` otherwise — an instance of another environment
+    included, so its existence is not disclosed. Bodies are immutable, so
+    the answer for an id never changes except ``expanded_at``."""
+    row = (
+        await session.execute(
+            select(TaskInstance, Task.task_id)
+            .join(
+                Task,
+                (Task.environment_id == TaskInstance.environment_id)
+                & (Task.id == TaskInstance.task_pk),
+            )
+            .where(
+                TaskInstance.environment_id == environment_id,
+                TaskInstance.id == instance_id,
+            )
+        )
+    ).one_or_none()
+    if row is None:
+        raise NotFound(
+            "unknown_instance",
+            f"no instance {instance_id}",
+            instance_id=str(instance_id),
+        )
+    instance, task_id = row._tuple()
+    return InstanceDetailView(
+        id=instance.id,
+        task_id=task_id,
+        deployment_id=instance.deployment_id,
+        settings_hash=instance.settings_hash,
+        instance_hash=instance.instance_hash,
+        body=instance.body,
+        created_at=instance.created_at,
+        expanded_at=instance.expanded_at,
     )
 
 
@@ -359,10 +511,12 @@ async def list_events(
 __all__ = [
     "BuildPage",
     "EventView",
+    "InstanceDetailView",
     "InstanceView",
     "MAX_LIST_LIMIT",
     "TaskPage",
     "TaskView",
+    "get_instance",
     "get_task",
     "list_builds",
     "list_events",

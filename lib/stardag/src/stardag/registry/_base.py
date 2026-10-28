@@ -25,6 +25,7 @@ import os
 import subprocess
 from collections.abc import Mapping, Sequence
 from functools import lru_cache
+from types import EllipsisType
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -472,6 +473,27 @@ class RegistryABC(RegistryLedgerABC, RegistryReadsABC):
         """``GET /tasks/{task_id}``: a completion's identity and state, with
         its instances (each a construction under one scope), newest first."""
         raise _missing(self, "task_get")
+
+    def task_annotate(
+        self,
+        task_id: str,
+        *,
+        tags: Sequence[str] | EllipsisType = ...,
+        description: str | None | EllipsisType = ...,
+    ) -> TaskInfo:
+        """``PATCH /tasks/{task_id}``: set a completion's annotations and
+        return it (without instances). For both arguments the default
+        ``...`` means "leave unchanged". ``tags`` replaces the whole set
+        (``[]`` clears it); ``description`` replaces the description
+        (``None`` or ``""`` clears it). The registry normalises tags
+        (trimmed, deduplicated, sorted) and refuses an empty or over-long
+        one, or more than 32 (422).
+
+        Replacing the set is last-writer-wins: two callers each adding a tag
+        by read-modify-write can lose one addition (there is no server-side
+        add/remove). Annotations are mutable and outside every hash: they
+        never change a task id. 404 for an unknown task."""
+        raise _missing(self, "task_annotate")
 
     def task_list_artifacts(self, task_id: str) -> list[TaskArtifactInfo]:
         """``GET /tasks/{task_id}/artifacts``."""

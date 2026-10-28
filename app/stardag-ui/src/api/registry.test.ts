@@ -5,12 +5,14 @@ vi.mock("./config", () => ({ API_V2: "https://api.test/api/v2" }));
 
 import { fetchWithAuth } from "./client";
 import {
+  annotateTask,
   completeBuild,
   deleteConcurrencyLimit,
   fetchBuilds,
   fetchConcurrencyLimits,
   fetchPlanGraph,
   fetchTask,
+  fetchTasks,
   RegistryError,
   setConcurrencyLimit,
 } from "./registry";
@@ -110,5 +112,75 @@ describe("registry API", () => {
       code: "invalid_limit_key",
     });
     expect(mocked).toHaveBeenCalledTimes(3);
+  });
+
+  it("searches tasks with repeated tags and the root namespace", async () => {
+    respond(200, { tasks: [], next_cursor: null });
+    await fetchTasks("env-1", {
+      q: "train",
+      namespace: "",
+      name: "Train",
+      tags: ["a", "b"],
+      idPrefix: "df0c",
+      status: "completed",
+      limit: 50,
+      cursor: "c1",
+    });
+    const url = new URL(mocked.mock.calls[0][0] as string);
+    expect(url.pathname).toBe("/api/v2/tasks");
+    expect(url.searchParams.getAll("tag")).toEqual(["a", "b"]);
+    expect(url.searchParams.has("namespace")).toBe(true);
+    expect(url.searchParams.get("namespace")).toBe("");
+    expect(url.searchParams.get("id_prefix")).toBe("df0c");
+    expect(url.searchParams.get("q")).toBe("train");
+    expect(url.searchParams.get("cursor")).toBe("c1");
+  });
+
+  it("omits filters that are not set", async () => {
+    respond(200, { tasks: [], next_cursor: null });
+    await fetchTasks("env-1");
+    const url = new URL(mocked.mock.calls[0][0] as string);
+    expect(Object.fromEntries(url.searchParams)).toEqual({ environment_id: "env-1" });
+  });
+
+  it("annotates a task with PATCH, sending only the named fields", async () => {
+    respond(200, { task_id: "t", tags: ["a"], description: null });
+    const saved = await annotateTask("t", "env-1", { tags: ["a"] });
+    const [requestUrl, init] = mocked.mock.calls[0] as [string, RequestInit];
+    expect(new URL(requestUrl).pathname).toBe("/api/v2/tasks/t");
+    expect(init.method).toBe("PATCH");
+    expect(JSON.parse(init.body as string)).toEqual({ tags: ["a"] });
+    expect(saved.tags).toEqual(["a"]);
+  });
+
+  it("surfaces a refused annotation", async () => {
+    respond(422, { detail: [{ msg: "Value error, a tag must not be empty" }] });
+    await expect(annotateTask("t", "env-1", { tags: [" "] })).rejects.toMatchObject({
+      status: 422,
+      message: "Value error, a tag must not be empty",
+    });
+  });
+
+  it("refuses a filtered page from a registry older than task search", async () => {
+    // An older registry ignores the filters and serves rows without tags.
+    respond(200, { tasks: [{ task_id: "t" }], next_cursor: null });
+    await expect(
+      fetchTasks("env-1", { tags: ["prod"], q: "train" }),
+    ).rejects.toMatchObject({
+      code: "search_unsupported",
+      message: expect.stringMatching(/tag, text/),
+    });
+  });
+
+  it("still reads unfiltered and status-only pages from an older registry", async () => {
+    respond(200, { tasks: [{ task_id: "t" }], next_cursor: null });
+    await expect(fetchTasks("env-1")).resolves.toMatchObject({
+      tasks: [{ task_id: "t" }],
+    });
+    respond(200, { tasks: [{ task_id: "t" }], next_cursor: null });
+    await expect(fetchTasks("env-1", { status: "failed" })).resolves.toBeTruthy();
+    // An empty filtered page cannot be told apart, and is simply empty.
+    respond(200, { tasks: [], next_cursor: null });
+    await expect(fetchTasks("env-1", { name: "X" })).resolves.toBeTruthy();
   });
 });

@@ -604,8 +604,11 @@ matches.
     stardag deployments show <deployment-id> [--json]
     stardag executions list (--build <build-id> [--not-in-current-plan] |
         --task <task-id>) [--include-ended] [--json]
-    stardag tasks list [--status S] [--limit N] [--cursor C] [--json]
+    stardag tasks list [--status S] [--tag T] [--name N] [--namespace NS]
+        [--id-prefix P] [--search TEXT] [--limit N] [--cursor C] [--json]
     stardag tasks show <task-id> [--include-ended] [--events N] [--json]
+    stardag tasks annotate <task-id> [--tag T] [--remove-tag T]
+        [--set-tags T] [--clear-tags] [--description TEXT] [--json]
     stardag tasks check <task-id> --module MODULE [--json]
     stardag tasks ref <task-id> [--instance <id>|newest] [--module MODULE]
         [--write [--store DIR]] [--json]
@@ -624,8 +627,11 @@ matches.
     uv run stardag deployments show <deployment-id> [--json]
     uv run stardag executions list (--build <build-id> [--not-in-current-plan] |
         --task <task-id>) [--include-ended] [--json]
-    uv run stardag tasks list [--status S] [--limit N] [--cursor C] [--json]
+    uv run stardag tasks list [--status S] [--tag T] [--name N] [--namespace NS]
+        [--id-prefix P] [--search TEXT] [--limit N] [--cursor C] [--json]
     uv run stardag tasks show <task-id> [--include-ended] [--events N] [--json]
+    uv run stardag tasks annotate <task-id> [--tag T] [--remove-tag T]
+        [--set-tags T] [--clear-tags] [--description TEXT] [--json]
     uv run stardag tasks check <task-id> --module MODULE [--json]
     uv run stardag tasks ref <task-id> [--instance <id>|newest] [--module MODULE]
         [--write [--store DIR]] [--json]
@@ -660,9 +666,14 @@ deployments`.
 - `tasks list` — the environment's tasks, most recent status change
   first, a page at a time (`--status` filters; pass the printed cursor
   back as `--cursor`). `--status running` answers "who holds what": the
-  `Claim (build)` column names the build holding each claim. v1's
-  `--older-than`, `--name` and `--namespace` filters are not offered: the
-  registry's task list filters by status only.
+  `Claim (build)` column names the build holding each claim. Every filter
+  given must hold: `--name` and `--namespace` match exactly (`--namespace
+''` is the root namespace), `--tag` is repeatable and a task must carry
+  all of them, `--id-prefix` matches the start of the task id, and
+  `--search`/`-s` (at least 3 characters) is a case-insensitive substring
+  of the name, the namespace or the description. Pass the same filters with `--cursor`. A registry that
+  predates these filters is refused rather than answered unfiltered.
+  v1's `--older-than` is not offered.
 - `tasks show` — one task's global status and the claim's holder (plan and
   build, live or lapsed), every instance the registry holds of it (one per
   scope it was constructed under, newest first), its executions across
@@ -672,6 +683,19 @@ deployments`.
   expanded instance that declared new static edges within its scope, which
   the registry appends and records rather than refuses — is called out
   above the event table, with its detail.
+- `tasks annotate <task-id>` — set the task's tags and description
+  (`PATCH /tasks/{id}`); what is not named is left as it is. `--tag` (or
+  `--add-tag`, repeatable) adds tags and `--remove-tag` removes them,
+  keeping the others; `--set-tags` (repeatable) replaces them all,
+  `--clear-tags` empties them, and `--description ''` clears the
+  description. Adding or removing reads the current tags and sends the
+  edited set, and the registry keeps whichever set arrives last, so an
+  annotation made by someone else in between is overwritten. Annotations
+  describe the completion (the task id, across every instance), are
+  mutable, and are outside every hash, so they never change a task id.
+  The registry trims, deduplicates and sorts tags, and refuses an empty or
+  over-long one (64 characters), or more than 32. Tags are for finding
+  tasks; code refers to a task by its id.
 - `tasks check <task-id> --module <import path>` — rehydrate the task's
   newest instance in this process (importing `--module`, repeatable, to
   resolve its class) and run `complete()` locally, printing the

@@ -56,8 +56,11 @@ Usage:
     stardag concurrency-limits delete <key> [--yes] [--json]
     stardag concurrency-limits holders <key> [--limit N] [--json]
 
-    stardag tasks list [--status S] [--limit N] [--cursor C] [--json]
+    stardag tasks list [--status S] [--tag T] [--name N] [--namespace NS]
+        [--id-prefix P] [--search TEXT] [--limit N] [--cursor C] [--json]
     stardag tasks show <task-id> [--include-ended] [--events N] [--json]
+    stardag tasks annotate <task-id> [--tag T] [--remove-tag T]
+        [--set-tags T] [--clear-tags] [--description D] [--json]
     stardag tasks check <task-id> --module <import path> [--json]
     stardag tasks ref <task-id> [--instance <id>] [--module <import path>]
         [--write [--store <dir>]] [--json]

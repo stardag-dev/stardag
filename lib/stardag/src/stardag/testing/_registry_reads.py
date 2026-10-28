@@ -1,6 +1,7 @@
 """The inspecting reads of :class:`~stardag.testing.InMemoryRegistry` —
 build lists with paging, a plan with its counts, a build's plans, task
-lists, a task's executions and events, a deployment — with the server's
+lists (with the discovery filters), a task's executions and events, a
+deployment — with the server's
 orderings and shapes (``services/reads.py``, ``services/plan_reads.py``,
 ``services/executions.py``). Cursors are opaque offsets here; only their
 round trip is part of the contract.
@@ -13,6 +14,8 @@ from collections.abc import Sequence
 from typing import Any, TypeVar
 from uuid import UUID
 
+from stardag.exceptions import APIError
+from stardag.registry._api_reads import _BARE_STRING_TAGS
 from stardag.registry import (
     BuildInfo,
     BuildListPage,
@@ -31,6 +34,7 @@ from stardag.testing._registry_state import (
     PlanRow,
     RegistryState,
     TaskRow,
+    normalise_tags,
     refuse,
 )
 
@@ -47,6 +51,33 @@ def _page(
     page = list(rows[start : start + limit])
     more = start + limit < len(rows)
     return page, (str(start + limit) if more else None)
+
+
+#: ``GET /tasks``'s query bounds: (min, max) length per string filter.
+_TASK_FILTER_BOUNDS = {
+    "namespace": (0, 255),
+    "name": (0, 255),
+    "id_prefix": (1, 64),
+    "q": (3, 255),
+}
+
+
+def _check_task_filters(**filters: str | None) -> None:
+    """The route's refusals: a length out of bounds is 422 (FastAPI's
+    validation), a NUL is 400 ``invalid_filter``. ``namespace=""`` is the
+    root namespace, so it is valid."""
+    for param, value in filters.items():
+        if value is None:
+            continue
+        low, high = _TASK_FILTER_BOUNDS[param]
+        if not low <= len(value) <= high:
+            raise refuse(
+                "validation_error",
+                f"{param} must be {low}..{high} characters",
+                status=422,
+            )
+        if "\x00" in value:
+            raise refuse("invalid_filter", f"{param} must not contain NUL", status=400)
 
 
 def _wire_event_type(internal: str) -> str:
@@ -251,6 +282,8 @@ class ReadsMixin(RegistryState):
             claim_plan_id=claim_plan_id,
             claim_build_id=claim_build_id,
             execution_id=task.execution_id,
+            tags=list(task.tags),
+            description=task.description,
             **extra,
         )
 
@@ -258,16 +291,49 @@ class ReadsMixin(RegistryState):
         self,
         *,
         status: str | None = None,
+        namespace: str | None = None,
+        name: str | None = None,
+        tags: Sequence[str] | None = None,
+        id_prefix: str | None = None,
+        q: str | None = None,
         limit: int = 100,
         cursor: str | None = None,
     ) -> TaskListPage:
-        self._record("task_list", status=status, limit=limit, cursor=cursor)
+        self._record(
+            "task_list",
+            status=status,
+            namespace=namespace,
+            name=name,
+            tags=tags,
+            id_prefix=id_prefix,
+            q=q,
+            limit=limit,
+            cursor=cursor,
+        )
+        _check_task_filters(namespace=namespace, name=name, id_prefix=id_prefix, q=q)
+        if isinstance(tags, str):
+            raise TypeError(_BARE_STRING_TAGS)
+        try:
+            wanted = set(normalise_tags(tags)) if tags else set()
+        except APIError as e:
+            # The route answers a bad filter tag 400, not the PATCH's 422.
+            raise refuse("invalid_tag", str(e.detail), status=400) from None
+        needle = q.lower() if q else None
+
+        def matches(t: TaskRow) -> bool:
+            text = (t.task_name, t.task_namespace, t.description or "")
+            return (
+                t.status_at is not None
+                and (status is None or t.status == status)
+                and (namespace is None or t.task_namespace == namespace)
+                and (name is None or t.task_name == name)
+                and wanted <= set(t.tags)
+                and (not id_prefix or t.task_id.startswith(id_prefix))
+                and (needle is None or any(needle in f.lower() for f in text))
+            )
+
         rows = sorted(
-            (
-                t
-                for t in self.tasks.values()
-                if t.status_at is not None and (status is None or t.status == status)
-            ),
+            (t for t in self.tasks.values() if matches(t)),
             key=lambda t: (t.status_at, t.task_id),
             reverse=True,
         )

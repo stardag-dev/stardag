@@ -1,6 +1,6 @@
 """The read seams of :class:`~stardag.registry.RegistryABC` that only the
 CLI (and other inspecting callers) use: build lists, a plan with its
-counts, a build's plans, paged task lists, a task's executions and events,
+counts, a build's plans, paged and filtered task lists, a task's executions and events,
 tick summaries, a deployment. Split from ``_base.py`` by the module-size rule;
 :class:`RegistryABC` inherits them.
 
@@ -13,6 +13,7 @@ everywhere on the seam, a double that does not implement one raises
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from uuid import UUID
 
 from stardag.registry._models import (
@@ -74,11 +75,23 @@ class RegistryReadsABC:
         self,
         *,
         status: str | None = None,
+        namespace: str | None = None,
+        name: str | None = None,
+        tags: Sequence[str] | None = None,
+        id_prefix: str | None = None,
+        q: str | None = None,
         limit: int = 100,
         cursor: str | None = None,
     ) -> TaskListPage:
         """``GET /tasks``: completions, most recent status change first,
-        optionally of one status; without instances."""
+        without instances. Every filter given must hold: ``status``;
+        ``namespace`` and ``name``, exact (``namespace=""`` is the root
+        namespace); ``tags``, **all** of them; ``id_prefix``, the start of
+        the task id; ``q``, a case-insensitive substring of the name, the
+        namespace or the description. Pass the same filters with each
+        ``cursor``. A registry that predates the discovery filters
+        (anything but ``status``) is refused rather than answered
+        unfiltered."""
         raise _missing(self, "task_list")
 
     def task_instance_get(

@@ -8,7 +8,8 @@ with its edges, ``plan``, ``plan_member`` and the ``execution`` ledger.
 from __future__ import annotations
 
 import copy
-from collections.abc import Callable, Iterator, Mapping
+import unicodedata
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -42,6 +43,31 @@ def refuse(
     return APIError(
         f"{code} failed", status_code=status, detail=message, payload=payload
     )
+
+
+#: The registry's annotation bounds (``services/annotations.py``).
+MAX_TAGS = 32
+MAX_TAG_LENGTH = 64
+MAX_DESCRIPTION_LENGTH = 4096
+
+
+def normalise_tags(tags: Iterable[str]) -> list[str]:
+    """The registry's tag normalisation: each trimmed, then deduplicated
+    and sorted; an empty, over-long or control-character tag, or more than
+    :data:`MAX_TAGS`, is refused 422 as the server's validation is."""
+    normalised: set[str] = set()
+    for tag in tags:
+        tag = tag.strip()
+        if (
+            not tag
+            or len(tag) > MAX_TAG_LENGTH
+            or any(unicodedata.category(c) == "Cc" for c in tag)
+        ):
+            raise refuse("invalid_tag", f"invalid tag {tag!r}", status=422)
+        normalised.add(tag)
+    if len(normalised) > MAX_TAGS:
+        raise refuse("invalid_tag", f"at most {MAX_TAGS} tags", status=422)
+    return sorted(normalised)
 
 
 def settings_hash(body: Mapping[str, str]) -> str:
@@ -113,6 +139,8 @@ class TaskRow:
     preempted_at: datetime | None = None
     execution_id: UUID | None = None
     limit_keys: set[str] = field(default_factory=set)
+    tags: list[str] = field(default_factory=list)
+    description: str | None = None
     #: Created by ``add_instance`` (a test seeding a body), which cannot
     #: know the output URI: the first registration of the task supplies it.
     seeded: bool = False

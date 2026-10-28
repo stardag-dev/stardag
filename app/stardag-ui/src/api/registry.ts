@@ -25,9 +25,13 @@ import type {
   PlanListResponse,
   Settings,
   Task,
+  TaskAnnotations,
   TaskArtifactListResponse,
   TaskEvent,
   TaskExecutionListResponse,
+  TaskListResponse,
+  TaskStatus,
+  TaskSummary,
   TransitionResponse,
 } from "../types/task";
 import { fetchWithAuth } from "./client";
@@ -82,8 +86,12 @@ function url(path: string, environmentId: string, query: Record<string, string> 
   return `${API_V2}${path}?${params.toString()}`;
 }
 
-async function getJson<T>(requestUrl: string, what: string): Promise<T> {
-  const response = await fetchWithAuth(requestUrl);
+async function getJson<T>(
+  requestUrl: string,
+  what: string,
+  signal?: AbortSignal,
+): Promise<T> {
+  const response = await fetchWithAuth(requestUrl, signal ? { signal } : undefined);
   if (!response.ok) throw await toError(response, what);
   return response.json() as Promise<T>;
 }
@@ -295,6 +303,114 @@ export function retryMember(
 }
 
 // ---- Tasks ----
+
+/**
+ * `GET /tasks` filters. They AND together; an absent one does not filter.
+ * `namespace: ""` is the root namespace (a filter, not an absent one).
+ */
+export interface TaskFilters {
+  status?: TaskStatus;
+  // Exact matches.
+  namespace?: string;
+  name?: string;
+  // A task must carry all of them.
+  tags?: string[];
+  // The start of the task id.
+  idPrefix?: string;
+  // Case-insensitive substring of the name, the namespace or the description.
+  q?: string;
+  // Page size, 1..500 on the server.
+  limit?: number;
+  // The previous page's `next_cursor`, read with the same filters.
+  cursor?: string;
+}
+
+/** The query string `GET /tasks` is read with, `environment_id` included. */
+export function taskListQuery(
+  environmentId: string,
+  filters: TaskFilters = {},
+): URLSearchParams {
+  const params = new URLSearchParams({ environment_id: environmentId });
+  if (filters.status) params.set("status", filters.status);
+  if (filters.namespace !== undefined) params.set("namespace", filters.namespace);
+  if (filters.name) params.set("name", filters.name);
+  for (const tag of filters.tags ?? []) params.append("tag", tag);
+  if (filters.idPrefix) params.set("id_prefix", filters.idPrefix);
+  if (filters.q) params.set("q", filters.q);
+  if (filters.limit) params.set("limit", String(filters.limit));
+  if (filters.cursor) params.set("cursor", filters.cursor);
+  return params;
+}
+
+/** The refusal code of a search an older registry cannot answer. */
+export const SEARCH_UNSUPPORTED = "search_unsupported";
+
+/** The `GET /tasks` filters a registry older than task search ignores. */
+function searchFiltersIn(filters: TaskFilters): string[] {
+  const names: string[] = [];
+  if (filters.namespace !== undefined) names.push("namespace");
+  if (filters.name) names.push("name");
+  if (filters.tags?.length) names.push("tag");
+  if (filters.idPrefix) names.push("task id");
+  if (filters.q) names.push("text");
+  return names;
+}
+
+/**
+ * One page of the environment's completions, most recent status change
+ * first (`GET /tasks`). Keyset paging: pass `next_cursor` back as `cursor`
+ * with the same filters.
+ *
+ * A registry older than task search ignores the search filters as unknown
+ * query parameters and answers unfiltered; it also serves no `tags` on its
+ * rows, which is how that is told apart (as the SDK does). Such a page is
+ * refused with {@link SEARCH_UNSUPPORTED} rather than shown as results.
+ * Unfiltered and status-only reads work against it as before.
+ */
+export async function fetchTasks(
+  environmentId: string,
+  filters: TaskFilters = {},
+  signal?: AbortSignal,
+): Promise<TaskListResponse> {
+  const page = await getJson<TaskListResponse>(
+    `${API_V2}/tasks?${taskListQuery(environmentId, filters).toString()}`,
+    "Failed to search tasks",
+    signal,
+  );
+  const searched = searchFiltersIn(filters);
+  if (searched.length && page.tasks.length && !("tags" in page.tasks[0])) {
+    throw new RegistryError(
+      `This registry does not support task search (${searched.join(", ")} ` +
+        "filters) and would have answered unfiltered. Upgrade the registry " +
+        "server; listing without filters, or by status, still works.",
+      200,
+      SEARCH_UNSUPPORTED,
+    );
+  }
+  return page;
+}
+
+/**
+ * Set a completion's tags and/or description (`PATCH /tasks/{id}`); an
+ * omitted field is left as it is. Returns the task as stored, tags
+ * normalised (trimmed, deduplicated, sorted).
+ */
+export async function annotateTask(
+  taskId: string,
+  environmentId: string,
+  changes: TaskAnnotations,
+): Promise<TaskSummary> {
+  const response = await fetchWithAuth(
+    url(`/tasks/${encodeURIComponent(taskId)}`, environmentId),
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(changes),
+    },
+  );
+  if (!response.ok) throw await toError(response, "Failed to save task annotations");
+  return response.json() as Promise<TaskSummary>;
+}
 
 /** A completion with its instances, newest first. */
 export function fetchTask(taskId: string, environmentId: string): Promise<Task> {

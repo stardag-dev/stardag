@@ -1,16 +1,24 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { fetchTask, fetchTaskArtifacts, fetchTaskExecutions } from "../api/registry";
 import { useDeployments } from "../hooks/useDeployments";
-import type { Execution, PlanMember, Task, TaskArtifact } from "../types/task";
+import type {
+  Execution,
+  PlanMember,
+  Task,
+  TaskArtifact,
+  TaskSummary,
+} from "../types/task";
 import { qualifiedName } from "../utils/instances";
 import { formatAbsoluteTime } from "../utils/time";
 import { ArtifactList } from "./ArtifactViewer";
 import { MembershipFacts } from "./MembershipFacts";
 import { CopyButton } from "./ModalExecution";
+import { TaskAnnotations } from "./TaskAnnotations";
 import { TaskClaimPanel } from "./TaskClaimPanel";
 import { TaskEventLog } from "./TaskEventLog";
 import { TaskExecutions } from "./TaskExecutions";
 import { TaskParameters } from "./TaskParameters";
+import { TaskRefSnippet } from "./TaskRefSnippet";
 import { Tooltip } from "./ui/Tooltip";
 
 /** The build a task is opened from, when it is. */
@@ -37,6 +45,8 @@ interface TaskDetailProps {
   refreshToken?: number;
   // Jump to another build (the claim holder, an execution's build).
   onOpenBuild?: (buildId: string) => void;
+  // Search tasks by one of this task's tags (the tag chips link there).
+  onSearchTag?: (tag: string) => void;
 }
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -68,6 +78,7 @@ export function TaskDetail({
   onChanged,
   refreshToken = 0,
   onOpenBuild,
+  onSearchTag,
 }: TaskDetailProps) {
   const [task, setTask] = useState<Task | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -80,6 +91,8 @@ export function TaskDetail({
     task?.instances.map((instance) => instance.deployment_id) ?? [],
   );
   const epochRef = useRef(0);
+  // A task read has started and not landed yet (for its epoch).
+  const taskReadInFlightRef = useRef(false);
   const buildId = context?.buildId;
 
   // Reset on identity change only — never on a same-task refresh
@@ -102,14 +115,17 @@ export function TaskDetail({
   useEffect(() => {
     const epoch = ++epochRef.current;
     const fresh = () => epochRef.current === epoch;
+    taskReadInFlightRef.current = true;
     fetchTask(taskId, environmentId)
       .then((t) => {
         if (!fresh()) return;
+        taskReadInFlightRef.current = false;
         setTask(t);
         setError(null);
       })
       .catch((err: unknown) => {
         if (!fresh()) return;
+        taskReadInFlightRef.current = false;
         setTask(null);
         setError(err instanceof Error ? err.message : "Failed to load task");
       });
@@ -136,6 +152,33 @@ export function TaskDetail({
     setNonce((n) => n + 1);
     onChanged?.();
   }, [onChanged]);
+
+  // A save returns the task without its instances: keep ours. Ignore a
+  // save issued for another task or environment than the one now shown
+  // (the callback closes over the identity it was handed out under).
+  const identityRef = useRef(identity);
+  useEffect(() => {
+    identityRef.current = identity;
+  }, [identity]);
+  const handleAnnotated = useCallback(
+    (saved: TaskSummary) => {
+      if (identityRef.current !== identity) return;
+      // A read started before the save would land after it with the old
+      // annotations, and the next whole-set tag edit would build on those:
+      // drop that read and read again.
+      if (taskReadInFlightRef.current) {
+        epochRef.current += 1;
+        taskReadInFlightRef.current = false;
+        setNonce((n) => n + 1);
+      }
+      setTask((t) =>
+        t && t.task_id === saved.task_id
+          ? { ...t, tags: saved.tags ?? [], description: saved.description ?? null }
+          : t,
+      );
+    },
+    [identity],
+  );
 
   const current = executions?.find((e) => e.id === task?.execution_id) ?? null;
 
@@ -225,6 +268,17 @@ export function TaskDetail({
         </p>
       ) : (
         <div className="space-y-4">
+          <TaskAnnotations
+            // A fresh editor (and save queue) per task and environment.
+            key={identity}
+            taskId={task.task_id}
+            environmentId={environmentId}
+            tags={task.tags ?? []}
+            description={task.description ?? null}
+            onSaved={handleAnnotated}
+            onSearchTag={onSearchTag}
+          />
+
           <Section title="Status">
             <TaskClaimPanel
               task={task}
@@ -277,6 +331,15 @@ export function TaskDetail({
                 </Section>
               )}
             </div>
+          )}
+
+          {(task.instances.length > 0 || context?.planInstanceId) && (
+            <TaskRefSnippet
+              taskId={task.task_id}
+              taskName={task.task_name}
+              instances={task.instances}
+              preferredInstanceId={context?.planInstanceId}
+            />
           )}
 
           <TaskParameters
