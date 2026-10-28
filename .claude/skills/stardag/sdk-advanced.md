@@ -581,10 +581,12 @@ class LongTraining(sd.TargetTask[sd.DirectoryTarget]):
 A registry that cannot be reached answers `False`: a worker never stops on silence. To end
 containers _now_, use `stardag builds stop` (see registry-and-platform.md).
 
-## TaskRef (Immutable Reference)
+## TaskSlug (Name, Version, Id)
+
+Formerly `sd.TaskRef`, which is now the typed task reference (`Task.ref`).
 
 ```python
-ref = sd.TaskRef.from_task(my_task)
+ref = sd.TaskSlug.from_task(my_task)
 print(ref.name)       # "MyTask"
 print(ref.version)    # "1"
 print(ref.id)         # UUID

@@ -5,6 +5,7 @@ import functools
 import inspect
 import json
 import logging
+import os
 import weakref
 from abc import abstractmethod
 from collections import abc as collections_abc
@@ -21,14 +22,22 @@ from typing import (
 )
 
 if TYPE_CHECKING:
+    from stardag._core.task_ref import TaskRef
     from stardag.artifact import Artifact
     from stardag.registry import RegistryABC
 
 from pickle import loads as pickle_loads
 from uuid import UUID
 
-from pydantic import ConfigDict, Field, SerializationInfo, model_validator
-from typing_extensions import TypeAlias, Union
+from pydantic import (
+    ConfigDict,
+    Field,
+    ModelWrapValidatorHandler,
+    SerializationInfo,
+    ValidationError,
+    model_validator,
+)
+from typing_extensions import Self, TypeAlias, Union
 
 from stardag._core.target_base import TargetType
 from stardag._core.task_id import _get_task_id_from_jsonable, instance_hash_of_body
@@ -164,6 +173,25 @@ def _check_implements_run(cls: type["BaseTask"]) -> None:
     _RUN_CHECKED_CLASSES.add(cls)
 
 
+def _fields_given_a_task_ref(data: Any) -> list[str]:
+    """The keys of ``data`` holding a ``TaskRef``, directly or in a list,
+    tuple, set or dict (one level deep)."""
+    if not isinstance(data, collections_abc.Mapping):
+        return []
+    from stardag._core.task_ref import TaskRef
+
+    def holds_ref(value: Any) -> bool:
+        if isinstance(value, TaskRef):
+            return True
+        if isinstance(value, collections_abc.Mapping):
+            return any(isinstance(v, TaskRef) for v in value.values())
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return any(isinstance(v, TaskRef) for v in value)
+        return False
+
+    return [str(key) for key, value in data.items() if holds_ref(value)]
+
+
 # Classes that passed `_check_implements_run`. Weak, so that this cache is
 # never what keeps a task class alive.
 _RUN_CHECKED_CLASSES: "weakref.WeakSet[type[BaseTask]]" = weakref.WeakSet()
@@ -224,6 +252,37 @@ class BaseTask(
         if isinstance(data, dict) and "version" not in data:
             return {**data, "version": cls.__version__}
         return data
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _hint_task_ref_in_a_concrete_field(
+        cls, data: Any, handler: ModelWrapValidatorHandler[Any]
+    ) -> Any:
+        """When validation fails on a field given a ``TaskRef``, say why.
+
+        A reference is a ``Task[LoadedT]``, accepted by an
+        ``sd.TaskLoads[LoadedT]`` field (and lists / dicts of them), but not
+        by a field annotated with a concrete task class: it is not an
+        instance of that class. Only the failure path does any work.
+        """
+        try:
+            return handler(data)
+        except ValidationError as e:
+            fields = _fields_given_a_task_ref(data)
+            if not fields:
+                raise
+            listed = ", ".join(repr(f) for f in fields)
+            causes = "; ".join(
+                f"{'.'.join(str(p) for p in err['loc']) or '(model)'}: {err['msg']}"
+                for err in e.errors()
+            )
+            raise ValueError(
+                f"{causes}. Field(s) {listed} of {cls.__name__} were given a "
+                "TaskRef. A reference is accepted by sd.TaskLoads[...] fields "
+                "(and lists / dicts of them), not by a field annotated with a "
+                "concrete task class: annotate the field sd.TaskLoads[...], or "
+                "pass ref.hydrate()."
+            ) from e
 
     @model_validator(mode="before")
     @classmethod
@@ -423,6 +482,103 @@ class BaseTask(
         return self.artifacts()
 
     @classmethod
+    def ref(
+        cls,
+        task_id: UUID | str,
+        instance_id: UUID | str | None = None,
+    ) -> "TaskRef[Self, Any]":
+        """A reference to a task of this class that the registry holds.
+
+        Use it instead of re-composing a task from code whose defaults may
+        have moved on since it ran: the reference keeps pointing at that
+        exact task. Constructing it makes no registry call; its :attr:`id`
+        is ``task_id``, and a task given it as a dependency has the same id
+        as with the real task. A build hydrates it from the registry before
+        anything else; :meth:`TaskRef.hydrate` does so explicitly.
+
+        ``stardag tasks ref <task-id>`` prints this call for a registered
+        task.
+
+        Args:
+            task_id: The referenced task id.
+            instance_id: Pin one instance (recommended: its non-significant
+                fields are then fixed, and it is served from the local body
+                cache, offline). Default: chosen at hydration time, the instance of
+                the execution that completed the task, else the newest.
+
+        Returns:
+            A ``TaskRef[Self, Any]``: for a class with no declared loaded
+            type (a plain ``BaseTask`` subclass), it fits any polymorphic
+            task field (``SubClass[BaseTask]``, ``TaskLoads[...]``).
+            ``LoadableTask`` (and so ``Task``) subclasses get the loaded
+            type instead.
+        """
+        return _make_ref(cls, task_id, instance_id)
+
+    @classmethod
+    def from_store(
+        cls,
+        task_id: UUID | str,
+        instance_id: UUID | str | None = None,
+        *,
+        instance_hash: UUID | str | None = None,
+        store: "str | os.PathLike[str] | None" = None,
+    ) -> Self:
+        """The task of this class stored in the package's committed task
+        store, loaded eagerly: the real task object (fields readable,
+        ``model_copy`` derivations work).
+
+        The recommended handle for pinned, long-lived instances in code (a
+        key dataset, a trained model): the store is a reviewed copy in the
+        repository, read with no registry, profile or network. Write one
+        with ``stardag tasks ref <task-id> --write`` (from the registry) or
+        ``sd.write_to_store(task)`` (from a task object); both print this
+        call.
+
+        Every class in the stored tree is imported from the module recorded
+        with it, or, failing that, from the package's ``task_modules``.
+        Validated in compat mode, then checked to be an instance of this
+        class with ``task_id``; a mismatch names the deepest nested task
+        whose id moved.
+
+        The store is the calling package's: ``STARDAG_TASK_STORE`` if set,
+        else ``[tool.stardag] task_store`` in the ``pyproject.toml`` found
+        walking up from the calling module's file, then from this class's
+        module, then from the working directory (frames inside the
+        ``stardag`` package are not callers). So a constant pinned in one
+        package reads that package's store wherever it is imported from.
+
+        Args:
+            task_id: The task id.
+            instance_id: Pick the body recorded as this registry instance
+                (matched against the file's ``sources``, unverified
+                metadata).
+            instance_hash: Pick the body with this instance hash (the
+                file's verified content address). Given with
+                ``instance_id``, the body must match both; the printed lines
+                pass both.
+            store: The store directory, or ``"pkg:<package>/<dir>"``. A
+                relative path resolves against the package root (the
+                ``pyproject.toml``'s directory), as the configured one does.
+
+        Raises:
+            TaskStoreError: No store is configured; it holds no matching
+                body (or several, with neither ``instance_id`` nor
+                ``instance_hash`` given); a file is missing or was edited.
+            TaskRehydrationError: The body does not validate, is of another
+                class, or no longer recomputes to ``task_id``.
+        """
+        from stardag._core.task_store_read import load_from_store
+
+        return load_from_store(  # type: ignore[return-value]
+            cls,
+            task_id,
+            instance_id=instance_id,
+            instance_hash=instance_hash,
+            store=store,
+        )
+
+    @classmethod
     def has_dynamic_deps(cls) -> bool:
         # Check unwrapped functions since run/run_aio may be wrapped with precheck
         run_func = getattr(cls.run, "__wrapped__", cls.run)
@@ -447,6 +603,15 @@ class BaseTask(
                 context={CONTEXT_MODE_KEY: "hash"},
             )["id"]
         )
+
+    @cached_property
+    def _contains_task_refs(self) -> bool:
+        """Whether a ``TaskRef`` is anywhere in this task's fields (see
+        ``stardag._core.task_ref.contains_refs``). Cached: a task is
+        frozen, and a ``model_copy`` drops it."""
+        from stardag._core.task_ref import fields_contain_refs
+
+        return fields_contain_refs(self)
 
     @cached_property
     def _instance_body_json(self) -> str:
@@ -528,8 +693,10 @@ class BaseTask(
           (``~/.stardag/registry-cache/``): a pinned load works offline
           after one online read, and its non-significant fields are the
           same on every load;
-        - without, the newest instance's body (``TaskInfo`` orders them
-          newest first), which always asks the registry.
+        - without, for a completed task the instance of the execution that
+          completed it (read by id, so found even when it is not among the
+          newest listed), and otherwise, or when no completed execution is
+          recorded, the newest instance. Always asks the registry.
 
         Validated in compat mode, same as :func:`stardag.task_from_body`:
         the recomputed task id is checked against the requested one, so a
@@ -541,8 +708,8 @@ class BaseTask(
             id: The UUID (or string representation) of the task to load.
             registry: An optional registry instance to use for loading metadata. If not
                 provided, the default registry from `registry_provider` will be used.
-            instance_id: The instance to load, pinned. Defaults to the
-                newest.
+            instance_id: The instance to load, pinned. Default: the
+                completed execution's instance, else the newest (see above).
 
         Returns:
             The reconstructed task object.
@@ -642,6 +809,38 @@ class LoadableTask(BaseTask, abc.ABC, Generic[LoadedT_co]):
 
     __stardag_abstract__: ClassVar[bool] = True
 
+    @classmethod
+    def ref(
+        cls,
+        task_id: UUID | str,
+        instance_id: UUID | str | None = None,
+    ) -> "TaskRef[Self, LoadedT_co]":
+        """A reference to a task of this class that the registry holds.
+
+        Use it instead of re-composing a task from code whose defaults may
+        have moved on since it ran: the reference keeps pointing at that
+        exact task. Constructing it makes no registry call; its :attr:`id`
+        is ``task_id``, and a task given it as a dependency has the same id
+        as with the real task. A build hydrates it from the registry before
+        anything else; :meth:`TaskRef.hydrate` does so explicitly.
+
+        ``stardag tasks ref <task-id>`` prints this call for a registered
+        task.
+
+        Args:
+            task_id: The referenced task id.
+            instance_id: Pin one instance (recommended: its non-significant
+                fields are then fixed, and it is served from the local body
+                cache, offline). Default: chosen at hydration time, the instance of
+                the execution that completed the task, else the newest.
+
+        Returns:
+            A ``TaskRef[Self, LoadedT]``, accepted wherever an
+            ``sd.TaskLoads[LoadedT]`` is, and rejected for another loaded
+            type.
+        """
+        return _make_ref(cls, task_id, instance_id)
+
     def load(self) -> LoadedT_co:
         """Load the output of this task (sync).
 
@@ -703,6 +902,24 @@ class TargetTask(BaseTask, Generic[TargetType]):
         ...
 
 
+def _make_ref(
+    task_class: type[BaseTask], task_id: UUID | str, instance_id: UUID | str | None
+) -> Any:
+    from stardag._core.anchor import caller_file
+    from stardag._core.task_ref import parametrized_ref_class
+    from stardag._core.task_store_read import REF_ANCHOR_KEY
+
+    ref = parametrized_ref_class(task_class)(
+        task_class=task_class,
+        task_id=UUID(str(task_id)),
+        instance_id=None if instance_id is None else UUID(str(instance_id)),
+    )
+    # Which package's task store serves it: the code creating it. Kept
+    # outside the fields (not dumped, hashed, compared or pickled).
+    vars(ref)[REF_ANCHOR_KEY] = caller_file()
+    return ref
+
+
 def flatten_task_struct(task_struct: TaskStruct | None) -> list[BaseTask]:
     """Flatten a TaskStruct into a list of Tasks.
 
@@ -734,13 +951,18 @@ def flatten_task_struct(task_struct: TaskStruct | None) -> list[BaseTask]:
 
 
 @dataclass(frozen=True)
-class TaskRef:
+class TaskSlug:
+    """A task's name, version and id, with a short human-readable
+    :attr:`slug` (``<name>-v<version>-<id[:8]>``). Named ``TaskRef``
+    before ``stardag.TaskRef`` became the typed task reference
+    (``Task.ref``)."""
+
     name: str
     version: str | None
     id: UUID
 
     @classmethod
-    def from_task(cls, task: BaseTask) -> "TaskRef":
+    def from_task(cls, task: BaseTask) -> "TaskSlug":
         return cls(
             name=task.get_name(),
             version=task.version,

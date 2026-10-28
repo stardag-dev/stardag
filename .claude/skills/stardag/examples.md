@@ -325,7 +325,7 @@ task = build_pipeline()
 print(task.model_dump_json(indent=2))
 
 # Get task reference
-ref = sd.TaskRef.from_task(task)
+ref = sd.TaskSlug.from_task(task)
 print(f"Name: {ref.name}, ID: {ref.id}")
 
 # Flatten nested dependencies

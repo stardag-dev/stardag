@@ -190,7 +190,17 @@ def _by_value_reason(task: BaseTask) -> tuple[str | None, TaskPayload | None]:
 
 def to_task_payload(task: BaseTask) -> TaskOrPayload:
     """``task`` as it should cross a Modal call: its payload, or the task
-    itself (by value) when it cannot be rehydrated on the far side."""
+    itself (by value) when it cannot be rehydrated on the far side.
+
+    Raises:
+        TaskRefNotHydratedError: ``task`` is, or holds, a ``TaskRef``. The
+            senders hydrate references first; one reaching here is refused
+            rather than pickled.
+    """
+    from stardag._core.task_ref import contains_refs, unhydrated_ref_error
+
+    if contains_refs(task):
+        raise unhydrated_ref_error(task)
     reason, payload = _by_value_reason(task)
     if payload is not None:
         return payload

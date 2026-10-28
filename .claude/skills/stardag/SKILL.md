@@ -108,14 +108,20 @@ sd.Task[T]              # Main task base class
 sd.LoadableTask[T]      # Task with load() but no filesystem target
 sd.TargetTask[T]        # Task with explicit target control
 sd.BaseTask             # Abstract base (rarely used directly)
-sd.AliasTask[T]         # Reference an existing task output by task id
+MyTask.from_store(task_id, instance_hash=...)  # Eager load from the committed task store (pinned instances)
+sd.task_from_store(MyTask, task_id)   # Same, for a class whose field shadows from_store
+sd.write_to_store(tasks)              # Write task trees into the store (no registry needed)
+MyTask.ref(task_id, instance_id=...)  # Typed reference to a registered task (ad hoc work)
+sd.resolve_refs(tasks)  # Hydrate every TaskRef in a DAG (builds do this)
+sd.AliasTask[T]         # Deprecated: use MyTask.ref
 sd.LoadValidator[T]     # Automatic validation on _save() and load()
 
 # Decorators & Types
 sd.task                 # @sd.task decorator
 sd.Depends[T]           # Dependency injection (decorator API)
 sd.TaskLoads[T]         # Polymorphic dependency (class API)
-sd.TaskRef              # Immutable task reference (name, version, id)
+sd.TaskRef              # Typed task reference (from MyTask.ref)
+sd.TaskSlug             # Name, version, id and slug of a task
 
 # Parameters
 sd.StardagField(...)               # significant=False, or compat_default=... (significant fields)
@@ -146,6 +152,8 @@ sd.task_from_body(body, expected_task_id=None)  # Rebuild a task from a stored i
 sd.task_from_registry_data(data)   # Same function, engine-side name
 Task.from_registry(task_id, instance_id=None)  # Load from the registry; pinned instances are cached on disk
 sd.TaskRehydrationError            # Raised when reconstruction fails
+sd.TaskClassNotRegisteredError     # A stored body names a class not imported
+sd.TaskStoreError                  # The task store could not be read or written
 
 # Cooperative cancellation (inside run())
 sd.cancellation_requested()        # Throttled "is my execution still wanted?"

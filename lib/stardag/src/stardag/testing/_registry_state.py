@@ -127,6 +127,9 @@ class TaskRow:
     preempted_at: datetime | None = None
     execution_id: UUID | None = None
     limit_keys: set[str] = field(default_factory=set)
+    #: Created by ``add_instance`` (a test seeding a body), which cannot
+    #: know the output URI: the first registration of the task supplies it.
+    seeded: bool = False
 
 
 @dataclass

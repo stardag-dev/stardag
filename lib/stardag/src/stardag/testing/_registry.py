@@ -10,7 +10,11 @@ each write is all-or-nothing, and the frontier is computed from the same
 rows the transitions write.
 
 Time is ``registry.clock`` (UTC-aware ``datetime``), replaceable so a test
-can let a claim lapse. Every call is recorded (:meth:`calls_to`) for
+can let a claim lapse. ``add_deployment`` and ``add_instance`` seed rows a
+build would otherwise have written. ``add_instance`` is how a test serves a
+pinned ``Task.ref``: seed the instance body recorded next to the code
+(``stardag tasks show <task-id> --json``) under its real task and instance
+ids, and the reference hydrates from it with no registry. Every call is recorded (:meth:`calls_to`) for
 assertions.
 """
 
@@ -47,6 +51,8 @@ from stardag.testing._registry_state import (
     BuildRow,
     DeploymentRow,
     Event,
+    InstanceRow,
+    TaskRow,
     refuse,
     refuse_plan_only,
     settings_hash,
@@ -84,6 +90,75 @@ class InMemoryRegistry(
         if activated and kind == "modal":
             self.deployment_activate(row.id)
         return row.id
+
+    def add_instance(
+        self,
+        *,
+        body: Mapping[str, Any],
+        task_id: str | UUID,
+        instance_id: str | UUID,
+    ) -> TaskInstanceInfo:
+        """Seed one instance, as a registry holding it would serve it,
+        without a build, a deployment or a class import.
+
+        The intended use: code pins ``MyTask.ref("<task-id>",
+        instance_id="<instance-id>")`` to a real instance, its body is
+        recorded next to the code (``stardag tasks show <task-id> --json``),
+        and a test seeds it under the same ids, so the pinned reference
+        hydrates offline::
+
+            registry = InMemoryRegistry()
+            for rec in recorded:  # {task_id, instance_id, body}
+                registry.add_instance(
+                    body=rec.body, task_id=rec.task_id, instance_id=rec.instance_id
+                )
+            with test_harness(registry=registry):
+                assert MyTask.ref(task_id, instance_id=instance_id).hydrate()
+
+        ``task_id`` and ``instance_id`` are used exactly as given (never
+        minted: a pinned reference names the instance id). The body is
+        stored as is and **not validated**: whether it rebuilds into a task
+        with ``task_id`` is checked by hydration, as against a real
+        registry, so a test can also seed a mismatch on purpose.
+
+        An unpinned reference (``task_get``) reads the most recently seeded
+        instance of the task. Seeding the same instance again is a no-op
+        with the same body and task id, and a ``ValueError`` otherwise. The
+        task row is created when missing; a later registration of the task
+        fills in its output URI, which seeding cannot know.
+        """
+        from stardag._core.task_id import canonical_body_json, instance_hash_of_body
+        from stardag.polymorphic import NAME_KEY, NAMESPACE_KEY
+
+        tid, iid = str(task_id), UUID(str(instance_id))
+        body = dict(body)
+        existing = self.instances.get(iid)
+        if existing is not None:
+            if existing.task_id != tid or existing.body != body:
+                raise ValueError(
+                    f"Instance {iid} is already seeded with a different "
+                    f"{'task id' if existing.task_id != tid else 'body'}."
+                )
+            return self.task_instance_get(iid)
+        if tid not in self.tasks:
+            self.tasks[tid] = TaskRow(
+                tid,
+                str(body.get(NAMESPACE_KEY, "")),
+                str(body.get(NAME_KEY, "")),
+                body.get("version"),
+                None,
+                status_at=self.now(),
+                seeded=True,
+            )
+        self.instances[iid] = InstanceRow(
+            iid,
+            new_id(),
+            settings_hash({}),
+            str(instance_hash_of_body(canonical_body_json(body))),
+            tid,
+            body,
+        )
+        return self.task_instance_get(iid)
 
     def status_of(self, task_id: object) -> str:
         return self.task(str(task_id)).status

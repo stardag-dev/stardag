@@ -25,9 +25,10 @@ from prefect import task as prefect_task
 from prefect.artifacts import create_markdown_artifact
 from prefect.futures import PrefectConcurrentFuture
 
+from stardag._core.task_ref import resolve_refs_aio
 from stardag import (
     BaseTask,
-    TaskRef,
+    TaskSlug,
     TaskStruct,
 )
 from stardag._core.base_task import (
@@ -231,9 +232,10 @@ class _PrefectTaskRunWrapper:
         built)."""
         execution_id = self.execution_ids.pop(task.id, None)
         await self._stop_renewal(task)
-        walk = await walk_aio(deps)
+        walk = await walk_aio(deps, registry=self.session.registry)
+        # ``walk.roots``: the yielded tasks with any reference hydrated.
         await self.session.send_yield(
-            task, execution_id, yield_batches(walk, deps, suspend=True)
+            task, execution_id, yield_batches(walk, walk.roots, suspend=True)
         )
 
 
@@ -298,7 +300,10 @@ async def build_aio(
     session = ResidentSession(
         registry if registry is not None else registry_provider.get()
     )
-    walk = await walk_aio(task_list)
+    # Every reference in the DAG becomes its hydrated task first: the
+    # registry and the Prefect tasks see real tasks only.
+    task_list = await resolve_refs_aio(task_list, session.registry)
+    walk = await walk_aio(task_list, registry=session.registry)
     await session.open(
         task_list,
         app_name=task_executor.deployment_app_name() if task_executor else None,
@@ -447,6 +452,11 @@ async def _build_dag_recursive(
 
     Returns None if the task cannot be scheduled yet due to upstream dynamic deps.
     """
+    # A reference (a root, or one a ``requires()`` builds) is scheduled as
+    # its hydrated task, read from the build's registry.
+    registry = run_wrapper.session.registry
+    task = await resolve_refs_aio(task, registry)
+
     # Cycle detection
     if task.id in visited:
         raise ValueError("Cyclic dependencies detected")
@@ -460,7 +470,7 @@ async def _build_dag_recursive(
     if already_built_dynamic_future is not None:
         return None
 
-    task_ref = TaskRef.from_task(task)
+    task_ref = TaskSlug.from_task(task)
 
     # Recurse dependencies
     dynamic_deps, prev_dynamic_future = task_id_to_dynamic_deps.get(task.id, ([], None))
@@ -497,13 +507,17 @@ async def _build_dag_recursive(
                     if hasattr(result, "__next__"):
                         gen: Generator[TaskStruct, None, None] = result  # type: ignore[assignment]
                         requires = next(gen)
-                        deps = flatten_task_struct(requires)
+                        deps = await resolve_refs_aio(
+                            flatten_task_struct(requires), registry
+                        )
                         completed = [dep.complete() for dep in deps]
                         logger.debug(f"Initial deps: {deps}, completed: {completed}")
                         while all(completed):
                             logger.debug("All deps complete")
                             requires = next(gen)
-                            deps = flatten_task_struct(requires)
+                            deps = await resolve_refs_aio(
+                                flatten_task_struct(requires), registry
+                            )
                             completed = [dep.complete() for dep in deps]
                             logger.debug(f"Deps: {deps}, completed: {completed}")
 
@@ -514,7 +528,9 @@ async def _build_dag_recursive(
                         # Return deps directly - task execution is already done
                         # Cast for type checker - we've verified it's not a generator
                         task_struct: TaskStruct = result  # type: ignore[assignment]
-                        deps = flatten_task_struct(task_struct)
+                        deps = await resolve_refs_aio(
+                            flatten_task_struct(task_struct), registry
+                        )
                         logger.debug(f"Cross-process deps: {deps}")
                         await run_wrapper.suspended(task, deps)
                         return task.id, deps
@@ -563,7 +579,7 @@ async def create_markdown(task: BaseTask):
     else:
         output_uri = getattr(output(), "uri", "N/A")
 
-    markdown = f"""# {TaskRef.from_task(task).slug}
+    markdown = f"""# {TaskSlug.from_task(task).slug}
 **Task id**: `{task.id}`
 **Task class**: `{task.__module__}.{task.__class__.__name__}`
 **Output URI**: [{output_uri}]({output_uri})
@@ -574,7 +590,7 @@ async def create_markdown(task: BaseTask):
 """
 
     await create_markdown_artifact(  # type: ignore
-        key=format_key(f"{TaskRef.from_task(task).slug}-spec"),
+        key=format_key(f"{TaskSlug.from_task(task).slug}-spec"),
         description=f"Task spec for {task.id}",
         markdown=markdown,
     )
