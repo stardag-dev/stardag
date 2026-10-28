@@ -101,10 +101,15 @@ describe("TaskDiffPage", () => {
     );
   });
 
-  it("pre-filters the right-hand search to the left task's type, and says so", async () => {
+  it("keeps a link's search as it is, and offers the type filter when it is absent", async () => {
     renderPage(`/task-diff?left=${T1}`);
-    await screen.findByText(/a diff is most useful between tasks of one type/);
-    // A link without a search gets the type filter written into the URL.
+    const restore = await screen.findByRole("button", {
+      name: "Limit to examples.ml.Metrics again",
+    });
+    // Not re-applied behind the user's back: an unfiltered search survives
+    // a reload or a shared link.
+    expect(params().get("name")).toBeNull();
+    fireEvent.click(restore);
     expect(params().get("namespace")).toBe("examples.ml");
     expect(params().get("name")).toBe("Metrics");
     expect(params().get("left")).toBe(T1);
@@ -114,7 +119,7 @@ describe("TaskDiffPage", () => {
         name: "Metrics",
       }),
     );
-    // The filter is shown as removable chips.
+    expect(await screen.findByText(/a diff is most useful/)).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Remove name filter" }),
     ).toBeInTheDocument();

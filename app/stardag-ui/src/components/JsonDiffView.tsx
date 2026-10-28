@@ -76,6 +76,9 @@ const VALUE_CLASS: Record<string, string> = {
  * wide containers, the debounced fuzzy search with next/previous, the
  * ARIA tree keyboard model and copy actions.
  *
+ * Keys: the tree's (arrows, Home/End, Enter/Space, `c`, `p`), plus `o`
+ * to copy a changed value's old side.
+ *
  * Containers that differ beneath start expanded, the rest collapsed with
  * a `+a −r ~c` summary of what differs beneath them; "only differences"
  * drops the unchanged nodes. Search covers keys and both sides' values.
@@ -220,8 +223,31 @@ export function JsonDiffView({
     setFocused(1);
   };
 
-  const onTreeKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) =>
+  const onTreeKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    // `o` copies a changed value's old side; the rest is the tree's model.
+    const target = event.target as HTMLElement;
+    if (
+      event.key === "o" &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.altKey &&
+      target.getAttribute("role") === "treeitem"
+    ) {
+      const index = Number(target.dataset.row);
+      const node = nodes[index];
+      if (
+        node &&
+        node.hasLeft &&
+        node.status === "changed" &&
+        !isPairedContainer(node)
+      ) {
+        event.preventDefault();
+        void copy(index, "old");
+      }
+      return;
+    }
     treeKeyDown(event, { rows, nodes, expanded, focusRow, toggle, more, copy });
+  };
 
   const searching = search.query !== "";
   const matchCount = search.matches.length;
@@ -569,14 +595,26 @@ const DiffRow = memo(function DiffRow({
       </span>
       <span className="flex shrink-0 gap-1 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100">
         {node.status === "changed" && !paired && (
-          <RowCopyButton label="Copy old value" onClick={() => onCopy(index, "old")}>
+          <RowCopyButton
+            label="Copy old value"
+            shortcut="o"
+            onClick={() => onCopy(index, "old")}
+          >
             old
           </RowCopyButton>
         )}
-        <RowCopyButton label="Copy value" onClick={() => onCopy(index, "value")}>
+        <RowCopyButton
+          label="Copy value"
+          shortcut="c"
+          onClick={() => onCopy(index, "value")}
+        >
           value
         </RowCopyButton>
-        <RowCopyButton label="Copy path" onClick={() => onCopy(index, "path")}>
+        <RowCopyButton
+          label="Copy path"
+          shortcut="p"
+          onClick={() => onCopy(index, "path")}
+        >
           path
         </RowCopyButton>
       </span>

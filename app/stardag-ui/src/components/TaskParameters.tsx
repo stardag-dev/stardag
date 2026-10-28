@@ -88,14 +88,14 @@ export function TaskParameters({
             json
           </span>
           {current && onCompare && (
-            <Tooltip content="Compare (with other instance): diff these parameters against another task of this type, or another instance of this one">
+            <Tooltip content="Compare with another instance of this task type">
               <button
                 type="button"
                 onClick={() => onCompare(current.id)}
-                aria-label="Compare (with other instance)"
-                className="rounded p-1 text-gray-400 hover:bg-gray-200 hover:text-gray-600 dark:hover:bg-gray-600 dark:hover:text-gray-300"
+                className="flex items-center gap-1 rounded px-1 py-0.5 text-xs text-gray-500 hover:bg-gray-200 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-600 dark:hover:text-gray-200"
               >
                 <CompareIcon />
+                Compare
               </button>
             </Tooltip>
           )}

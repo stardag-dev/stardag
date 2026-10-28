@@ -164,6 +164,23 @@ describe("JsonDiffView", () => {
     expect(screen.getByText("No matches")).toBeInTheDocument();
   });
 
+  it("drops stale matches at once when only-differences re-indexes", () => {
+    renderDiff();
+    search("threshold");
+    expect(screen.getByText("1 of 1")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Only differences" }));
+    // Before the debounce re-runs: no stale index to step to.
+    expect(screen.getByText("No matches")).toBeInTheDocument();
+    expect(() =>
+      fireEvent.click(screen.getByRole("button", { name: "Next match" })),
+    ).not.toThrow();
+    act(() => {
+      vi.advanceTimersByTime(SEARCH_DEBOUNCE_MS);
+    });
+    // `threshold` is unchanged, so it is not in the differences.
+    expect(screen.getByText("No matches")).toBeInTheDocument();
+  });
+
   it("steps through matches with next and previous", () => {
     renderDiff();
     search("ep");
@@ -199,6 +216,15 @@ describe("JsonDiffView", () => {
       fireEvent.click(within(lr).getByRole("button", { name: "Copy old value" }));
     });
     expect(writeText).toHaveBeenLastCalledWith("0.1");
+    writeText.mockClear();
+    await act(async () => {
+      fireEvent.keyDown(lr, { key: "o" });
+    });
+    expect(writeText).toHaveBeenLastCalledWith("0.1");
+    expect(within(lr).getByRole("button", { name: "Copy old value" })).toHaveAttribute(
+      "title",
+      "Copy old value (o)",
+    );
     // A removed node copies its (left) value.
     await act(async () => {
       fireEvent.keyDown(item(/^notes:/), { key: "c" });

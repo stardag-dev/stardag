@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { fetchTask } from "../api/registry";
 import { useBreadcrumb } from "../context/BreadcrumbContext";
 import { useTaskDiffUrl } from "../hooks/useTaskDiffUrl";
@@ -10,11 +10,9 @@ import {
   isSameTypeSearch,
   pickInstance,
   pickOtherInstance,
-  sameTypeSearch,
   TASK_DIFF_PARAMS,
   type TaskDiffSelection,
 } from "../utils/taskDiff";
-import { isEmptySearch } from "../utils/taskSearch";
 import { formatAbsoluteTime, formatRelativeTime } from "../utils/time";
 import { JsonDiffView } from "./JsonDiffView";
 import { TaskSearchPanel } from "./TaskSearch";
@@ -100,19 +98,10 @@ export function TaskDiffPage({ environmentId, onOpenTask }: TaskDiffPageProps) {
     return () => setBreadcrumb([]);
   }, [onOpenTask, setBreadcrumb]);
 
-  // A link that names the left task but no search (typed, or shared from
-  // somewhere that dropped it) gets the same-type pre-filter, once.
-  const prefilled = useRef<string | null>(null);
+  // The type pre-filter is written by the "Compare" action, never
+  // re-applied here: an unfiltered search must survive a reload or a
+  // shared link. A bare `left` link shows the hint to restore it.
   const leftTask = left.task;
-  useEffect(() => {
-    if (!leftTask || prefilled.current === leftTask.task_id) return;
-    prefilled.current = leftTask.task_id;
-    if (isEmptySearch(search)) {
-      setSearch(sameTypeSearch(leftTask.task_namespace, leftTask.task_name), {
-        replace: true,
-      });
-    }
-  }, [leftTask, search, setSearch]);
 
   const leftInstance = leftTask
     ? pickInstance(leftTask.instances, selection.leftInstance)

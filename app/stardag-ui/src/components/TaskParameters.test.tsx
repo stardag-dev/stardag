@@ -147,9 +147,9 @@ describe("TaskParameters", () => {
       />,
     );
     const button = within(box()).getByRole("button", {
-      name: "Compare (with other instance)",
+      name: "Compare",
     });
-    expect(tooltipOf(button)).toMatch(/another task of this type/);
+    expect(tooltipOf(button)).toBe("Compare with another instance of this task type");
     fireEvent.click(button);
     expect(compare).toHaveBeenCalledWith("i-1");
   });
@@ -158,9 +158,7 @@ describe("TaskParameters", () => {
     const { rerender } = render(
       <TaskParameters instances={TWO} deploymentsById={DEPLOYMENTS} />,
     );
-    expect(
-      screen.queryByRole("button", { name: "Compare (with other instance)" }),
-    ).toBeNull();
+    expect(screen.queryByRole("button", { name: "Compare" })).toBeNull();
     rerender(
       <TaskParameters
         instances={[]}
@@ -168,8 +166,6 @@ describe("TaskParameters", () => {
         onCompare={() => {}}
       />,
     );
-    expect(
-      screen.queryByRole("button", { name: "Compare (with other instance)" }),
-    ).toBeNull();
+    expect(screen.queryByRole("button", { name: "Compare" })).toBeNull();
   });
 });

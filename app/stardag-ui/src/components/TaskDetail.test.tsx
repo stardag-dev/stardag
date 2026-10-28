@@ -123,9 +123,7 @@ describe("TaskDetail", () => {
         onCompare={compare}
       />,
     );
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Compare (with other instance)" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "Compare" }));
     expect(compare).toHaveBeenCalledWith({
       taskId: TASK_ID,
       instanceId: "i-1",
@@ -137,9 +135,7 @@ describe("TaskDetail", () => {
   it("offers no Compare without somewhere to go", async () => {
     render(<TaskDetail taskId={TASK_ID} environmentId="env-1" />);
     await screen.findByRole("heading", { name: /demo\.Train/ });
-    expect(
-      screen.queryByRole("button", { name: "Compare (with other instance)" }),
-    ).toBeNull();
+    expect(screen.queryByRole("button", { name: "Compare" })).toBeNull();
   });
 
   it("offers no task-page link on the task page itself", async () => {

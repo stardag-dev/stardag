@@ -62,6 +62,16 @@ export function useTreeSearch<N extends TreeNode, M extends { index: number }>({
     current: 0,
   });
 
+  // A re-indexed node list ("only differences") invalidates the matches'
+  // indices at once, not after the debounce: drop them now and keep the
+  // text, so the search re-runs over the new list.
+  const [searchedNodes, setSearchedNodes] = useState(nodes);
+  if (searchedNodes !== nodes) {
+    setSearchedNodes(nodes);
+    if (search.matches.length > 0)
+      setSearch((prev) => ({ ...prev, matches: [], current: 0 }));
+  }
+
   const matchByIndex = useMemo(
     () => new Map(search.matches.map((m) => [m.index, m])),
     [search.matches],
@@ -113,6 +123,7 @@ export function useTreeSearch<N extends TreeNode, M extends { index: number }>({
     if (count === 0) return;
     const current = (search.current + step + count) % count;
     const index = search.matches[current].index;
+    if (index >= nodes.length) return;
     // A new object even when `current` is unchanged, so the scroll runs.
     setSearch((prev) => ({ ...prev, current }));
     // The user may have folded it away since the search ran, and it may

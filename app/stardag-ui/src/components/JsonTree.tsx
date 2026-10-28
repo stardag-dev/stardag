@@ -415,10 +415,18 @@ const JsonRow = memo(function JsonRow({
         )}
       </span>
       <span className="flex shrink-0 gap-1 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100">
-        <RowCopyButton label="Copy value" onClick={() => onCopy(index, "value")}>
+        <RowCopyButton
+          label="Copy value"
+          shortcut="c"
+          onClick={() => onCopy(index, "value")}
+        >
           value
         </RowCopyButton>
-        <RowCopyButton label="Copy path" onClick={() => onCopy(index, "path")}>
+        <RowCopyButton
+          label="Copy path"
+          shortcut="p"
+          onClick={() => onCopy(index, "path")}
+        >
           path
         </RowCopyButton>
       </span>
@@ -522,10 +530,13 @@ export function Highlighted({
 
 export function RowCopyButton({
   label,
+  shortcut,
   onClick,
   children,
 }: {
   label: string;
+  /** The tree key that does the same, shown in the title. */
+  shortcut: string;
   onClick: () => void;
   children: React.ReactNode;
 }) {
@@ -534,7 +545,7 @@ export function RowCopyButton({
       type="button"
       tabIndex={-1}
       aria-label={label}
-      title={`${label} (${label === "Copy value" ? "c" : "p"})`}
+      title={`${label} (${shortcut})`}
       onClick={(e) => {
         // Copying must not also toggle the row.
         e.stopPropagation();

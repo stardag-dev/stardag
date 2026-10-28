@@ -118,8 +118,8 @@ annotate <id>`, where `--tag` (or `--add-tag`) and `--remove-tag` edit
   copies `MyTask.ref("<task_id>", instance_id="<instance_id>")` for a
   chosen instance, with an info link to the docs. No import line: a task's
   namespace is not an import path.
-- **Added: compare two task instances** (STA-170). "Compare (with other
-  instance)" in a task's Task Parameters box opens `/task-diff` with that
+- **Added: compare two task instances** (STA-170). "Compare" in a task's
+  Task Parameters box opens `/task-diff` with that
   instance on the left; the right side is picked with the `/tasks` search,
   pre-filtered to the same namespace and name (removable, with a hint), or
   is another instance of the same task. Both sides and the search live in
