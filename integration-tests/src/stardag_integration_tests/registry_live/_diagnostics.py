@@ -307,6 +307,14 @@ def _retryable(error: BaseException, groups_seen: set[int]) -> bool:
     pytest builds a group from several failing fixture finalizers, so a
     recycle check and a cleanup that timed out can arrive together, and
     each is retryable on its own terms. Any real member vetoes the group.
+
+    **A group's own cause and context are read too**, as a chain: they
+    describe the group, so an assertion or an HTTP error status anywhere
+    on them vetoes it exactly as it vetoes a timeout in
+    ``transport_timeout``. Without that, a group of timeouts raised while
+    handling an assertion was retryable here and rejected there -- so it
+    neither stopped the run nor left a marker forbidding the retry. A
+    recycle on those links stays exempt, as it is everywhere else.
     """
     members = _group_members(error)
     if members is None:
@@ -316,7 +324,17 @@ def _retryable(error: BaseException, groups_seen: set[int]) -> bool:
     if id(error) in groups_seen:
         return True
     groups_seen.add(id(error))
-    return all(_retryable(member, groups_seen) for member in members)
+    if not all(_retryable(member, groups_seen) for member in members):
+        return False
+    for linked in _chain(error):
+        if linked is error or isinstance(linked, RegistryContainerRecycled):
+            continue
+        if _group_members(linked) is not None:
+            if not _retryable(linked, groups_seen):
+                return False
+        elif _carries_http_status(linked) or isinstance(linked, AssertionError):
+            return False
+    return True
 
 
 def transport_timeout(error: BaseException) -> BaseException | None:
