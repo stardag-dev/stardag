@@ -11,8 +11,10 @@ rows the transitions write.
 
 Time is ``registry.clock`` (UTC-aware ``datetime``), replaceable so a test
 can let a claim lapse. ``add_deployment`` and ``add_instance`` seed rows a
-build would otherwise have written (an instance body, for a test that
-hydrates a ``Task.ref`` or calls ``from_registry``). Every call is recorded (:meth:`calls_to`) for
+build would otherwise have written. ``add_instance`` is how a test serves a
+pinned ``Task.ref``: seed the instance body recorded next to the code
+(``stardag tasks show <task-id> --json``) under its real task and instance
+ids, and the reference hydrates from it with no registry. Every call is recorded (:meth:`calls_to`) for
 assertions.
 """
 
@@ -94,60 +96,72 @@ class InMemoryRegistry(YieldMixin, ExclusionMixin, ReadsMixin, RegistryABC):
 
     def add_instance(
         self,
-        body: Mapping[str, Any],
         *,
-        task_id: str | UUID | None = None,
-        instance_id: UUID | None = None,
-        deployment_id: UUID | None = None,
+        body: Mapping[str, Any],
+        task_id: str | UUID,
+        instance_id: str | UUID,
     ) -> TaskInstanceInfo:
-        """Seed one instance body, as if a build had registered it, without
-        running one: what a test of ``Task.ref`` / ``from_registry`` needs.
+        """Seed one instance, as a registry holding it would serve it,
+        without a build, a deployment or a class import.
 
-        ``body`` is an instance body (``task.instance_body()``, or one read
-        from a registry). The task row is created when missing, with the
-        identity a registration would give it; ``task_id`` defaults to the
-        id the body recomputes to (its classes must be imported), and an
-        explicit one files the body under that id even if it recomputes to
-        another (to test a mismatch). Returns the instance, newest of its
-        task: an unpinned reference hydrates from it, a pinned one with its
-        ``id``.
+        The intended use: code pins ``MyTask.ref("<task-id>",
+        instance_id="<instance-id>")`` to a real instance, its body is
+        recorded next to the code (``stardag tasks show <task-id> --json``),
+        and a test seeds it under the same ids, so the pinned reference
+        hydrates offline::
+
+            registry = InMemoryRegistry()
+            for rec in recorded:  # {task_id, instance_id, body}
+                registry.add_instance(
+                    body=rec.body, task_id=rec.task_id, instance_id=rec.instance_id
+                )
+            with test_harness(registry=registry):
+                assert MyTask.ref(task_id, instance_id=instance_id).hydrate()
+
+        ``task_id`` and ``instance_id`` are used exactly as given (never
+        minted: a pinned reference names the instance id). The body is
+        stored as is and **not validated**: whether it rebuilds into a task
+        with ``task_id`` is checked by hydration, as against a real
+        registry, so a test can also seed a mismatch on purpose.
+
+        An unpinned reference (``task_get``) reads the most recently seeded
+        instance of the task. Seeding the same instance again is a no-op
+        with the same body and task id, and a ``ValueError`` otherwise. The
+        task row is created when missing; a later registration of the task
+        fills in its output URI, which seeding cannot know.
         """
-        from stardag._core.rehydrate import task_from_body
         from stardag._core.task_id import canonical_body_json, instance_hash_of_body
-        from stardag.build._registration import _output_uri
         from stardag.polymorphic import NAME_KEY, NAMESPACE_KEY
 
+        tid, iid = str(task_id), UUID(str(instance_id))
         body = dict(body)
-        try:
-            task = task_from_body(body)
-        except Exception:
-            if task_id is None:
-                raise
-            task = None
-        if task_id is not None:
-            resolved_id = str(task_id)
-        else:
-            assert task is not None
-            resolved_id = str(task.id)
-        if resolved_id not in self.tasks:
-            self.tasks[resolved_id] = TaskRow(
-                resolved_id,
+        existing = self.instances.get(iid)
+        if existing is not None:
+            if existing.task_id != tid or existing.body != body:
+                raise ValueError(
+                    f"Instance {iid} is already seeded with a different "
+                    f"{'task id' if existing.task_id != tid else 'body'}."
+                )
+            return self.task_instance_get(iid)
+        if tid not in self.tasks:
+            self.tasks[tid] = TaskRow(
+                tid,
                 str(body.get(NAMESPACE_KEY, "")),
                 str(body.get(NAME_KEY, "")),
                 body.get("version"),
-                _output_uri(task) if task is not None else None,
+                None,
                 status_at=self.now(),
+                seeded=True,
             )
-        row = InstanceRow(
-            instance_id or new_id(),
-            deployment_id or new_id(),
+        self.instances[iid] = InstanceRow(
+            iid,
+            new_id(),
             settings_hash({}),
             str(instance_hash_of_body(canonical_body_json(body))),
-            resolved_id,
+            tid,
             body,
         )
-        self.instances[row.id] = row
-        return self.task_instance_get(row.id)
+        return self.task_instance_get(iid)
 
     def status_of(self, task_id: object) -> str:
         return self.task(str(task_id)).status

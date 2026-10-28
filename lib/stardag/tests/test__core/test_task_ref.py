@@ -106,7 +106,9 @@ def _fresh_memo():
 
 def _store(registry: InMemoryRegistry, task: sd.BaseTask) -> UUID:
     """Seed ``task`` as one instance (no build). Returns the instance id."""
-    return registry.add_instance(task.instance_body()).id
+    return registry.add_instance(
+        body=task.instance_body(), task_id=str(task.id), instance_id=uuid4()
+    ).id
 
 
 @pytest.fixture
@@ -770,23 +772,126 @@ class TestFunctionFormAndSeeding:
 
     def test_add_instance_seeds_pinned_and_newest_reads(self, model):
         registry = InMemoryRegistry()
+        older_id, newest_id = uuid4(), uuid4()
         older = registry.add_instance(
-            model.model_copy(update={"notes": "older"}).instance_body()
+            body=model.model_copy(update={"notes": "older"}).instance_body(),
+            task_id=str(model.id),
+            instance_id=older_id,
         )
-        newest = registry.add_instance(model.instance_body())
-        assert older.task_id == newest.task_id == str(model.id)
-        pinned = TrainedModel.from_registry(model.id, registry, instance_id=older.id)
+        registry.add_instance(
+            body=model.instance_body(), task_id=str(model.id), instance_id=newest_id
+        )
+        assert older.id == older_id and older.task_id == str(model.id)
+        pinned = TrainedModel.from_registry(model.id, registry, instance_id=older_id)
         assert pinned.instance_body()["notes"] == "older"
+        # Unpinned: the most recently seeded instance, as task_get serves it.
         newest_task = TrainedModel.from_registry(model.id, registry)
         assert newest_task.instance_body()["notes"] == "first"
-        assert TrainedModel.ref(model.id, older.id).hydrate(registry).notes == "older"
-        info = registry.task_get(str(model.id))
-        assert info.task_name == "TrainedModel"
-        assert info.output_uri == model.target().uri
+        assert registry.task_get(str(model.id)).instances[0].id == newest_id
+        assert TrainedModel.ref(model.id).hydrate(registry).notes == "first"
+        assert registry.task_get(str(model.id)).task_name == "TrainedModel"
 
-    def test_add_instance_can_file_a_body_under_another_id(self, model):
+    def test_add_instance_is_idempotent_and_refuses_a_different_body(self, model):
         registry = InMemoryRegistry()
+        instance_id = uuid4()
+        kwargs = dict(task_id=str(model.id), instance_id=instance_id)
+        first = registry.add_instance(body=model.instance_body(), **kwargs)
+        assert registry.add_instance(body=model.instance_body(), **kwargs) == first
+        assert len(registry.task_get(str(model.id)).instances) == 1
+        other_body = model.model_copy(update={"notes": "else"}).instance_body()
+        with pytest.raises(ValueError, match="different body"):
+            registry.add_instance(body=other_body, **kwargs)
+        with pytest.raises(ValueError, match="different task id"):
+            registry.add_instance(
+                body=model.instance_body(),
+                task_id=str(uuid4()),
+                instance_id=instance_id,
+            )
+
+    def test_add_instance_needs_no_class_and_does_not_validate(self, model):
+        """Seeding stores the body as is; hydration does the checking."""
+        registry = InMemoryRegistry()
+        unknown = {"__namespace": "not.imported", "__name": "Gone", "x": 1}
+        seeded = registry.add_instance(
+            body=unknown, task_id=str(model.id), instance_id=uuid4()
+        )
+        assert seeded.body == unknown
         stale = model.model_copy(update={"learning_rate": 0.9})
-        seeded = registry.add_instance(stale.instance_body(), task_id=model.id)
+        mismatch = registry.add_instance(
+            body=stale.instance_body(), task_id=str(model.id), instance_id=uuid4()
+        )
         with pytest.raises(sd.TaskRefHydrationError, match="does not match"):
-            TrainedModel.ref(model.id, seeded.id).hydrate(registry)
+            TrainedModel.ref(model.id, mismatch.id).hydrate(registry)
+
+    def test_the_recorded_bodies_pattern(self, model):
+        """A ref pinned in code, its body recorded next to it, seeded in a
+        test under the same ids: hydration needs no real registry."""
+        from dataclasses import dataclass
+
+        from stardag.testing import test_harness
+
+        @dataclass
+        class Recorded:
+            task_id: str
+            instance_id: str
+            body: dict
+
+        recorded_bodies = [
+            Recorded(str(model.id), str(uuid4()), model.instance_body()),
+            Recorded(str(model.data.id), str(uuid4()), model.data.instance_body()),
+        ]
+        task_id, instance_id = (
+            recorded_bodies[0].task_id,
+            recorded_bodies[0].instance_id,
+        )
+
+        reg = InMemoryRegistry()
+        for rec in recorded_bodies:  # {task_id, instance_id, body}
+            reg.add_instance(
+                body=rec.body, task_id=rec.task_id, instance_id=rec.instance_id
+            )
+        with test_harness(registry=reg):
+            assert TrainedModel.ref(
+                task_id, instance_id=instance_id
+            ).hydrate().id == UUID(task_id)
+
+    def test_a_seeded_task_can_then_be_registered_by_a_build(self, model):
+        """The seeded row has no output URI; a registration fills it in
+        rather than refusing it as an identity conflict."""
+        import asyncio
+
+        from stardag.build._registration import register_plan_aio, walk_aio
+
+        registry = InMemoryRegistry()
+        _store(registry, model.data)
+        deployment = registry.add_deployment(kind="local", code_id="c")
+        build_id = registry.build_create(root_task_ids=[str(model.data.id)]).id
+        with sd.registry_provider.override(registry):
+            walk = asyncio.run(walk_aio([model.data], registry=registry))
+        asyncio.run(
+            register_plan_aio(
+                registry, build_id, walk, deployment_id=deployment, settings={}
+            )
+        )
+        assert registry.tasks[str(model.data.id)].output_uri == (
+            model.data.target().uri
+        )
+
+
+def test_deepcopy_of_a_bound_reference_copies_only_its_identity(model):
+    import copy
+    import threading
+
+    class Locked(InMemoryRegistry):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lock = threading.Lock()  # what an authenticated client holds
+
+    registry = Locked()
+    _store(registry, model)
+    ref = TrainedModel.ref(model.id)
+    ref.hydrate(registry)
+    copied = copy.deepcopy(ref)
+    assert copied == ref and copied is not ref
+    parent = Evaluate(model=ref)
+    assert parent.model_copy(deep=True).id == parent.id

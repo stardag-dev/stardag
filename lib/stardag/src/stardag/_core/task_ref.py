@@ -281,6 +281,17 @@ class TaskRef(Task[LoadedT], Generic[TaskT, LoadedT]):
             Self, _rebuild_ref(self.task_class, self.task_id, self.instance_id)
         )
 
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> Self:
+        """A fresh reference with the same identity. Only the identity is
+        copied: not the registry a hydration bound, which may hold
+        uncopyable state (a lock)."""
+        copied = typing.cast(
+            Self, _rebuild_ref(self.task_class, self.task_id, self.instance_id)
+        )
+        if memo is not None:
+            memo[id(self)] = copied
+        return copied
+
     def __reduce__(self) -> tuple[Any, ...]:
         # A runtime-parametrized ``TaskRef[X, L]`` is not importable by
         # name, so rebuild through ``ref`` (pickled by reference to the

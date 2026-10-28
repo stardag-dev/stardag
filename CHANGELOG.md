@@ -100,10 +100,13 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   precisely (`TaskRef[MyTask, LoadedT]`, or `TaskRef[MyTask, Any]` for a
   plain `BaseTask` subclass), and usable when a field shadows `ref`.
   `stardag tasks ref` prints it for such a class.
-- **New: `InMemoryRegistry.add_instance(body, *, task_id=None,
-instance_id=None)`** (STA-148) seeds an instance body without running a
-  build, so a test can hydrate a `Task.ref` (pinned or not) or call
-  `from_registry` against it.
+- **New: `InMemoryRegistry.add_instance(*, body, task_id, instance_id)`**
+  (STA-148) seeds an instance under the ids given, with no build,
+  deployment or class import, so a test can hydrate a pinned `Task.ref`
+  from a body recorded next to the code (`stardag tasks show <id> --json`).
+  The body is stored as is; hydration checks it. Re-seeding an instance is
+  idempotent with the same body and a `ValueError` with another; an
+  unpinned reference reads the most recently seeded instance.
 - **Corrected: a worker's `retries=` does not recover a task that raises**
   (STA-154). The docs and the `FunctionSettings.retries` docstring said
   Modal's retry covers an exception raised inside the container. Under the

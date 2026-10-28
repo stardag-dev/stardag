@@ -207,20 +207,32 @@ class whose `ref` is shadowed.
 
 ## Testing code that uses references
 
-`stardag.testing.InMemoryRegistry` holds instances without a server.
-`add_instance` seeds one from an instance body, without running a build,
-so a reference hydrates from it:
+A pinned reference names one instance of one task, so a test can serve that
+exact instance without a registry. Record the instance body next to the code
+that pins it (from `stardag tasks show <task-id> --json`, which lists the
+task's instances with their ids and bodies), then seed it into
+`stardag.testing.InMemoryRegistry` under the same ids:
 
 ```{.python notest}
-from stardag.testing import InMemoryRegistry
+from uuid import UUID
 
-registry = InMemoryRegistry()
-seeded = registry.add_instance(TrainedModel(...).instance_body())
+from stardag.testing import InMemoryRegistry, test_harness
 
-model = TrainedModel.ref(seeded.task_id, instance_id=seeded.id)
-assert model.hydrate(registry).learning_rate == 3e-4
-sd.build(Evaluate(model=model), registry=registry)
+reg = InMemoryRegistry()
+for rec in recorded_bodies:  # {task_id, instance_id, body}
+    reg.add_instance(body=rec.body, task_id=rec.task_id, instance_id=rec.instance_id)
+
+with test_harness(registry=reg):
+    assert TrainedModel.ref(task_id, instance_id=instance_id).hydrate().id == UUID(task_id)
 ```
+
+`add_instance` takes the ids as given and stores the body as is: it needs no
+build, no deployment and no import of the task's classes, and it does not
+check the body. Hydration does, exactly as against a real registry, so a
+body that no longer rebuilds into its task id fails the test the same way it
+would fail a build. An unpinned reference reads the most recently seeded
+instance of its task. Seeding an instance again is a no-op with the same
+body and an error with a different one.
 
 ## Migrating from `AliasTask`
 
