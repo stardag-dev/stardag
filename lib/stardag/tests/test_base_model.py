@@ -606,3 +606,7 @@ class TestCompatDroppedKeysWarning:
     def test_outside_compat_mode_nothing_is_dropped(self):
         with pytest.raises(ValidationError):
             New.model_validate({"removed": 1})
+
+
+def test_a_model_can_go_in_a_set():
+    assert len({ModelPlain(a=1), ModelPlain(a=1)}) == 1

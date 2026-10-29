@@ -388,7 +388,7 @@ class _PreflightStatefulDepParent(_sd.Task[int]):
         if self.excluded:
             return _PreflightStatefulTask(x=len(self.name), handle="live-handle")
         dep = _PreflightStatefulTask(x=len(self.name))
-        dep._state = "set-in-requires"
+        dep._state = "set-in-requires"  # pyright: ignore[reportAttributeAccessIssue]
         return dep
 
     def run(self) -> None:
@@ -403,7 +403,7 @@ class _PreflightMemoisingTask(_sd.Task[int]):
     _out: str | None = PrivateAttr(default=None)
 
     def requires(self):
-        self._out = f"/data/{self.x}"
+        self._out = f"/data/{self.x}"  # pyright: ignore[reportAttributeAccessIssue]
         return None
 
     def run(self) -> None:
@@ -467,7 +467,7 @@ class TestRuntimeStatePreflight:
         self, caplog, modal_function_stub, default_in_memory_fs_target
     ):
         root = _PreflightStatefulTask(x=1)
-        root._state = "set-at-runtime"
+        root._state = "set-at-runtime"  # pyright: ignore[reportAttributeAccessIssue]
         app = self._app("tm-preflight-private")
 
         with caplog.at_level("WARNING"):
@@ -520,7 +520,7 @@ class TestRuntimeStatePreflight:
         from stardag.integration.modal._payload import is_task_payload
 
         root = _PreflightStatefulTask(x=4)
-        root._state = "set-at-runtime"
+        root._state = "set-at-runtime"  # pyright: ignore[reportAttributeAccessIssue]
         app = self._app("tm-preflight-resident-state")
         _finalize_capturing_functions(app)
 

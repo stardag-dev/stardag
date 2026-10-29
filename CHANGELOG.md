@@ -4,6 +4,20 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [Unreleased]
+
+### SDK
+
+- **Type checkers now see stardag models as frozen, and so as hashable.**
+  `StardagBaseModel` and `BaseTask` set `frozen=True` in `model_config`,
+  which pyright and other type checkers don't read. They treated every task
+  as mutable and unhashable, so putting one in a set (`frozenset({task})`)
+  took a type ignore. A field assignment such as `task.x = 1`, which raises
+  at runtime, is now a type error too. So is an assignment to a private
+  attribute, which pydantic does allow on a frozen model: code that sets one
+  (for example in `model_post_init`) needs a type ignore there. No runtime
+  change.
+
 ## [0.30.0] — 2026-10-28
 
 SDK `0.30.0` and server `server-v0.9.0`: stable references to tasks. A typed
