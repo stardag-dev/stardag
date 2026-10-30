@@ -1,5 +1,7 @@
 # SDK Core: Tasks, Dependencies, Parameters & Build
 
+Snippets assume `import stardag as sd` and, where a DataFrame appears, `import pandas as pd`.
+
 ## Task Hierarchy
 
 ### BaseTask (Abstract Foundation)

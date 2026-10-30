@@ -1,5 +1,7 @@
 # SDK Targets: Persistence, Serialization & Storage
 
+Snippets assume `import stardag as sd` and, where a DataFrame appears, `import pandas as pd`.
+
 ## Target Hierarchy
 
 Targets are the persistence layer. They define where and how task outputs are stored.

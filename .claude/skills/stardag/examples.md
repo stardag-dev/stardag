@@ -144,7 +144,11 @@ class PrepareDataset(PipelineBase[pd.DataFrame]):
 
     def _run(self):
         df = self.raw.load()
-        cleaned = df.dropna().query(f"len(df) >= {self.min_rows}")
+        cleaned = df.dropna()
+        if len(cleaned) < self.min_rows:
+            raise ValueError(
+                f"{len(cleaned)} rows after dropna, need at least {self.min_rows}"
+            )
         self._save(cleaned)
 
 
@@ -226,16 +230,16 @@ sd.build([
 
 ```python
 class Benchmark(sd.Task[list[dict]]):
-    configs: tuple[Config, ...]
+    learning_rates: tuple[float, ...]
     dataset: PrepareDataset
 
     def requires(self):
         return [
             EvaluateModel(
-                model=TrainModel(dataset=self.dataset, config=cfg),
+                model=TrainModel(dataset=self.dataset, learning_rate=lr),
                 test_data=self.dataset,
             )
-            for cfg in self.configs
+            for lr in self.learning_rates
         ]
 
     def run(self):

@@ -1,5 +1,7 @@
 # SDK Advanced: Validation, Testing, Async, Dynamic Dependencies, Namespaces & Artifacts
 
+Snippets assume `import stardag as sd` and, where a DataFrame appears, `import pandas as pd`.
+
 ## Load Validation
 
 `LoadValidator[T]` provides automatic validation on `Task._save()` and `Task.load()`. Validators are attached via `typing.Annotated`, following the same pattern as serializers.
@@ -138,8 +140,10 @@ Async variant:
 
 ```python
 class AsyncDynamic(sd.Task[list[dict]]):
+    source_urls: list[str]
+
     async def run_aio(self):
-        tasks = [FetchTask(url=url) for url in self.urls]
+        tasks = [FetchTask(url=url) for url in self.source_urls]
         yield tasks
         results = [await t.load_aio() for t in tasks]
         self._save(results)
