@@ -4,7 +4,11 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
-## [Unreleased]
+## [0.30.1] — 2026-10-30
+
+SDK-only patch, typing only: no runtime change and no server change. See
+[RELEASE_NOTES.md](RELEASE_NOTES.md) for the new type errors it can surface
+and their workarounds.
 
 ### SDK
 
@@ -17,6 +21,8 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   attribute, which pydantic does allow on a frozen model: code that sets one
   (for example in `model_post_init`) needs a type ignore there. No runtime
   change.
+- A test now fails if pydantic moves `ModelMetaclass`, which the change
+  imports from a private pydantic path for type checkers only.
 
 ## [0.30.0] — 2026-10-28
 

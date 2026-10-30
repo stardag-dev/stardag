@@ -403,6 +403,11 @@ neither pydantic private attributes nor fields declared `exclude=True`:
 So do not keep build-relevant state in private attributes or excluded fields of a reactive
 task: compute it in `run()`, or make it a (non-significant) field.
 
+Type checkers see stardag models as frozen (since 0.30.1): a task can go in a set literal or
+be a dict key, and any attribute write is a type error, private attributes included. Set a
+private attribute derived in `model_post_init` with `super().__setattr__("_x", value)`, not
+`object.__setattr__`, which bypasses pydantic's private-attribute storage.
+
 Tick budgets and knobs (`stardag.build.TickConfig`, passed as `tick_kwargs`):
 
 | `TickConfig` field           | Default | Bounds                                                                                      |

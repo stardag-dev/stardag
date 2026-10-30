@@ -610,3 +610,12 @@ class TestCompatDroppedKeysWarning:
 
 def test_a_model_can_go_in_a_set():
     assert len({ModelPlain(a=1), ModelPlain(a=1)}) == 1
+
+
+def test_the_type_checking_metaclass_base_is_pydantics():
+    """base_model.py imports ModelMetaclass from a private pydantic path for
+    type checkers only; if pydantic moves it, typing degrades silently."""
+    from pydantic import BaseModel
+    from pydantic._internal._model_construction import ModelMetaclass
+
+    assert type(BaseModel) is ModelMetaclass

@@ -193,10 +193,13 @@ def _drop_cached_properties(model: BaseModel) -> None:
 
 
 if TYPE_CHECKING:
+    # Not exported publicly; ``test_the_type_checking_metaclass_base_is_pydantics``
+    # fails if pydantic moves it.
     from pydantic._internal._model_construction import ModelMetaclass
 
     # Type checkers don't read ``frozen`` in ``model_config``, so they take
-    # every model as mutable and therefore unhashable.
+    # every model as mutable and therefore unhashable. ``Field`` and
+    # ``PrivateAttr`` are the field specifiers pydantic's own transform names.
     @dataclass_transform(
         kw_only_default=True,
         frozen_default=True,

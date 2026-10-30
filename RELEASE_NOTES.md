@@ -6,6 +6,61 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.30.1 — Type checkers see stardag models as frozen
+
+Released 2026-10-30. SDK only, and typing only: nothing changes at runtime,
+and no server upgrade is needed.
+
+`StardagBaseModel` and `BaseTask` have always been frozen at runtime, through
+`frozen=True` in `model_config`. Type checkers don't read `model_config`, so
+pyright treated every task as mutable and therefore unhashable. Putting a task
+in a set literal or using it as a dict key took a type ignore:
+
+```python
+frozenset({Train(seed=1)})  # was: "Set entry must be hashable"
+```
+
+That now type-checks, and writing a field (`task.x = 1`), which already raised
+at runtime, is now a type error as well.
+
+### New type errors you may see
+
+Seeing models as frozen has three side effects. Each is reported only by the
+type checker; the code behaves as before.
+
+- **Writing a private attribute is a type error**, although pydantic allows it
+  on a frozen model. That includes deriving one in `model_post_init`. Keep the
+  assignment and add `# pyright: ignore[reportAttributeAccessIssue]`, or call
+  pydantic's `__setattr__` explicitly, which type checkers don't check against
+  the frozen flag:
+
+  ```python
+  def model_post_init(self, context: Any) -> None:
+      super().model_post_init(context)
+      super().__setattr__("_double", 2 * self.x)
+  ```
+
+  Not `object.__setattr__`: for a declared `PrivateAttr` it writes past
+  pydantic's private-attribute storage, which keeps the old value, and that
+  storage is what stardag's runtime-state pre-flight reads.
+  (For reactive builds, private attributes were already discouraged: the
+  rebuild from the registry does not carry them.)
+
+- **Mixing a plain pydantic model into a stardag model is an error.** For
+  `class MyTask(sd.Task[int], SomeBaseModelMixin)`, pyright reports "A frozen
+  class cannot inherit from a class that is not frozen". Make the mixin a
+  `StardagBaseModel`, or give it `frozen=True` as a class keyword.
+- **There is no typed opt-out of frozen.** `class M(StardagBaseModel,
+frozen=False)` reports "A non-frozen class cannot inherit from a class that
+  is frozen", and `model_config = ConfigDict(frozen=False)` is ignored by the
+  type checker, so such a model is still typed as frozen. Stardag models are
+  meant to be frozen anyway, since a task's id hashes its fields.
+
+Mypy is largely unaffected: it doesn't seem to apply the frozen default this
+way, and pydantic's mypy plugin already reads `model_config`.
+
+---
+
 ## v0.30.0 — Stable references to tasks
 
 Released 2026-10-28 together with the registry server `server-v0.9.0`.
