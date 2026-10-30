@@ -24,6 +24,13 @@ class Clamped(sd.LoadValidator[float]):
 
     def validate(self, value: float) -> float:
         return max(self.lo, min(self.hi, value))  # transform
+
+class RoundTo(sd.LoadValidator[float]):
+    def __init__(self, ndigits: int):
+        self.ndigits = ndigits
+
+    def validate(self, value: float) -> float:
+        return round(value, self.ndigits)
 ```
 
 ### Using Validators
@@ -67,12 +74,11 @@ Validators run on both `_save()` and `load()`. They can both reject (raise) and 
 ```python
 from stardag.testing import test_harness
 
-def test_my_pipeline():
+def test_my_task():
     with test_harness():
-        task = MyTask(param="value")
-        task.complete()
-        result = task.load()
-        assert result == expected
+        task = MyTask()  # the validated task above
+        sd.build(task)
+        assert task.load() == [1, 2, 3]
 ```
 
 This is the recommended way to test task logic. It avoids touching real target roots or the registry.
@@ -268,6 +274,8 @@ work on its fields exactly as on a task's, so a nested model carries its own sig
 Validated subclass type for accepting any subclass of T:
 
 ```python
+from stardag.target import LoadableSaveableFileSystemTarget
+
 class Pipeline(sd.Task[dict]):
     # Accepts any subclass of TargetTask that produces DataFrame
     data_source: sd.SubClass[sd.TargetTask[LoadableSaveableFileSystemTarget[pd.DataFrame]]]
@@ -298,7 +306,7 @@ class MyModel(sd.StardagBaseModel):
     task: Annotated[sd.LoadableTask[int], Polymorphic()]
 
     # Equivalent shorthand using SubClass:
-    task: sd.SubClass[sd.LoadableTask[int]]
+    # task: sd.SubClass[sd.LoadableTask[int]]
 ```
 
 `SubClass[T]` is syntactic sugar for `Annotated[T, Polymorphic()]`.

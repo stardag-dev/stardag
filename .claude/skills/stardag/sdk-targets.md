@@ -117,7 +117,7 @@ All built-in serializers are hashable, so they can be used in `Annotated` type p
 ### Custom Serializer
 
 ```python
-from stardag.target.serialize import FileSerializable
+from stardag.target.serialize import FileSerializable, JSONSerializer
 
 target = FileSerializable(
     wrapped=sd.get_file_target("output.json"),
@@ -203,12 +203,11 @@ The recommended approach for testing tasks. Sets up isolated temp target roots a
 ```python
 from stardag.testing import test_harness
 
-def test_my_pipeline():
+def test_my_task():
     with test_harness():
-        task = MyTask(param="value")
-        task.complete()
-        result = task.load()
-        assert result == expected
+        task = MyTask(param=21)  # MyTask from "Using Task[T]" above
+        sd.build(task)
+        assert task.load() == {"result": 42.0}
 ```
 
 ### InMemoryTarget (Low-Level)
