@@ -342,7 +342,7 @@ class TestByValueFallback:
         """A pickle carried private attributes and excluded fields; a payload
         cannot, so a task holding either keeps the pickle."""
         with_private = StatefulTask()
-        with_private._state = "runtime"
+        with_private._state = "runtime"  # pyright: ignore[reportAttributeAccessIssue]
         with_excluded = StatefulTask(handle="live-handle")
 
         assert to_task_payload(with_private) is with_private
@@ -354,9 +354,9 @@ class TestByValueFallback:
         """Compared against the declared default when the rebuild holds a
         dict or cannot be paired by type: still kept pickled."""
         in_any = StatefulParams(a=2)
-        in_any._cache = "runtime"
+        in_any._cache = "runtime"  # pyright: ignore[reportAttributeAccessIssue]
         in_set = StatefulParams(a=3)
-        in_set._cache = "runtime"
+        in_set._cache = "runtime"  # pyright: ignore[reportAttributeAccessIssue]
         any_task = NestedStateTask(blob=in_any)
         set_task = NestedStateTask(pairs=frozenset({("x", in_set)}))
 

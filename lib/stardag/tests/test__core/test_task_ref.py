@@ -638,8 +638,8 @@ class TestReviewRoundTwo:
         registry = InMemoryRegistry()
         instance_id = _store(registry, model)
         both = {
-            TrainedModel.ref(model.id),  # pyright: ignore[reportUnhashable]
-            TrainedModel.ref(model.id, instance_id),  # pyright: ignore[reportUnhashable]
+            TrainedModel.ref(model.id),
+            TrainedModel.ref(model.id, instance_id),
         }
         assert len(both) == 2
         with pytest.raises(sd.TaskRefHydrationError, match="set"):

@@ -39,9 +39,9 @@ import logging
 from collections.abc import Collection, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Literal, Never, Type, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, Never, Type, TypeVar
 
-from typing_extensions import Self
+from typing_extensions import Self, dataclass_transform
 
 from pydantic import (
     BaseModel,
@@ -52,7 +52,7 @@ from pydantic import (
     model_serializer,
     model_validator,
 )
-from pydantic.fields import FieldInfo
+from pydantic.fields import Field, FieldInfo, PrivateAttr
 
 logger = logging.getLogger(__name__)
 
@@ -192,7 +192,26 @@ def _drop_cached_properties(model: BaseModel) -> None:
         instance_dict.pop(name, None)
 
 
-class StardagBaseModel(BaseModel):
+if TYPE_CHECKING:
+    # Not exported publicly; ``test_the_type_checking_metaclass_base_is_pydantics``
+    # fails if pydantic moves it.
+    from pydantic._internal._model_construction import ModelMetaclass
+
+    # Type checkers don't read ``frozen`` in ``model_config``, so they take
+    # every model as mutable and therefore unhashable. ``Field`` and
+    # ``PrivateAttr`` are the field specifiers pydantic's own transform names.
+    @dataclass_transform(
+        kw_only_default=True,
+        frozen_default=True,
+        field_specifiers=(Field, PrivateAttr),
+    )
+    class _FrozenModelMetaclass(ModelMetaclass): ...
+
+else:
+    _FrozenModelMetaclass = type(BaseModel)
+
+
+class StardagBaseModel(BaseModel, metaclass=_FrozenModelMetaclass):
     """Custom, swap-in-replace for pydantic BaseModel, with features for hash mode +
     compat mode.
 

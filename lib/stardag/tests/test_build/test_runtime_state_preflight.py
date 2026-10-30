@@ -215,7 +215,7 @@ class DerivedPrivateTask(sd.Task[int]):
 
     def model_post_init(self, context: typing.Any) -> None:
         super().model_post_init(context)
-        self._double = 2 * self.x
+        self._double = 2 * self.x  # pyright: ignore[reportAttributeAccessIssue]
 
     def run(self) -> None:
         self._save(self._double)
@@ -229,7 +229,7 @@ class MemoisingTask(sd.Task[int]):
     _out: str | None = PrivateAttr(default=None)
 
     def requires(self):
-        self._out = f"/data/{self.x}"
+        self._out = f"/data/{self.x}"  # pyright: ignore[reportAttributeAccessIssue]
         return None
 
     def run(self) -> None:
@@ -267,7 +267,7 @@ class NumpyPrivateTask(sd.Task[int]):
         super().model_post_init(context)
         import numpy as np
 
-        self._arr = np.zeros(3)
+        self._arr = np.zeros(3)  # pyright: ignore[reportAttributeAccessIssue]
 
     def run(self) -> None:
         self._save(1)
@@ -377,8 +377,8 @@ class TestNotRefused:
 
     def test_a_plain_private_attribute_warns_once_per_class_and_attribute(self, caplog):
         first, second = StatefulTask(x=1), StatefulTask(x=2)
-        first._state = "a"
-        second._state = "b"
+        first._state = "a"  # pyright: ignore[reportAttributeAccessIssue]
+        second._state = "b"  # pyright: ignore[reportAttributeAccessIssue]
 
         plan = plan_rehydration([first, second], PATTERNS)
 
@@ -390,10 +390,10 @@ class TestNotRefused:
     @pytest.mark.parametrize("where", ["nested_task", "param_model", "any_dict"])
     def test_a_nested_plain_private_attribute_warns(self, caplog, where):
         params = PrivateParams(a=2)
-        params._cache = {"k": 1}
+        params._cache = {"k": 1}  # pyright: ignore[reportAttributeAccessIssue]
         if where == "nested_task":
             inner = StatefulTask(x=1)
-            inner._state = "set"
+            inner._state = "set"  # pyright: ignore[reportAttributeAccessIssue]
             task: sd.Task[int] = ParentTask(upstream=inner)
             attr = "StatefulTask._state"
         elif where == "param_model":
@@ -457,7 +457,7 @@ class TestNotRefused:
     def test_state_nested_in_an_excluded_field_equal_to_its_default(self, caplog):
         """The walk enters excluded fields after comparing them."""
         task = ExcludedHolderTask()
-        task.holder.params._cache = {"k": 1}
+        task.holder.params._cache = {"k": 1}  # pyright: ignore[reportAttributeAccessIssue]
 
         assert plan_rehydration([task], PATTERNS).reconstructable == (task,)
         (warning,) = _state_warnings(caplog)

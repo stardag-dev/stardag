@@ -77,7 +77,7 @@ def _get_task_id_jsonable(task: "BaseTask") -> dict[str, Any]:
 
     This is a testing util *bypassing/excluding* the `_hash_mode_finalize` logic."""
     task = task.model_copy()
-    task._hash_mode_finalize = lambda data, info: data
+    object.__setattr__(task, "_hash_mode_finalize", lambda data, info: data)
     return task.model_dump(
         mode="json",
         context={CONTEXT_MODE_KEY: "hash"},
