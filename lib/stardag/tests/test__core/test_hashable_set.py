@@ -146,22 +146,26 @@ def test_a_set_of_models_serializes_in_canonical_json_order():
     assert ModelSet(aux=frozenset(MODELS[::-1])).id == task.id
 
 
-_SEED_SCRIPT = """
-from tests.test__core.test_hashable_set import (
-    GROUPS, MODELS, ModelSet, NestedStrSets,
-)
-print(NestedStrSets(groups=frozenset(frozenset(g) for g in GROUPS)).id)
-print(ModelSet(aux=frozenset(MODELS)).id)
-"""
+_SEED_SCRIPTS = {
+    "nested_str_sets": (
+        "from tests.test__core.test_hashable_set import GROUPS, NestedStrSets\n"
+        "print(NestedStrSets(groups=frozenset(frozenset(g) for g in GROUPS)).id)"
+    ),
+    "models": (
+        "from tests.test__core.test_hashable_set import MODELS, ModelSet\n"
+        "print(ModelSet(aux=frozenset(MODELS)).id)"
+    ),
+}
 
 
-def test_ids_are_identical_across_hash_seeds():
+@pytest.mark.parametrize("case", sorted(_SEED_SCRIPTS))
+def test_ids_are_identical_across_hash_seeds(case: str):
     """String hashing is seeded per process, so the bug only shows across
     processes: run the same construction under several seeds."""
     root = Path(__file__).parents[2]
     outputs = {
         subprocess.run(
-            [sys.executable, "-c", _SEED_SCRIPT],
+            [sys.executable, "-c", _SEED_SCRIPTS[case]],
             cwd=root,
             env={**os.environ, "PYTHONHASHSEED": str(seed)},
             capture_output=True,
@@ -262,6 +266,41 @@ def test_totally_ordered_members_keep_their_ids(
 ):
     task_class: Any = _task_with(name, annotation)
     assert str(task_class(v=value).id) == expected_id
+
+
+class NestedIntSets(BaseTask):
+    __namespace__ = "sta180"
+    groups: HashableSet[HashableSet[int]]
+
+    def complete(self) -> bool:
+        return False
+
+    def run(self) -> None:
+        pass
+
+
+def test_disjoint_non_string_member_sets_get_the_canonical_order():
+    """The one deliberate id change. Sets of ints (floats, bools, int enums)
+    hash the same in every process, so a set of such sets had a stable id
+    before, but in Python's internal set order. It now takes the canonical
+    JSON order; this pins the new id."""
+    task = NestedIntSets(groups=frozenset({frozenset({40, 5}), frozenset({3})}))
+    assert task.instance_body()["groups"] == [[3], [5, 40]]
+    assert str(task.id) == "b11858ce-d001-5699-8f26-abd79719505b"
+
+
+def test_a_sort_key_that_raises_is_not_swallowed():
+    """Only comparing the keys may fall back; a TypeError from the key
+    itself is a bug in the key and must surface."""
+
+    def broken_key(item: str) -> int:
+        raise TypeError("broken sort key")
+
+    annotation = Annotated[frozenset[str], HashSafeSetSerializer(sort_key=broken_key)]
+    with pytest.raises(Exception, match="broken sort key"):
+        TypeAdapter(annotation).dump_python(
+            frozenset({"a", "bb"}), mode="json", context={CONTEXT_MODE_KEY: "hash"}
+        )
 
 
 @pytest.mark.parametrize(

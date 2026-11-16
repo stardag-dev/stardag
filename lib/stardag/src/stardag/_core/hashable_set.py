@@ -34,7 +34,8 @@ class HashSafeSetSerializer:
     inclusion, so disjoint sets do not compare) or on models (no ``<`` at
     all) — the members are ordered by their canonical JSON alone. Where it
     does, the order is the same as before that fallback existed, so ids of
-    sets of scalars, tuples, ordered enums and tasks are unchanged.
+    sets of scalars, tuples of scalars, ordered enums and tasks are
+    unchanged.
     """
 
     def __init__(self, sort_key: Callable[[Any], Any] | None = None) -> None:

@@ -146,10 +146,17 @@ def sorted_if_total(items: list[Any], key: Callable[[Any], Any]) -> list[Any] | 
     their input order; and it raises only for pairs it happens to compare.
     So the result is accepted only if each adjacent pair is ``<`` or ``==``,
     which (``<`` being transitive) makes the keys a chain: every pair
-    compares, and every input order sorts to this same result.
+    compares, and every input order sorts to this same result. The argument
+    needs ``<`` to be transitive and consistent with ``==``, as it is for
+    built-in types; a key with a non-transitive ``<`` is a bug in the key.
+
+    Only comparing the keys may fail: an error raised by ``key`` itself
+    propagates, so a broken ``sort_key`` is not silently replaced by the
+    fallback order.
     """
+    decorated = [(key(item), item) for item in items]
     try:
-        decorated = sorted(((key(item), item) for item in items), key=_first)
+        decorated.sort(key=_first)
         keys = [k for k, _ in decorated]
         if all(a < b or a == b for a, b in zip(keys, keys[1:])):
             return [item for _, item in decorated]
@@ -198,8 +205,9 @@ def canonicalize_sets(
     parallel (dict values by position, falling back to key, list and tuple
     items by index, model and dataclass fields by name). A nested
     ``StardagBaseModel`` is returned as is: its own dump already applied
-    this to its fields. A set dumped by ``HashSafeSetSerializer`` keeps its
-    ``sort_key`` order. Where the two trees do not line up (a custom
+    this to its fields. A set dumped by ``HashSafeSetSerializer`` keeps the
+    order that serializer gave it (by ``sort_key``, or by canonical JSON
+    where ``sort_key`` does not totally order the members). Where the two trees do not line up (a custom
     serializer reshaped the value) the walk stops and returns ``dumped``
     unchanged below that point.
     """

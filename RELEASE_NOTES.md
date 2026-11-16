@@ -28,16 +28,18 @@ everywhere.
 
 ### Will my task ids change?
 
-Not for sets whose order was already deterministic: sets of `int`, `str`,
-`float`, `bool`, tuples of these, `str`/`int` enums, tasks, nested sets where
-each member contains the previous one, and any custom `sort_key` that orders
-its members. Their order is unchanged, and tests pin ids computed before this
-release.
+Not for sets whose members were already ordered by value: sets of `int`,
+`str`, `float`, `bool`, tuples of these, `str`/`int` enums, tasks, nested
+sets where each member contains the previous one, and any custom `sort_key`
+that orders its members. Their order is unchanged, and tests pin ids computed
+before this release.
 
-One case does change: a set of **`int`** sets where not every member contains
-another, such as `frozenset({frozenset({1, 2}), frozenset({3})})`. Its id was
-stable across processes, because Python does not randomise `int` hashing,
-but its order was Python's internal set order, which no canonical rule can
+One family does change: a `HashableSet` whose members are, or contain, sets
+of **non-string** values (`int`, `float`, `bool`, `None`, int enums) that do
+not all contain one another, such as
+`frozenset({frozenset({1, 2}), frozenset({3})})`. Its id was stable across
+processes, because Python does not randomise the hashes of those values, but
+its order was Python's internal set order, which no canonical rule can
 reproduce. Such tasks get a new id, so their outputs are recomputed once.
 
 The same case with `str` members had no stable id to keep: it already varied

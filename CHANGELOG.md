@@ -7,8 +7,8 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 ## [0.30.2] — Unreleased
 
 SDK-only patch: no server change. Task ids are unchanged for every set whose
-members were already deterministically ordered; one nested-set case gets a new
-id (see below and [RELEASE_NOTES.md](RELEASE_NOTES.md)).
+members were already deterministically ordered by value; some sets of
+non-string sets get a new id (see below and [RELEASE_NOTES.md](RELEASE_NOTES.md)).
 
 ### SDK
 
@@ -20,14 +20,18 @@ id (see below and [RELEASE_NOTES.md](RELEASE_NOTES.md)).
   processes, silently. Models define no `<`, so computing the id raised
   `PydanticSerializationError`. Members are now sorted by value only where
   every pair compares; otherwise by their canonical JSON. Where the value
-  order was already total (scalars, tuples, ordered enums, tasks, nested
-  sets that each contain the previous one, a custom `sort_key`) the order
-  and so the id are unchanged; tests pin ids computed before the change.
-- **One id changes:** a set of `int` sets where not every member contains
-  another (e.g. `{1, 2}` and `{3}`). Its id was stable across processes,
-  because `int` hashing is not seeded, but its order was Python's internal
-  set order, which no canonical rule reproduces. Such tasks get a new id
-  and are recomputed once.
+  order was already total (scalars, tuples of scalars, ordered enums,
+  tasks, nested sets that each contain the previous one, a custom
+  `sort_key` that orders its members) the order and so the id are
+  unchanged; tests pin ids computed before the change.
+- **Some ids change:** a `HashableSet` whose members are, or contain, sets
+  of non-string values (`int`, `float`, `bool`, `None`, int enums) that do
+  not all contain one another, e.g. `{1, 2}` and `{3}`. Its id was stable
+  across processes, because those values' hashes are not seeded, but its
+  order was Python's internal set order, which no canonical rule
+  reproduces. Such tasks get a new id and are recomputed once.
+- A `sort_key` that itself raises is reported as before, not silently
+  replaced by the fallback order.
 
 ## [0.30.1] — 2026-10-30
 
