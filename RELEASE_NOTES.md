@@ -42,8 +42,12 @@ processes, because Python does not randomise the hashes of those values, but
 its order was Python's internal set order, which no canonical rule can
 reproduce. Such tasks get a new id, so their outputs are recomputed once.
 
-The same case with `str` members had no stable id to keep: it already varied
-between processes.
+A set of **string** sets that do not all contain one another, such as
+`frozenset({frozenset({"x", "y"}), frozenset({"a"})})`, also gets a new
+order, but it had no stable id to keep. Python seeds string hashes per
+process, so its old order, and therefore its id, already differed from run
+to run. This applies only to sets _of_ sets: a plain set of strings
+(`HashableSet[str]`) was always sorted by value and keeps its id.
 
 The workaround from earlier versions,
 `HashSafeSetSerializer(sort_key=lambda _: 0)`, is no longer needed. It still
