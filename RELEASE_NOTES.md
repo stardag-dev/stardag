@@ -6,6 +6,49 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.30.2 — Deterministic ids for sets of sets and sets of models
+
+Unreleased. SDK only: no server upgrade is needed.
+
+`HashableSet` sorted its members by their own value. That is not an order for
+every type:
+
+- **Sets of sets** (`HashableSet[HashableSet[str]]`): sets compare by
+  inclusion, so two disjoint member sets are neither less nor greater, and
+  the sort kept the set's iteration order. For strings that order depends on
+  `PYTHONHASHSEED`, so the same task got a different id in each process, with
+  no error.
+- **Sets of models** (e.g. `HashableSet[A | B]` of `StardagBaseModel`s):
+  models define no `<`, so computing the task id raised
+  `PydanticSerializationError`.
+
+Members are now sorted by value only where every pair of members compares,
+and by their canonical JSON otherwise. Both cases above now give one id
+everywhere.
+
+### Will my task ids change?
+
+Not for sets whose order was already deterministic: sets of `int`, `str`,
+`float`, `bool`, tuples of these, `str`/`int` enums, tasks, nested sets where
+each member contains the previous one, and any custom `sort_key` that orders
+its members. Their order is unchanged, and tests pin ids computed before this
+release.
+
+One case does change: a set of **`int`** sets where not every member contains
+another, such as `frozenset({frozenset({1, 2}), frozenset({3})})`. Its id was
+stable across processes, because Python does not randomise `int` hashing,
+but its order was Python's internal set order, which no canonical rule can
+reproduce. Such tasks get a new id, so their outputs are recomputed once.
+
+The same case with `str` members had no stable id to keep: it already varied
+between processes.
+
+The workaround from earlier versions,
+`HashSafeSetSerializer(sort_key=lambda _: 0)`, is no longer needed. It still
+works and gives the same ids as before.
+
+---
+
 ## v0.30.1 — Type checkers see stardag models as frozen
 
 Released 2026-10-30. SDK only, and typing only: nothing changes at runtime,
