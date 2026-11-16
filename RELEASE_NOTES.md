@@ -8,7 +8,7 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ## v0.30.2 — Deterministic ids for sets of sets and sets of models
 
-Unreleased. SDK only: no server upgrade is needed.
+Released 2026-11-16. SDK only: no server upgrade is needed.
 
 `HashableSet` sorted its members by their own value. That is not an order for
 every type:

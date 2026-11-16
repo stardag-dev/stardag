@@ -4,7 +4,7 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
-## [0.30.2] — Unreleased
+## [0.30.2] — 2026-11-16
 
 SDK-only patch: no server change. Task ids are unchanged for every set whose
 members were already deterministically ordered by value; some sets of
