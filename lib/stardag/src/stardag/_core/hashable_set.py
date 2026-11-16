@@ -9,6 +9,7 @@ from stardag._core.task_id import (
     canonical_item_key,
     canonicalize_sets,
     record_ordered_set,
+    sorted_if_total,
 )
 from stardag.base_model import CONTEXT_MODE_KEY, SerializationContextMode
 
@@ -27,6 +28,14 @@ class HashSafeSetSerializer:
     processes: by ``sort_key`` first, and by each item's canonical JSON where
     two items share a key (a stable sort would otherwise keep the set's
     iteration order for ties). Other dumps keep iteration order.
+
+    ``sort_key`` is used only where it totally orders the set's members.
+    Where it does not — the default identity key on nested sets (``<`` is
+    inclusion, so disjoint sets do not compare) or on models (no ``<`` at
+    all) — the members are ordered by their canonical JSON alone. Where it
+    does, the order is the same as before that fallback existed, so ids of
+    sets of scalars, tuples of scalars, ordered enums and tasks are
+    unchanged.
     """
 
     def __init__(self, sort_key: Callable[[Any], Any] | None = None) -> None:
@@ -73,10 +82,15 @@ class HashSafeSetSerializer:
                 (raw, canonicalize_sets(raw, dumped, info.context))
                 for raw, dumped in serialized_items
             ]
-            canonical_items.sort(
-                key=lambda pair: (sort_key(pair[0]), canonical_item_key(pair[1]))
+            by_key = sorted_if_total(
+                canonical_items,
+                key=lambda pair: (sort_key(pair[0]), canonical_item_key(pair[1])),
             )
-            ordered = [canonical for _, canonical in canonical_items]
+            if by_key is None:
+                by_key = sorted(
+                    canonical_items, key=lambda pair: canonical_item_key(pair[1])
+                )
+            ordered = [canonical for _, canonical in by_key]
             record_ordered_set(info.context, v, ordered)
             return ordered
 

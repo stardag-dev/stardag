@@ -9,7 +9,7 @@
 
 import dataclasses
 import json
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Mapping
 from uuid import UUID, uuid5
 
 from stardag.base_model import CONTEXT_MODE_KEY
@@ -137,17 +137,54 @@ def canonical_item_key(item: Any) -> str:
     return json.dumps(item, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
 
 
+def sorted_if_total(items: list[Any], key: Callable[[Any], Any]) -> list[Any] | None:
+    """``items`` sorted by ``key``, or None unless ``key`` totally orders them.
+
+    A sort only yields an order independent of its input order when every
+    pair of keys compares. ``sorted`` does not check that: frozensets compare
+    by inclusion, so disjoint ones are neither less nor greater and keep
+    their input order; and it raises only for pairs it happens to compare.
+    So the result is accepted only if each adjacent pair is ``<`` or ``==``,
+    which (``<`` being transitive) makes the keys a chain: every pair
+    compares, and every input order sorts to this same result. The argument
+    needs ``<`` to be transitive and consistent with ``==``, as it is for
+    built-in types; a key with a non-transitive ``<`` is a bug in the key.
+
+    Only comparing the keys may fail: an error raised by ``key`` itself
+    propagates, so a broken ``sort_key`` is not silently replaced by the
+    fallback order.
+    """
+    decorated = [(key(item), item) for item in items]
+    try:
+        decorated.sort(key=_first)
+        keys = [k for k, _ in decorated]
+        if all(a < b or a == b for a, b in zip(keys, keys[1:])):
+            return [item for _, item in decorated]
+    except TypeError:
+        pass
+    return None
+
+
+def _first(pair: tuple[Any, Any]) -> Any:
+    return pair[0]
+
+
 def sorted_canonically(items: list[Any]) -> list[Any]:
     """``items`` (the dump of a set's members) in their canonical order.
 
-    By value where the items compare, else by :func:`canonical_item_key`.
-    Either way two items that tie are equal as JSON, so the output does not
-    depend on the input order.
+    By value where the values are totally ordered (see
+    :func:`sorted_if_total`), else by :func:`canonical_item_key`. Either way
+    two items that tie are equal as JSON, so the output does not depend on
+    the input order.
     """
-    try:
-        return sorted(items)
-    except TypeError:
-        return sorted(items, key=canonical_item_key)
+    by_value = sorted_if_total(items, key=_identity)
+    if by_value is not None:
+        return by_value
+    return sorted(items, key=canonical_item_key)
+
+
+def _identity(x: Any) -> Any:
+    return x
 
 
 def record_ordered_set(
@@ -168,8 +205,9 @@ def canonicalize_sets(
     parallel (dict values by position, falling back to key, list and tuple
     items by index, model and dataclass fields by name). A nested
     ``StardagBaseModel`` is returned as is: its own dump already applied
-    this to its fields. A set dumped by ``HashSafeSetSerializer`` keeps its
-    ``sort_key`` order. Where the two trees do not line up (a custom
+    this to its fields. A set dumped by ``HashSafeSetSerializer`` keeps the
+    order that serializer gave it (by ``sort_key``, or by canonical JSON
+    where ``sort_key`` does not totally order the members). Where the two trees do not line up (a custom
     serializer reshaped the value) the walk stops and returns ``dumped``
     unchanged below that point.
     """
