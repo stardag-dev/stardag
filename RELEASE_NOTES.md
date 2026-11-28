@@ -6,6 +6,87 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.31.0 — Large yields register, S3 discovery is faster
+
+Not yet released. Ships together with the registry server `server-v0.10.0`,
+but needs nothing from it: either can be released or upgraded first.
+
+### Upgrading
+
+- **No code changes.** Nothing is renamed or removed, and there is no
+  migration.
+- **Against a `server-v0.9.0` registry** large yields register too. A yield
+  request that carries closure tasks but none of the yielded children (one
+  child whose closure alone spans a request) is refused by the older server
+  at validation, with nothing applied. The SDK then resends it yielding the
+  request's last item. That item is already upstream of a later child, so
+  the parent's extra dynamic edge gates nothing, but it is stored and shows
+  in the explorer graph. `server-v0.10.0` accepts the request as sent, and
+  the stand-in edge is not created.
+
+### A yield larger than one request no longer fails
+
+A task that yields children whose static closure, together with the
+children, exceeded 1000 items (the registry's per-request cap) failed with:
+
+```
+Register 1000 member(s) of plan <plan_id> failed (HTTP 409): the plan is sealed
+```
+
+The SDK sent the part that did not fit beside the children through
+`POST /plans/{id}/members`, which a sealed plan refuses, and a plan is always
+sealed by the time any task runs. The yielding task failed, and the build
+with it. Only yields that fit in one request worked.
+
+Every request of a yield now goes through `/yield`, which writes into a
+sealed plan by design. The children and their closure are cut in post-order,
+so each task's upstreams arrive in its own request or an earlier one. Each
+request yields the children it carries, and only the last one suspends the
+parent. Retries stay safe: every request has its own `batch_id`, so one
+whose response was lost is replayed rather than applied twice.
+
+`yield []` sends nothing, and the task carries on, as before.
+
+### S3 completion checks reuse one client
+
+`S3FileSystem` opened a new aioboto3 client for every `exists_aio`,
+`download_aio` and `upload_aio`, paying for client construction and a TLS
+handshake each time. Discovery checks completion with one `HEAD` per
+S3-backed task, so this setup dominated: discovering about 500 such tasks
+took 13 s, about four times what a shared client takes.
+
+The async operations now share one client per event loop. It is created on
+the loop's first S3 call and closed when the loop shuts down (as
+`asyncio.run` does, and now `build_sequential` too). Nothing is needed from
+build code.
+
+- **Connection pool:** 64 connections, above every builder's default
+  `max_concurrent_discover` (botocore's default is 10). To run discovery
+  wider, raise it with `STARDAG_TARGET_S3_MAX_POOL_CONNECTIONS` or
+  `S3FileSystem(max_pool_connections=...)`.
+- **Early close:** `await file_system.aclose()` closes the running loop's
+  client; the next call opens a new one. It is new on `RemoteFileSystemABC`,
+  where it does nothing by default, so custom file systems need no change.
+- **Sync operations** already shared one boto3 client and are unchanged.
+
+### Testing
+
+`stardag.testing.InMemoryRegistry` now refuses new structure through
+`/members` on a sealed plan, as the registry does, so a test against it fails
+where the server would. `InMemoryRegistry(accepts_empty_yielded=False)`
+behaves like a `server-v0.9.0` registry for the closure-only yield request
+above.
+
+### New public API
+
+- `RemoteFileSystemABC.aclose()` (no-op default), implemented by
+  `S3FileSystem` and forwarded by `CachedRemoteFileSystem`.
+- `S3FileSystem(max_pool_connections=...)` and
+  `STARDAG_TARGET_S3_MAX_POOL_CONNECTIONS`.
+- `InMemoryRegistry(accepts_empty_yielded=...)`.
+
+---
+
 ## v0.30.2 — Deterministic ids for sets of sets and sets of models
 
 Released 2026-11-16. SDK only: no server upgrade is needed.

@@ -4,10 +4,45 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
-## [Unreleased]
+## [0.31.0] — Unreleased
+
+SDK `0.31.0` and server `server-v0.10.0`: large DAGs, discovered faster and
+yielded whole. A yield larger than one registration request (1000 items)
+failed with `409 the plan is sealed` and now registers; completion checks
+against S3 targets reuse one client per event loop instead of opening one per
+call. The SDK needs nothing from the new server: against a `server-v0.9.0`
+registry a closure-only yield request falls back to yielding a stand-in item,
+and `server-v0.10.0` removes that stand-in. Either can ship first. No
+migration. See [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **A yield larger than one registration request no longer fails with
+  `409 the plan is sealed`** (STA-182). A yield whose children plus their
+  static closure exceed the registry's per-request cap of 1000 items sent
+  the closure through `POST /plans/{id}/members`, which a sealed plan
+  refuses, and the plan is always sealed by the time a task runs; the
+  yielding task failed and so did the build. Only yields that fit in one
+  request worked: a resident build yielding about 6,400 children with
+  about 16,800 more tasks in their closure failed at once. Every request of
+  a yield now goes through `/yield`, cut in post-order so each item's
+  upstreams arrive no later than the item, each request yielding the
+  children it carries, and only the last one suspending.
+- A request holding closure only (one child whose closure alone spans a
+  request) is sent yielding nothing, which a registry from this release on
+  accepts. An older registry refuses that at request validation (422,
+  nothing applied); the request is then sent again yielding its last item,
+  a task already upstream of a later child, so the parent's extra dynamic
+  edge gates nothing new, and so is every later closure-only request of
+  that yield. No registry version is read, and nothing new is refused.
+- `yield []` sends nothing again and the generator carries on. (An empty
+  yield used to go to `/members` as an empty chunk, a no-op.)
+- The in-memory test registry (`stardag.testing.InMemoryRegistry`) now
+  refuses new structure through `/members` on a sealed plan (a new member,
+  or a new edge on an already-expanded task), as the registry does. It
+  accepts a closure-only `/yield` by default, and
+  `InMemoryRegistry(accepts_empty_yielded=False)` acts as an older
+  registry that refuses one.
 - **S3 targets reuse one async client per event loop** (STA-181).
   `exists_aio`, `download_aio` and `upload_aio` each opened a new aioboto3
   client, paying for client construction and a TLS handshake on every call.
@@ -26,6 +61,17 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   default executor, so resources held per loop, such as the S3 client above,
   were never closed. It now does all three, on success, failure and
   interruption alike, bounded at 30 s.
+
+### Server
+
+- **`/yield` accepts a closure-only batch** (STA-182): `yielded` may be
+  empty when the batch carries items. Its items are admitted as a yield's
+  closure is (`admitted_by = static`), the parent gets no dynamic edge, and
+  the batch is recorded and replayed by `batch_id` like any other. Such a
+  batch cannot suspend (400 `suspend_without_yielded`), and a batch with no
+  items is still a validation error. No migration.
+- Dependency updates, including the `opentelemetry-api` 1.45.2 security
+  patch.
 
 ## [0.30.2] — 2026-11-16
 

@@ -248,8 +248,17 @@ class Event:
 class RegistryState:
     """The rows, the clock, and the transaction/refusal helpers."""
 
-    def __init__(self, clock: Callable[[], datetime] | None = None) -> None:
+    def __init__(
+        self,
+        clock: Callable[[], datetime] | None = None,
+        *,
+        accepts_empty_yielded: bool = True,
+    ) -> None:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        #: Whether ``/yield`` takes a closure-only batch (``yielded`` empty,
+        #: not suspending), as the registry does since STA-182. False acts
+        #: as an older registry, whose request validation refuses it (422).
+        self.accepts_empty_yielded = accepts_empty_yielded
         self.builds: dict[UUID, BuildRow] = {}
         self.deployments: dict[UUID, DeploymentRow] = {}
         self.settings: dict[str, dict[str, str]] = {}

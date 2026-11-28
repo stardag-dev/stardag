@@ -216,6 +216,7 @@ for the run. What the scenarios there assert:
 | `test_reconcile_unspawned_claim` | A tick dies between claim and spawn — is the claim ended `lost` and re-driven, long before its TTL?       |
 | `test_reconcile_unreported_end`  | A worker's call returns without reporting its end — is it completed under that execution, not re-run?     |
 | `test_reconcile_retried_attempt` | A failed attempt goes unreported and Modal retries it — does a probe read it running, and nothing end it? |
+| `test_yield_over_the_chunk_cap`  | A yield of ~2.5 registration requests into the sealed plan — does it register and run?                    |
 
 The v2 design's scenario checklist (`docs/design/registry-v2/design.md`)
 names a test tier per scenario; the `live` rows each have a module named
