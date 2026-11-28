@@ -4,10 +4,16 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
-## [Unreleased]
+## [0.31.0] — Unreleased
 
-An SDK fix that works alone against every v2 registry, and a server change
-that, once deployed, lets it drop a stand-in edge. Either can ship first.
+SDK `0.31.0` and server `server-v0.10.0`: large DAGs, discovered faster and
+yielded whole. A yield larger than one registration request (1000 items)
+failed with `409 the plan is sealed` and now registers; completion checks
+against S3 targets reuse one client per event loop instead of opening one per
+call. The SDK needs nothing from the new server: against a `server-v0.9.0`
+registry a closure-only yield request falls back to yielding a stand-in item,
+and `server-v0.10.0` removes that stand-in. Either can ship first. No
+migration. See [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
@@ -37,6 +43,24 @@ that, once deployed, lets it drop a stand-in edge. Either can ship first.
   accepts a closure-only `/yield` by default, and
   `InMemoryRegistry(accepts_empty_yielded=False)` acts as an older
   registry that refuses one.
+- **S3 targets reuse one async client per event loop** (STA-181).
+  `exists_aio`, `download_aio` and `upload_aio` each opened a new aioboto3
+  client, paying for client construction and a TLS handshake on every call.
+  Discovery checks completion with one `HEAD` per S3-backed task, so that
+  setup dominated: discovering about 500 such tasks took 13 s, about four
+  times what a shared client takes. The client is now created on a loop's
+  first async operation and closed when the loop shuts down its async
+  generators (as `asyncio.run` does), or by `await file_system.aclose()`,
+  a new no-op-by-default method on `RemoteFileSystemABC`. Its connection pool
+  holds 64 connections, above every builder's default
+  `max_concurrent_discover`; set `STARDAG_TARGET_S3_MAX_POOL_CONNECTIONS` to
+  run discovery wider than that.
+- **`build_sequential` shuts its event loop down as `asyncio.run` does.** It
+  runs discovery on a loop of its own, which it stopped and closed without
+  cancelling leftover tasks, closing async generators or shutting down the
+  default executor, so resources held per loop, such as the S3 client above,
+  were never closed. It now does all three, on success, failure and
+  interruption alike, bounded at 30 s.
 
 ### Server
 
@@ -46,6 +70,8 @@ that, once deployed, lets it drop a stand-in edge. Either can ship first.
   the batch is recorded and replayed by `batch_id` like any other. Such a
   batch cannot suspend (400 `suspend_without_yielded`), and a batch with no
   items is still a validation error. No migration.
+- Dependency updates, including the `opentelemetry-api` 1.45.2 security
+  patch.
 
 ## [0.30.2] — 2026-11-16
 
