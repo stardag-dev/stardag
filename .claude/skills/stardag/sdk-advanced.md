@@ -142,7 +142,7 @@ class DynamicTask(sd.Task[list[dict]]):
 
 **BUILD CONTRACT**: All yielded tasks are guaranteed complete before the generator resumes.
 
-A yield of any size registers: the SDK splits a yield and its static closure across as many
+Since 0.31.0, a yield of any size registers: the SDK splits a yield and its static closure across as many
 registry requests as it needs. `yield []` sends nothing and the generator carries on.
 
 Async variant:
