@@ -10,13 +10,16 @@ model the seal, so nothing short of a real registry shows the split is
 sent where the registry accepts it.
 
 The DAG is the minimal shape: a root yields ``CHILDREN`` children, each
-requiring a leaf of its own, so the yield is about 2.5 chunks. The driver is
+requiring leaves of its own, so the yield is about 2.5 chunks. The driver is
 a resident build in this test process, with in-memory targets, so the
 subject is the registration and not Modal: no worker container is involved.
 The leaves are complete before the build (their targets written up front),
 so the registry is told of them as observed complete and only the children
 and the root run -- the closure still has to be registered, which is the
-point, without a run per leaf.
+point, without a run per leaf. The closure is wide rather than the children
+many for the same reason: every run is a claim and a report over the
+network, and a first version with 1,250 children (one leaf each) took
+nearly six minutes.
 
 Observables: the build succeeds and the root's output is the sum over the
 children; the build's plan is sealed with every member completed, yielded
@@ -46,9 +49,10 @@ pytestmark = [
     pytest.mark.timeout(900),
 ]
 
-# Children plus one leaf each: 2.5 times the registry's per-request cap of
-# 1000 items, so the yield spans three requests.
-CHILDREN = 1250
+# Children plus their leaves: 2,520 items, about 2.5 times the registry's
+# per-request cap of 1000, so the yield spans three requests.
+CHILDREN = 20
+LEAVES_PER_CHILD = 125
 
 # How many tasks the driver runs at once. The children finish instantly;
 # this bounds the claims in flight against the one registry container.
@@ -70,10 +74,13 @@ class ChunkChild(sd.Task[int]):
     index: int
 
     def requires(self):
-        return ChunkLeaf(salt=self.salt, index=self.index)
+        return [
+            ChunkLeaf(salt=self.salt, index=self.index * LEAVES_PER_CHILD + j)
+            for j in range(LEAVES_PER_CHILD)
+        ]
 
     def run(self):
-        self._save(self.requires().load() + 1)
+        self._save(sum(leaf.load() for leaf in self.requires()))
 
 
 class ChunkRoot(sd.Task[int]):
@@ -88,7 +95,7 @@ class ChunkRoot(sd.Task[int]):
         self._save(sum(kid.load() for kid in kids))
 
 
-@pytest.mark.budget(180)
+@pytest.mark.budget(60)
 def test_a_yield_larger_than_a_chunk_registers_and_runs(
     deployment: Deployment,
 ) -> None:
@@ -112,9 +119,8 @@ def test_a_yield_larger_than_a_chunk_registers_and_runs(
         ),
         InMemoryFileTarget.cleared(),
     ):
-        for index in range(CHILDREN):
-            leaf = ChunkLeaf(salt=salt, index=index)
-            leaf.run()
+        for index in range(CHILDREN * LEAVES_PER_CHILD):
+            ChunkLeaf(salt=salt, index=index).run()
         summary = sd.build(
             root,
             concurrency_config=ConcurrencyConfig(
@@ -127,7 +133,7 @@ def test_a_yield_larger_than_a_chunk_registers_and_runs(
         assert summary.status == BuildExitStatus.SUCCESS, (
             f"{summary}\n{describe(build_id)}"
         )
-        assert root.load() == sum(range(1, CHILDREN + 1))
+        assert root.load() == sum(range(CHILDREN * LEAVES_PER_CHILD))
 
     registry = registry_provider.get()
     assert registry.build_get(build_id).status == "completed", describe(build_id)
@@ -139,7 +145,7 @@ def test_a_yield_larger_than_a_chunk_registers_and_runs(
     for index in (0, CHILDREN // 2, CHILDREN - 1):
         for task in (
             ChunkChild(salt=salt, index=index),
-            ChunkLeaf(salt=salt, index=index),
+            ChunkLeaf(salt=salt, index=index * LEAVES_PER_CHILD),
         ):
             assert registry.task_get(str(task.id)).status == "completed", task
 
