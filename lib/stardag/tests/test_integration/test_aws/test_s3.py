@@ -15,14 +15,21 @@ import warnings
 from pathlib import Path
 
 import pytest
-from botocore.exceptions import ClientError
 
-from stardag.target import CachedRemoteFileSystem
-from stardag.integration.aws.s3 import (
+# The s3 extra is optional: without it, skip rather than fail collection.
+pytest.importorskip("aioboto3")
+pytest.importorskip("botocore")
+
+from botocore.exceptions import ClientError  # noqa: E402
+
+import stardag as sd  # noqa: E402
+from stardag.build import build_sequential  # noqa: E402
+from stardag.integration.aws.s3 import (  # noqa: E402
     DEFAULT_MAX_POOL_CONNECTIONS,
     S3FileSystem,
     S3FileSystemConfig,
 )
+from stardag.target import CachedRemoteFileSystem, RemoteFileTarget  # noqa: E402
 
 
 def _client_error(code: str) -> ClientError:
@@ -313,3 +320,66 @@ def test_a_real_client_is_closed_at_loop_shutdown_without_warnings(monkeypatch):
     assert fs._loop_clients == {}
     unclosed = [w for w in caught if "nclosed" in str(w.message)]
     assert unclosed == []
+
+
+# A sequential build runs discovery on its own helper loop rather than under
+# ``asyncio.run``, so it has to shut that loop down the same way for the
+# client to close. The file system a task's target uses is module state here,
+# since a task's fields must be serializable.
+_BUILD_FS: list[S3FileSystem] = []
+
+
+class _S3CheckedTask(sd.TargetTask[RemoteFileTarget]):
+    __namespace__ = "s3_client_tests"
+
+    key: str
+
+    def target(self) -> RemoteFileTarget:
+        return RemoteFileTarget(f"s3://bucket/{self.key}", _BUILD_FS[-1])
+
+    def run(self) -> None:
+        raise RuntimeError("this task fails when it runs")
+
+
+class _S3CheckedRoot(sd.TargetTask[RemoteFileTarget]):
+    __namespace__ = "s3_client_tests"
+
+    keys: tuple[str, ...]
+
+    def requires(self):  # type: ignore[override]
+        return [_S3CheckedTask(key=key) for key in self.keys]
+
+    def target(self) -> RemoteFileTarget:
+        return RemoteFileTarget("s3://bucket/missing-root", _BUILD_FS[-1])
+
+    def run(self) -> None:
+        pass
+
+
+@pytest.fixture
+def build_session():
+    session = _FakeSession()
+    _BUILD_FS.append(_file_system(session))
+    yield session
+    _BUILD_FS.clear()
+
+
+def test_a_sequential_build_closes_the_client_it_opened(build_session):
+    summary = build_sequential(
+        [_S3CheckedTask(key=f"done-{i}") for i in range(20)], registry=None
+    )
+
+    assert summary is not None
+    assert len(build_session.created) == 1
+    assert build_session.created[0].closed
+    assert _BUILD_FS[-1]._loop_clients == {}
+
+
+def test_a_failed_sequential_build_closes_the_client_too(build_session):
+    # The root's dependencies are missing, so one runs and raises.
+    root = _S3CheckedRoot(keys=("missing-a", "missing-b"))
+    with pytest.raises(Exception, match="fails when it runs"):
+        build_sequential(root, registry=None)
+
+    assert len(build_session.created) == 1
+    assert build_session.created[0].closed

@@ -20,6 +20,12 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   holds 64 connections, above every builder's default
   `max_concurrent_discover`; set `STARDAG_TARGET_S3_MAX_POOL_CONNECTIONS` to
   run discovery wider than that.
+- **`build_sequential` shuts its event loop down as `asyncio.run` does.** It
+  runs discovery on a loop of its own, which it stopped and closed without
+  cancelling leftover tasks, closing async generators or shutting down the
+  default executor, so resources held per loop, such as the S3 client above,
+  were never closed. It now does all three, on success, failure and
+  interruption alike, bounded at 30 s.
 
 ## [0.30.2] — 2026-11-16
 
