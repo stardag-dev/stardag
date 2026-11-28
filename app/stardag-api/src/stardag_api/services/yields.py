@@ -25,6 +25,14 @@ yield into a superseded plan). In order, under the parent's row lock:
    ``transition_task()`` (``claim_outcome = suspended``); ``suspend:
    false`` leaves the claim (the resident engine's generator waits).
 
+A batch may yield nothing (``yielded`` empty) when it carries closure
+only: a yield too large for one request is sent as several batches in
+post-order, and one may hold no child (STA-182). Its items land as any
+yield's closure does (``admitted_by = static``), no dynamic edge is
+inserted, and it is recorded and replayed like any other batch. It may not
+suspend (400 ``suspend_without_yielded``): a parent suspended on nothing
+would wait on nothing.
+
 An ``instance_conflict`` while registering is non-retryable: the items are
 rolled back (a savepoint), the parent is failed (``TASK_FAILED`` with the
 conflict named) and the batch is refused 409 ``instance_conflict``. Any
@@ -134,6 +142,12 @@ async def yield_batch(
             "unknown_yielded_instance",
             "every yielded instance must be one of the batch's items",
             instance_hashes=unknown,
+        )
+    if suspend and not yielded:
+        raise BadRequest(
+            "suspend_without_yielded",
+            "a batch that yields nothing cannot suspend its parent: only a"
+            " batch carrying closure ahead of its children may yield nothing",
         )
     async with transaction(session):
         plan = await get_plan(session, environment_id, plan_id)
@@ -334,6 +348,8 @@ async def _dynamic_edges(
     """Parent→child edges (``is_dynamic = true``) to every yielded instance,
     insert-if-absent; returns how many were new. The children are the
     batch's items, so they exist in the scope and are members."""
+    if not yielded:
+        return 0  # a closure-only batch
     children = sorted(
         (
             await session.scalars(

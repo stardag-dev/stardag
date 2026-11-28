@@ -455,6 +455,10 @@ class YieldRequest(BaseModel):
     post-order, exactly as a static chunk; ``yielded`` names the children
     (by instance hash, each one of ``items``) the parent gets a dynamic
     edge to. ``batch_id`` is client-minted: a retried batch is replayed.
+
+    ``yielded`` may be empty when the batch carries closure only: one of
+    several batches of a yield too large for one request, whose children
+    follow in a later batch (STA-182). Such a batch may not suspend.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -463,9 +467,7 @@ class YieldRequest(BaseModel):
     deployment_id: UUID
     batch_id: UUID
     items: list[RegistrationItem] = Field(min_length=1, max_length=1000)
-    yielded: list[Annotated[str, Field(min_length=1, max_length=64)]] = Field(
-        min_length=1
-    )
+    yielded: list[Annotated[str, Field(min_length=1, max_length=64)]]
     #: The reactive worker suspends (its container exits); the resident
     #: engine keeps the claim while its generator waits.
     suspend: bool

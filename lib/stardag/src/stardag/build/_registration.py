@@ -16,8 +16,8 @@ discovery job or rollover, and a worker's yield — does the same two things
 2. **Register** the walk as :class:`RegistrationItem` s: roots first via
    ``POST /builds/{id}/plans`` (unexpanded), then the post-order in chunks
    of at most 1000 via ``POST /plans/{id}/members``, then ``/seal``
-   (:func:`register_plan_aio`); or, for a yield, one ``/yield`` batch
-   (:func:`yield_batches`).
+   (:func:`register_plan_aio`); or, for a yield into the sealed plan,
+   ``/yield`` batches of at most 1000 (:func:`yield_batches`).
 
 An item states what the driver saw: ``declared_upstreams`` (instance
 hashes) for an expanded task, ``None`` for a pruned one;
@@ -449,13 +449,18 @@ async def register_plan_aio(
 
 @dataclass(frozen=True)
 class YieldBatch:
-    """One request of a yield: ``items`` go to ``/members`` when ``yielded``
-    is empty (closure that does not fit beside the children), otherwise to
-    ``/yield``."""
+    """One ``/yield`` request of a yield: ``items`` in post-order, the
+    ``yielded`` instance hashes (each one of ``items``) the parent gets a
+    dynamic edge to, and whether this request suspends the parent.
+
+    ``yielded`` is empty for a batch of closure only. ``stand_in`` is then
+    the hash yielded instead to an older registry, which refuses an empty
+    ``yielded`` (see :func:`send_yield_aio`); None otherwise."""
 
     items: list[RegistrationItem]
     yielded: list[str]
     suspend: bool
+    stand_in: str | None = None
 
 
 def yield_batches(
@@ -466,44 +471,68 @@ def yield_batches(
     known: Collection[UUID] = (),
     chunk_size: int = MAX_CHUNK_ITEMS,
 ) -> list[YieldBatch]:
-    """Split one yield into requests.
+    """Split one yield into ``/yield`` requests.
 
-    Normally one ``/yield`` carrying the children and their static closure
-    (post-order). A closure larger than a chunk is registered first through
-    ``/members`` (upstreams before their downstreams, as a static chunk),
-    and the children follow in ``/yield`` batches; only the last carries
-    ``suspend``. Tasks in ``known`` (already registered into the plan by
-    this driver) are not re-sent unless they are children themselves.
+    The children and their static closure go in post-order (upstreams
+    first), cut into chunks of at most ``chunk_size`` items, the registry's
+    per-request cap. Usually that is one request. Every chunk goes through
+    ``/yield``, never ``/members``: a yield happens while the plan is
+    sealed, and a sealed plan takes new structure only through ``/yield``
+    (STA-182). Post-order puts every item's upstreams in its own batch or
+    an earlier one, which the registry requires of each request. Only the
+    last batch carries ``suspend``, and it always holds a child (the last
+    one in post-order).
+
+    A batch yields the children it carries. A batch of closure only (one
+    child's closure alone spanning a chunk) yields nothing: the registry
+    admits its items as closure, with no dynamic edge from the parent. An
+    older registry refuses a batch that yields nothing, so such a batch
+    also names a ``stand_in``, its last item, which :func:`send_yield_aio`
+    yields instead there. That item is in the closure of a child of a later
+    batch, so the parent's dynamic edge to it is implied by its edge to
+    that child: it gates nothing that was not gated already.
+
+    A yield of nothing is no batch at all: nothing is sent, and the
+    generator carries on, as it always has.
+
+    Tasks in ``known`` (already registered into the plan by this driver)
+    are not re-sent unless they are children themselves.
     """
     child_ids = {c.id for c in children}
-    closure = [t for t in walk.order if t.id not in child_ids and t.id not in known]
-    unique_children = list({c.id: c for c in children}.values())
-    if len(closure) + len(unique_children) <= chunk_size:
-        items = walk.items(
-            [t for t in walk.order if t.id in child_ids or t.id not in known]
-        )
-        return [
-            YieldBatch(
-                items=items,
-                yielded=[str(c.instance_hash) for c in unique_children],
-                suspend=suspend,
-            )
-        ]
-    batches = [
-        YieldBatch(items=chunk, yielded=[], suspend=False)
-        for chunk in chunks(walk.items(closure), chunk_size)
-    ]
-    child_items = walk.items(unique_children)
-    child_chunks = list(chunks(child_items, chunk_size))
-    for index, chunk in enumerate(child_chunks):
+    child_hashes = {str(c.instance_hash) for c in children}
+    items = walk.items(
+        [t for t in walk.order if t.id in child_ids or t.id not in known]
+    )
+    batches = []
+    for chunk in chunks(items, chunk_size):
+        yielded = [i.instance_hash for i in chunk if i.instance_hash in child_hashes]
         batches.append(
             YieldBatch(
                 items=chunk,
-                yielded=[i.instance_hash for i in chunk],
-                suspend=suspend and index == len(child_chunks) - 1,
+                yielded=yielded,
+                suspend=False,
+                stand_in=None if yielded else chunk[-1].instance_hash,
             )
         )
+    if batches:
+        # The last item in post-order is a child, so the last batch yields;
+        # its stand-in covers a caller whose children are not the walk's
+        # roots, since a batch that suspends must yield.
+        last = batches[-1]
+        batches[-1] = YieldBatch(
+            items=last.items,
+            yielded=last.yielded or [typing.cast(str, last.stand_in)],
+            suspend=suspend,
+        )
     return batches
+
+
+def _refuses_empty_yielded(error: APIError) -> bool:
+    """An older registry's refusal of a batch that yields nothing: its
+    request validation (FastAPI's 422) naming ``yielded`` as too short.
+    Nothing of the batch was applied."""
+    detail = str(error.detail or "")
+    return error.status_code == 422 and "yielded" in detail and "too_short" in detail
 
 
 async def send_yield_aio(
@@ -515,13 +544,18 @@ async def send_yield_aio(
     execution_id: UUID,
     deployment_id: UUID,
 ) -> None:
-    """Send a yield's batches in order (see :func:`yield_batches`). Each
-    ``/yield`` batch gets its own client-minted ``batch_id``, so a retry
-    after a lost response is replayed rather than refused."""
-    for batch in batches:
-        if not batch.yielded:
-            await registry.plan_register_members_aio(plan_id, batch.items)
-            continue
+    """Send a yield's ``/yield`` batches in order (see
+    :func:`yield_batches`): a later batch may hold the downstreams of an
+    earlier one. Each gets its own client-minted ``batch_id``, so a retry
+    after a lost response is replayed rather than refused.
+
+    A closure-only batch is sent yielding nothing. If the registry refuses
+    that as an older one does, the batch is sent again yielding its
+    ``stand_in``, and so is every later closure-only batch of this yield.
+    No registry version is read or required: either registry is served."""
+    stand_ins = False
+
+    async def send(batch: YieldBatch, yielded: list[str]) -> None:
         await registry.member_yield_aio(
             plan_id,
             task_id,
@@ -529,9 +563,23 @@ async def send_yield_aio(
             deployment_id=deployment_id,
             batch_id=new_id(),
             items=batch.items,
-            yielded=batch.yielded,
+            yielded=yielded,
             suspend=batch.suspend,
         )
+
+    for batch in batches:
+        if batch.yielded or batch.stand_in is None:
+            await send(batch, batch.yielded)
+            continue
+        if not stand_ins:
+            try:
+                await send(batch, [])
+                continue
+            except APIError as e:
+                if not _refuses_empty_yielded(e):
+                    raise
+                stand_ins = True
+        await send(batch, [batch.stand_in])
 
 
 def send_yield(
@@ -544,10 +592,9 @@ def send_yield(
     deployment_id: UUID,
 ) -> None:
     """The sync form of :func:`send_yield_aio` (a Modal worker's reporter)."""
-    for batch in batches:
-        if not batch.yielded:
-            registry.plan_register_members(plan_id, batch.items)
-            continue
+    stand_ins = False
+
+    def send(batch: YieldBatch, yielded: list[str]) -> None:
         registry.member_yield(
             plan_id,
             task_id,
@@ -555,6 +602,20 @@ def send_yield(
             deployment_id=deployment_id,
             batch_id=new_id(),
             items=batch.items,
-            yielded=batch.yielded,
+            yielded=yielded,
             suspend=batch.suspend,
         )
+
+    for batch in batches:
+        if batch.yielded or batch.stand_in is None:
+            send(batch, batch.yielded)
+            continue
+        if not stand_ins:
+            try:
+                send(batch, [])
+                continue
+            except APIError as e:
+                if not _refuses_empty_yielded(e):
+                    raise
+                stand_ins = True
+        send(batch, [batch.stand_in])
