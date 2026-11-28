@@ -159,31 +159,37 @@ class PlansMixin(TransitionsMixin):
     ) -> None:
         """``plan_sealed`` for an instance expanded before this chunk that
         declares an upstream it has no edge to (the registry's sealed-plan
-        rule for ``/members``). Checked before anything of the chunk lands;
-        an unknown upstream is refused as such, as the registry does first."""
+        rule for ``/members``). Checked before anything of the chunk lands.
+        As the registry does, every declared upstream of the whole chunk is
+        resolved first, and any unknown one is refused as such, whatever
+        the order of the items or of their upstreams."""
         scope = (plan.deployment_id, plan.settings_hash)
-        grown: list[str] = []
-        for item in items:
-            instance = self.instances[instance_of[item.instance_hash]]
-            if item.declared_upstreams is None or not instance.expanded:
-                continue
-            for upstream_hash in item.declared_upstreams:
-                upstream_id = self.instance_index.get((*scope, upstream_hash))
-                if upstream_id is None:
-                    raise refuse(
-                        "unknown_upstream",
-                        f"upstream {upstream_hash} is not an instance in this scope",
-                        status=400,
-                    )
-                if upstream_id not in instance.upstreams:
-                    grown.append(item.task_id)
-                    break
+        wanted = {h for item in items for h in item.declared_upstreams or ()}
+        missing = sorted(h for h in wanted if (*scope, h) not in self.instance_index)
+        if missing:
+            raise refuse(
+                "unknown_upstream",
+                "declared upstreams must exist as instances in the plan's scope",
+                status=400,
+                instance_hashes=missing,
+            )
+        grown = sorted(
+            item.task_id
+            for item in items
+            if item.declared_upstreams is not None
+            and self.instances[instance_of[item.instance_hash]].expanded
+            and any(
+                self.instance_index[(*scope, h)]
+                not in self.instances[instance_of[item.instance_hash]].upstreams
+                for h in item.declared_upstreams
+            )
+        )
         if grown:
             raise refuse(
                 "plan_sealed",
                 "the plan is sealed: an already-expanded instance cannot gain"
                 " edges through it",
-                task_ids=sorted(grown),
+                task_ids=grown,
             )
 
     def _admit(

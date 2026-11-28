@@ -118,3 +118,22 @@ def test_a_yield_may_grow_an_expanded_instances_edges_on_a_sealed_plan():
         suspend=True,
     )
     assert _upstreams(registry, plan_id, "R") == {"A", "C"}
+
+
+@pytest.mark.parametrize(
+    "upstreams", [["h-A", "h-C", "h-missing"], ["h-missing", "h-C", "h-A"]]
+)
+def test_an_unknown_upstream_is_refused_as_such_in_any_order(upstreams):
+    """The registry resolves every declared upstream of a chunk before the
+    sealed-plan edge rule, so an unknown one is ``unknown_upstream`` even
+    beside a new (known) upstream of an expanded instance, in either order;
+    nothing of the chunk lands."""
+    registry = InMemoryRegistry()
+    a, c, root = _item("A", []), _item("C", []), _item("R", ["h-A"])
+    plan_id, _ = _sealed(registry, a, c, root)
+
+    with pytest.raises(APIError) as excinfo:
+        registry.plan_register_members(plan_id, [_item("R", upstreams)])
+    assert excinfo.value.code == "unknown_upstream"
+    assert (excinfo.value.payload or {}).get("instance_hashes") == ["h-missing"]
+    assert _upstreams(registry, plan_id, "R") == {"A"}
