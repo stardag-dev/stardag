@@ -37,6 +37,10 @@ class YieldMixin(PlansMixin):
             yielded=list(yielded),
             suspend=suspend,
         )
+        if len(items) > 1000:
+            raise refuse("chunk_too_large", status=400)
+        if not yielded:
+            raise refuse("yielded_empty", "a batch yields at least one", status=400)
         replay = self.yields.get((execution_id, batch_id))
         if replay is not None:
             return replay.model_copy(update={"replayed": True})

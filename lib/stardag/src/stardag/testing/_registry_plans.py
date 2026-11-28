@@ -285,7 +285,49 @@ class PlansMixin(TransitionsMixin):
         if len(items) > 1000:
             raise refuse("chunk_too_large", status=400)
         with self.transaction():
-            return self._register_items(self.plan(plan_id), items, as_roots=False)
+            plan = self.plan(plan_id)
+            self._check_sealed(plan, items)
+            return self._register_items(plan, items, as_roots=False)
+
+    def _check_sealed(self, plan: PlanRow, items: Sequence[RegistrationItem]) -> None:
+        """A sealed plan takes no new static structure through ``/members``:
+        only a re-delivery of a member, or a discovery job's result (the
+        first expansion of a member admitted unexpanded, with what it
+        reaches in this chunk). New structure after the seal comes through
+        ``/yield``."""
+        if plan.sealed_at is None:
+            return
+        members = self.members.get(plan.id, {})
+        scope = (plan.deployment_id, plan.settings_hash)
+
+        def held(item: RegistrationItem) -> bool:
+            member = members.get(item.task_id)
+            return member is not None and member.instance_id == self.instance_index.get(
+                (*scope, item.instance_hash)
+            )
+
+        by_hash = {i.instance_hash: i for i in items}
+        stack = [
+            i.instance_hash
+            for i in items
+            if held(i)
+            and i.declared_upstreams is not None
+            and not self.instances[members[i.task_id].instance_id].expanded
+        ]
+        reached: set[str] = set()
+        while stack:
+            h = stack.pop()
+            if h in reached:
+                continue
+            reached.add(h)
+            stack.extend(u for u in by_hash[h].declared_upstreams or () if u in by_hash)
+        refused = sorted(
+            i.task_id
+            for i in items
+            if i.task_id not in members and i.instance_hash not in reached
+        )
+        if refused:
+            raise refuse("plan_sealed", "the plan is sealed", task_ids=refused)
 
     def _closure(self, plan: PlanRow) -> None:
         """Admit every upstream instance reachable over edges from a member

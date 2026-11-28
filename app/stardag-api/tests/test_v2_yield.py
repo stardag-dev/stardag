@@ -15,6 +15,7 @@ import pytest
 from httpx import AsyncClient
 
 from stardag_api.services.errors import BadRequest, Conflict
+from stardag_api.services.registration import MAX_CHUNK_ITEMS
 from stardag_api.services.transitions import Transition
 from tests.v2_support import Harness, item, observed, task_ids
 
@@ -285,6 +286,74 @@ async def test_s29_a_yielded_child_running_in_another_build(h: Harness):
     frontier = await h.frontier(build)
     assert frontier.runnable == []
     assert task_ids(frontier.running) == {child.task_id}
+
+
+async def test_a_yield_larger_than_a_chunk_lands_in_the_sealed_plan(h: Harness):
+    """STA-182 — a yield whose static closure exceeds one chunk arrives as
+    several ``/yield`` batches of the same execution, as the SDK cuts it:
+    post-order, at most ``MAX_CHUNK_ITEMS`` items each, every batch
+    yielding the children it carries (a batch of closure only yields its
+    last item, a task of a later child's closure), ``suspend`` on the last
+    only. Every batch applies to the sealed plan, which stays sealed and
+    still refuses new structure through ``/members``."""
+    parent = item("P")
+    build, plan = await h.planned([parent], [parent], seal=True)
+    sealed_at = plan.sealed_at
+    assert sealed_at is not None
+    execution = await h.start(plan.id, parent)
+
+    # One child whose closure alone spans more than a chunk, then many
+    # children with a leaf each: about 2.4 chunks in all.
+    wide_leaves = [item("WideLeaf", params={"i": i}) for i in range(1200)]
+    wide = item("Wide", upstreams=wide_leaves)
+    leaves = [item("Leaf", params={"i": i}) for i in range(600)]
+    children = [
+        item("Child", params={"i": i}, upstreams=[leaf])
+        for i, leaf in enumerate(leaves)
+    ]
+    order = [*wide_leaves, wide]
+    for leaf, child in zip(leaves, children):
+        order += [leaf, child]
+    child_hashes = {c.instance_hash for c in [wide, *children]}
+    batches = [
+        order[start : start + MAX_CHUNK_ITEMS]
+        for start in range(0, len(order), MAX_CHUNK_ITEMS)
+    ]
+    assert len(batches) == 3
+
+    results = []
+    for n, batch in enumerate(batches):
+        yielded = [i for i in batch if i.instance_hash in child_hashes] or [batch[-1]]
+        results.append(
+            await h.yield_(
+                plan.id,
+                parent,
+                execution,
+                batch,
+                yielded=yielded,
+                suspend=n == len(batches) - 1,
+            )
+        )
+    assert [r.status for r in results] == ["running", "running", "suspended"]
+    assert sum(r.members.members_admitted for r in results) == len(order)
+
+    members = await h.members(plan.id)
+    assert {i.task_id for i in order} <= set(members)
+    assert members[wide.task_id]["admitted_by"] == "dynamic"
+    assert members[children[0].task_id]["admitted_by"] == "dynamic"
+    (row,) = await h._rows("SELECT sealed_at FROM plan WHERE id = :p", p=plan.id)
+    assert row["sealed_at"] == sealed_at
+    yields = await h.events(parent, types=["task_yielded"])
+    assert len(yields) == 3 and all(e["report_applied"] for e in yields)
+
+    # The parent waits on its children; the leaves are what runs first.
+    frontier = await h.frontier(build)
+    assert frontier.sealed and frontier.plan_id == plan.id
+    assert task_ids(frontier.runnable) == {i.task_id for i in [*wide_leaves, *leaves]}
+
+    with pytest.raises(Conflict) as exc:
+        await h.register(plan.id, [item("Late")])
+    assert exc.value.code == "plan_sealed"
 
 
 async def test_yielded_names_items_of_the_batch(h: Harness):

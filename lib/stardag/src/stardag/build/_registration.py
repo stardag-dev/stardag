@@ -16,8 +16,8 @@ discovery job or rollover, and a worker's yield — does the same two things
 2. **Register** the walk as :class:`RegistrationItem` s: roots first via
    ``POST /builds/{id}/plans`` (unexpanded), then the post-order in chunks
    of at most 1000 via ``POST /plans/{id}/members``, then ``/seal``
-   (:func:`register_plan_aio`); or, for a yield, one ``/yield`` batch
-   (:func:`yield_batches`).
+   (:func:`register_plan_aio`); or, for a yield into the sealed plan,
+   ``/yield`` batches of at most 1000 (:func:`yield_batches`).
 
 An item states what the driver saw: ``declared_upstreams`` (instance
 hashes) for an expanded task, ``None`` for a pruned one;
@@ -449,9 +449,9 @@ async def register_plan_aio(
 
 @dataclass(frozen=True)
 class YieldBatch:
-    """One request of a yield: ``items`` go to ``/members`` when ``yielded``
-    is empty (closure that does not fit beside the children), otherwise to
-    ``/yield``."""
+    """One ``/yield`` request of a yield: ``items`` in post-order, the
+    ``yielded`` instance hashes (each one of ``items``) the parent gets a
+    dynamic edge to, and whether this request suspends the parent."""
 
     items: list[RegistrationItem]
     yielded: list[str]
@@ -466,43 +466,46 @@ def yield_batches(
     known: Collection[UUID] = (),
     chunk_size: int = MAX_CHUNK_ITEMS,
 ) -> list[YieldBatch]:
-    """Split one yield into requests.
+    """Split one yield into ``/yield`` requests.
 
-    Normally one ``/yield`` carrying the children and their static closure
-    (post-order). A closure larger than a chunk is registered first through
-    ``/members`` (upstreams before their downstreams, as a static chunk),
-    and the children follow in ``/yield`` batches; only the last carries
-    ``suspend``. Tasks in ``known`` (already registered into the plan by
-    this driver) are not re-sent unless they are children themselves.
+    The children and their static closure go in post-order (upstreams
+    first), cut into chunks of at most ``chunk_size`` items, the registry's
+    per-request cap. Usually that is one request. Every chunk goes through
+    ``/yield``, never ``/members``: a yield happens while the plan is
+    sealed, and a sealed plan takes new structure only through ``/yield``
+    (STA-182). Post-order puts every item's upstreams in its own batch or
+    an earlier one, which the registry requires of each request.
+
+    A batch yields the children it carries. The registry needs at least
+    one per batch, so a batch of closure only (one child's closure alone
+    spanning a chunk) yields its last item instead. That item is in the
+    closure of a child of a later batch, so the parent's dynamic edge to it
+    is implied by its edge to that child: it gates nothing that was not
+    gated already. Only the last batch carries ``suspend``.
+
+    Tasks in ``known`` (already registered into the plan by this driver)
+    are not re-sent unless they are children themselves.
     """
     child_ids = {c.id for c in children}
-    closure = [t for t in walk.order if t.id not in child_ids and t.id not in known]
-    unique_children = list({c.id: c for c in children}.values())
-    if len(closure) + len(unique_children) <= chunk_size:
-        items = walk.items(
-            [t for t in walk.order if t.id in child_ids or t.id not in known]
-        )
-        return [
-            YieldBatch(
-                items=items,
-                yielded=[str(c.instance_hash) for c in unique_children],
-                suspend=suspend,
-            )
-        ]
-    batches = [
-        YieldBatch(items=chunk, yielded=[], suspend=False)
-        for chunk in chunks(walk.items(closure), chunk_size)
-    ]
-    child_items = walk.items(unique_children)
-    child_chunks = list(chunks(child_items, chunk_size))
-    for index, chunk in enumerate(child_chunks):
+    child_hashes = {str(c.instance_hash) for c in children}
+    items = walk.items(
+        [t for t in walk.order if t.id in child_ids or t.id not in known]
+    )
+    batches = []
+    for chunk in chunks(items, chunk_size):
+        yielded = [i.instance_hash for i in chunk if i.instance_hash in child_hashes]
         batches.append(
             YieldBatch(
                 items=chunk,
-                yielded=[i.instance_hash for i in chunk],
-                suspend=suspend and index == len(child_chunks) - 1,
+                yielded=yielded or [chunk[-1].instance_hash],
+                suspend=False,
             )
         )
+    if not batches:
+        # An empty yield is sent as it is, for the registry to refuse.
+        return [YieldBatch(items=[], yielded=[], suspend=suspend)]
+    last = batches[-1]
+    batches[-1] = YieldBatch(items=last.items, yielded=last.yielded, suspend=suspend)
     return batches
 
 
@@ -515,13 +518,11 @@ async def send_yield_aio(
     execution_id: UUID,
     deployment_id: UUID,
 ) -> None:
-    """Send a yield's batches in order (see :func:`yield_batches`). Each
-    ``/yield`` batch gets its own client-minted ``batch_id``, so a retry
+    """Send a yield's ``/yield`` batches in order (see
+    :func:`yield_batches`): a later batch may hold the downstreams of an
+    earlier one. Each gets its own client-minted ``batch_id``, so a retry
     after a lost response is replayed rather than refused."""
     for batch in batches:
-        if not batch.yielded:
-            await registry.plan_register_members_aio(plan_id, batch.items)
-            continue
         await registry.member_yield_aio(
             plan_id,
             task_id,
@@ -545,9 +546,6 @@ def send_yield(
 ) -> None:
     """The sync form of :func:`send_yield_aio` (a Modal worker's reporter)."""
     for batch in batches:
-        if not batch.yielded:
-            registry.plan_register_members(plan_id, batch.items)
-            continue
         registry.member_yield(
             plan_id,
             task_id,

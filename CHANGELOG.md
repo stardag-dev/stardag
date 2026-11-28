@@ -4,6 +4,29 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [Unreleased]
+
+### SDK
+
+- **A yield larger than one registration request no longer fails with
+  `409 the plan is sealed`** (STA-182). A yield whose children plus their
+  static closure exceed the registry's per-request cap of 1000 items sent
+  the closure through `POST /plans/{id}/members`, which a sealed plan
+  refuses, and the plan is always sealed by the time a task runs; the
+  yielding task failed and so did the build. Only yields that fit in one
+  request worked: a resident build yielding about 6,400 children with
+  about 16,800 more tasks in their closure failed at once. Every request of
+  a yield now goes through `/yield`, cut in post-order so each item's
+  upstreams arrive no later than the item, each request yielding the
+  children it carries, and only the last one suspending. A request holding
+  closure only (one child whose closure alone spans a request) yields its
+  last item, a task already upstream of a later child, so the parent's
+  extra dynamic edge gates nothing new. No server change: the fix works
+  against every v2 registry.
+- The in-memory test registry (`stardag.testing.InMemoryRegistry`) now
+  refuses new structure through `/members` on a sealed plan, and a `/yield`
+  with no yielded instance or over 1000 items, as the registry does.
+
 ## [0.30.2] — 2026-11-16
 
 SDK-only patch: no server change. Task ids are unchanged for every set whose
