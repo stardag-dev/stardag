@@ -3,6 +3,7 @@ the item shape, chunking, and how a yield is split into requests."""
 
 from __future__ import annotations
 
+import asyncio
 import typing
 from functools import partial
 from datetime import datetime, timezone
@@ -17,6 +18,7 @@ from stardag.build._registration import (
     YieldBatch,
     new_id,
     register_plan_aio,
+    send_yield,
     send_yield_aio,
     walk_aio,
     yield_batches,
@@ -153,25 +155,28 @@ class TestYieldBatches:
             assert b.yielded
             assert set(b.yielded) <= {i.instance_hash for i in b.items}
 
-    async def test_a_batch_of_closure_only_yields_its_last_item(
+    async def test_a_batch_of_closure_only_yields_nothing_and_names_a_stand_in(
         self, default_in_memory_fs_target: Target
     ):
         """One child whose closure alone spans several chunks: a batch with
-        no child yields its last item, a task of that child's closure (so the
-        parent's edge to it is implied by its edge to the child)."""
+        no child yields nothing, and names its last item -- a task of that
+        child's closure, whose edge from the parent is implied by its edge
+        to the child -- as the stand-in an older registry is sent."""
         leaves = tuple(SyncOnlyTask(name=f"wide-leaf-{i}") for i in range(25))
         child = SyncOnlyTask(name="wide-child", deps=leaves)
         walk = await walk_aio([child])
-        batches = yield_batches(walk, [child], suspend=False, chunk_size=10)
+        batches = yield_batches(walk, [child], suspend=True, chunk_size=10)
 
         assert [len(b.items) for b in batches] == [10, 10, 6]
         _assert_upstreams_first(batches)
         leaf_hashes = {str(leaf.instance_hash) for leaf in leaves}
         for b in batches[:-1]:
-            assert b.yielded == [b.items[-1].instance_hash]
-            assert b.yielded[0] in leaf_hashes
-        assert batches[-1].yielded == [str(child.instance_hash)]
-        assert not any(b.suspend for b in batches)
+            assert b.yielded == [] and not b.suspend
+            assert b.stand_in == b.items[-1].instance_hash
+            assert b.stand_in in leaf_hashes
+        last = batches[-1]
+        assert last.yielded == [str(child.instance_hash)]
+        assert (last.suspend, last.stand_in) == (True, None)
 
     async def test_known_closure_is_left_out_of_every_batch(
         self, default_in_memory_fs_target: Target
@@ -195,12 +200,12 @@ class TestYieldBatches:
             str(c.instance_hash) for c in children
         )
 
-    async def test_an_empty_yield_is_one_empty_batch(
+    async def test_a_yield_of_nothing_is_no_batch(
         self, default_in_memory_fs_target: Target
     ):
+        """Nothing is sent for ``yield []``: the generator carries on."""
         walk = await walk_aio([])
-        (batch,) = yield_batches(walk, [], suspend=True)
-        assert (batch.items, batch.yielded, batch.suspend) == ([], [], True)
+        assert yield_batches(walk, [], suspend=True) == []
 
 
 def _assert_upstreams_first(batches: typing.Sequence[YieldBatch]) -> None:
@@ -326,3 +331,114 @@ async def test_a_resident_build_runs_a_yield_over_the_chunk_size(
     yields = registry.calls_to("member_yield")
     assert len(yields) == 3
     assert all(c["yielded"] for c in yields)
+
+
+class _WideChildYield(Task[int]):
+    """Yields one child whose own closure spans several chunks."""
+
+    leaves: int
+
+    def child(self) -> SyncOnlyTask:
+        return SyncOnlyTask(
+            name="wide-closure-child",
+            deps=tuple(
+                SyncOnlyTask(name=f"wide-closure-leaf-{i}") for i in range(self.leaves)
+            ),
+        )
+
+    def run(self):
+        yield self.child()
+        self._save(self.leaves)
+
+
+@pytest.mark.parametrize("accepts_empty_yielded", [True, False])
+async def test_a_resident_build_yields_a_closure_wider_than_a_chunk(
+    default_in_memory_fs_target: Target,
+    monkeypatch: pytest.MonkeyPatch,
+    accepts_empty_yielded: bool,
+):
+    """STA-182, both registries: a closure-only batch yields nothing to a
+    registry that accepts it, so the parent's only dynamic edge is to its
+    child; an older registry refuses that (422, nothing applied), and the
+    batch and every later closure-only batch of the yield are sent with
+    their stand-in instead. The build succeeds either way."""
+    chunk_size = 10
+    monkeypatch.setattr(
+        _resident, "yield_batches", partial(yield_batches, chunk_size=chunk_size)
+    )
+    registry = InMemoryRegistry(accepts_empty_yielded=accepts_empty_yielded)
+    root = _WideChildYield(leaves=25)
+    summary = await build_aio([root], registry=registry)
+
+    assert summary.status == BuildExitStatus.SUCCESS
+    assert root.load() == 25
+    (plan_id,) = registry.plans
+    members = registry.members[plan_id]
+    assert len(members) == 25 + 2
+    parent = registry.instances[members[str(root.id)].instance_id]
+    edges_to = {registry.instances[u].task_id for u in parent.upstreams}
+    yielded = [c["yielded"] for c in registry.calls_to("member_yield")]
+    if accepts_empty_yielded:
+        assert [len(y) for y in yielded] == [0, 0, 1]
+        # The parent's only dynamic edge is to its child.
+        assert edges_to == {str(root.child().id)}
+    else:
+        # The first closure-only batch is refused once and resent; the
+        # second goes straight to its stand-in.
+        assert [len(y) for y in yielded] == [0, 1, 1, 1]
+        assert len(edges_to) == 3 and str(root.child().id) in edges_to
+
+
+def test_send_yield_falls_back_to_the_stand_in_for_an_older_registry(
+    default_in_memory_fs_target: Target,
+):
+    """The sync sender (a Modal worker's) does the same as the async one."""
+    registry = InMemoryRegistry(accepts_empty_yielded=False)
+    deployment = registry.add_deployment(kind="local", code_id="c")
+    parent = SyncOnlyTask(name="sync-parent")
+    build_id = registry.build_create(root_task_ids=[str(parent.id)]).id
+    plan = asyncio.run(
+        register_plan_aio(
+            registry,
+            build_id,
+            asyncio.run(walk_aio([parent])),
+            deployment_id=deployment,
+            settings={},
+        )
+    )
+    execution_id = new_id()
+    registry.member_start(plan.id, str(parent.id), execution_id=execution_id)
+    leaves = tuple(SyncOnlyTask(name=f"sync-leaf-{i}") for i in range(12))
+    child = SyncOnlyTask(name="sync-child", deps=leaves)
+    walk = asyncio.run(walk_aio([child]))
+    batches = yield_batches(walk, [child], suspend=True, chunk_size=10)
+    send_yield(
+        registry,
+        batches,
+        plan_id=plan.id,
+        task_id=str(parent.id),
+        execution_id=execution_id,
+        deployment_id=deployment,
+    )
+    yielded = [c["yielded"] for c in registry.calls_to("member_yield")]
+    assert yielded == [[], [batches[0].stand_in], [str(child.instance_hash)]]
+    assert registry.tasks[str(parent.id)].status == "suspended"
+
+
+class _YieldsNothing(Task[int]):
+    def run(self):
+        yield []
+        self._save(1)
+
+
+async def test_a_yield_of_nothing_is_a_no_op_with_a_registry(
+    default_in_memory_fs_target: Target,
+):
+    """``yield []`` sends nothing and the generator carries on: the build
+    succeeds, as it did when the empty yield went to ``/members``."""
+    registry = InMemoryRegistry()
+    task = _YieldsNothing()
+    summary = await build_aio([task], registry=registry)
+    assert summary.status == BuildExitStatus.SUCCESS
+    assert task.load() == 1
+    assert registry.calls_to("member_yield") == []

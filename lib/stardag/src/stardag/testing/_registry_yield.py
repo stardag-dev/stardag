@@ -8,9 +8,23 @@ from __future__ import annotations
 from collections.abc import Sequence
 from uuid import UUID
 
+from stardag.exceptions import APIError
 from stardag.registry import RegistrationItem, YieldResult
 from stardag.testing._registry_plans import PlansMixin
 from stardag.testing._registry_state import Event, refuse
+
+
+#: The ``detail`` an older registry's request validation answers a
+#: ``/yield`` with an empty ``yielded`` with (FastAPI's 422 body).
+_OLDER_REGISTRY_EMPTY_YIELDED = [
+    {
+        "type": "too_short",
+        "loc": ["body", "yielded"],
+        "msg": "List should have at least 1 item after validation, not 0",
+        "input": [],
+        "ctx": {"field_type": "List", "min_length": 1, "actual_length": 0},
+    }
+]
 
 
 class YieldMixin(PlansMixin):
@@ -39,8 +53,17 @@ class YieldMixin(PlansMixin):
         )
         if len(items) > 1000:
             raise refuse("chunk_too_large", status=400)
-        if not yielded:
-            raise refuse("yielded_empty", "a batch yields at least one", status=400)
+        if not yielded and not self.accepts_empty_yielded:
+            # An older registry: request validation, before any handler.
+            raise APIError(
+                f"Yield of task {task_id} failed",
+                status_code=422,
+                detail=str(_OLDER_REGISTRY_EMPTY_YIELDED),
+            )
+        if not items:
+            raise refuse("items_empty", status=422)
+        if suspend and not yielded:
+            raise refuse("suspend_without_yielded", status=400)
         replay = self.yields.get((execution_id, batch_id))
         if replay is not None:
             return replay.model_copy(update={"replayed": True})

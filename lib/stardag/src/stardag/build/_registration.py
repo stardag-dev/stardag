@@ -451,11 +451,16 @@ async def register_plan_aio(
 class YieldBatch:
     """One ``/yield`` request of a yield: ``items`` in post-order, the
     ``yielded`` instance hashes (each one of ``items``) the parent gets a
-    dynamic edge to, and whether this request suspends the parent."""
+    dynamic edge to, and whether this request suspends the parent.
+
+    ``yielded`` is empty for a batch of closure only. ``stand_in`` is then
+    the hash yielded instead to an older registry, which refuses an empty
+    ``yielded`` (see :func:`send_yield_aio`); None otherwise."""
 
     items: list[RegistrationItem]
     yielded: list[str]
     suspend: bool
+    stand_in: str | None = None
 
 
 def yield_batches(
@@ -474,14 +479,21 @@ def yield_batches(
     ``/yield``, never ``/members``: a yield happens while the plan is
     sealed, and a sealed plan takes new structure only through ``/yield``
     (STA-182). Post-order puts every item's upstreams in its own batch or
-    an earlier one, which the registry requires of each request.
+    an earlier one, which the registry requires of each request. Only the
+    last batch carries ``suspend``, and it always holds a child (the last
+    one in post-order).
 
-    A batch yields the children it carries. The registry needs at least
-    one per batch, so a batch of closure only (one child's closure alone
-    spanning a chunk) yields its last item instead. That item is in the
-    closure of a child of a later batch, so the parent's dynamic edge to it
-    is implied by its edge to that child: it gates nothing that was not
-    gated already. Only the last batch carries ``suspend``.
+    A batch yields the children it carries. A batch of closure only (one
+    child's closure alone spanning a chunk) yields nothing: the registry
+    admits its items as closure, with no dynamic edge from the parent. An
+    older registry refuses a batch that yields nothing, so such a batch
+    also names a ``stand_in``, its last item, which :func:`send_yield_aio`
+    yields instead there. That item is in the closure of a child of a later
+    batch, so the parent's dynamic edge to it is implied by its edge to
+    that child: it gates nothing that was not gated already.
+
+    A yield of nothing is no batch at all: nothing is sent, and the
+    generator carries on, as it always has.
 
     Tasks in ``known`` (already registered into the plan by this driver)
     are not re-sent unless they are children themselves.
@@ -497,16 +509,30 @@ def yield_batches(
         batches.append(
             YieldBatch(
                 items=chunk,
-                yielded=yielded or [chunk[-1].instance_hash],
+                yielded=yielded,
                 suspend=False,
+                stand_in=None if yielded else chunk[-1].instance_hash,
             )
         )
-    if not batches:
-        # An empty yield is sent as it is, for the registry to refuse.
-        return [YieldBatch(items=[], yielded=[], suspend=suspend)]
-    last = batches[-1]
-    batches[-1] = YieldBatch(items=last.items, yielded=last.yielded, suspend=suspend)
+    if batches:
+        # The last item in post-order is a child, so the last batch yields;
+        # its stand-in covers a caller whose children are not the walk's
+        # roots, since a batch that suspends must yield.
+        last = batches[-1]
+        batches[-1] = YieldBatch(
+            items=last.items,
+            yielded=last.yielded or [typing.cast(str, last.stand_in)],
+            suspend=suspend,
+        )
     return batches
+
+
+def _refuses_empty_yielded(error: APIError) -> bool:
+    """An older registry's refusal of a batch that yields nothing: its
+    request validation (FastAPI's 422) naming ``yielded`` as too short.
+    Nothing of the batch was applied."""
+    detail = str(error.detail or "")
+    return error.status_code == 422 and "yielded" in detail and "too_short" in detail
 
 
 async def send_yield_aio(
@@ -521,8 +547,15 @@ async def send_yield_aio(
     """Send a yield's ``/yield`` batches in order (see
     :func:`yield_batches`): a later batch may hold the downstreams of an
     earlier one. Each gets its own client-minted ``batch_id``, so a retry
-    after a lost response is replayed rather than refused."""
-    for batch in batches:
+    after a lost response is replayed rather than refused.
+
+    A closure-only batch is sent yielding nothing. If the registry refuses
+    that as an older one does, the batch is sent again yielding its
+    ``stand_in``, and so is every later closure-only batch of this yield.
+    No registry version is read or required: either registry is served."""
+    stand_ins = False
+
+    async def send(batch: YieldBatch, yielded: list[str]) -> None:
         await registry.member_yield_aio(
             plan_id,
             task_id,
@@ -530,9 +563,23 @@ async def send_yield_aio(
             deployment_id=deployment_id,
             batch_id=new_id(),
             items=batch.items,
-            yielded=batch.yielded,
+            yielded=yielded,
             suspend=batch.suspend,
         )
+
+    for batch in batches:
+        if batch.yielded or batch.stand_in is None:
+            await send(batch, batch.yielded)
+            continue
+        if not stand_ins:
+            try:
+                await send(batch, [])
+                continue
+            except APIError as e:
+                if not _refuses_empty_yielded(e):
+                    raise
+                stand_ins = True
+        await send(batch, [batch.stand_in])
 
 
 def send_yield(
@@ -545,7 +592,9 @@ def send_yield(
     deployment_id: UUID,
 ) -> None:
     """The sync form of :func:`send_yield_aio` (a Modal worker's reporter)."""
-    for batch in batches:
+    stand_ins = False
+
+    def send(batch: YieldBatch, yielded: list[str]) -> None:
         registry.member_yield(
             plan_id,
             task_id,
@@ -553,6 +602,20 @@ def send_yield(
             deployment_id=deployment_id,
             batch_id=new_id(),
             items=batch.items,
-            yielded=batch.yielded,
+            yielded=yielded,
             suspend=batch.suspend,
         )
+
+    for batch in batches:
+        if batch.yielded or batch.stand_in is None:
+            send(batch, batch.yielded)
+            continue
+        if not stand_ins:
+            try:
+                send(batch, [])
+                continue
+            except APIError as e:
+                if not _refuses_empty_yielded(e):
+                    raise
+                stand_ins = True
+        send(batch, [batch.stand_in])

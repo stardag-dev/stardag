@@ -6,6 +6,9 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+An SDK fix that works alone against every v2 registry, and a server change
+that, once deployed, lets it drop a stand-in edge. Either can ship first.
+
 ### SDK
 
 - **A yield larger than one registration request no longer fails with
@@ -18,14 +21,31 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   about 16,800 more tasks in their closure failed at once. Every request of
   a yield now goes through `/yield`, cut in post-order so each item's
   upstreams arrive no later than the item, each request yielding the
-  children it carries, and only the last one suspending. A request holding
-  closure only (one child whose closure alone spans a request) yields its
-  last item, a task already upstream of a later child, so the parent's
-  extra dynamic edge gates nothing new. No server change: the fix works
-  against every v2 registry.
+  children it carries, and only the last one suspending.
+- A request holding closure only (one child whose closure alone spans a
+  request) is sent yielding nothing, which a registry from this release on
+  accepts. An older registry refuses that at request validation (422,
+  nothing applied); the request is then sent again yielding its last item,
+  a task already upstream of a later child, so the parent's extra dynamic
+  edge gates nothing new, and so is every later closure-only request of
+  that yield. No registry version is read, and nothing new is refused.
+- `yield []` sends nothing again and the generator carries on. (An empty
+  yield used to go to `/members` as an empty chunk, a no-op.)
 - The in-memory test registry (`stardag.testing.InMemoryRegistry`) now
-  refuses new structure through `/members` on a sealed plan, and a `/yield`
-  with no yielded instance or over 1000 items, as the registry does.
+  refuses new structure through `/members` on a sealed plan (a new member,
+  or a new edge on an already-expanded task), as the registry does. It
+  accepts a closure-only `/yield` by default, and
+  `InMemoryRegistry(accepts_empty_yielded=False)` acts as an older
+  registry that refuses one.
+
+### Server
+
+- **`/yield` accepts a closure-only batch** (STA-182): `yielded` may be
+  empty when the batch carries items. Its items are admitted as a yield's
+  closure is (`admitted_by = static`), the parent gets no dynamic edge, and
+  the batch is recorded and replayed by `batch_id` like any other. Such a
+  batch cannot suspend (400 `suspend_without_yielded`), and a batch with no
+  items is still a validation error. No migration.
 
 ## [0.30.2] — 2026-11-16
 
