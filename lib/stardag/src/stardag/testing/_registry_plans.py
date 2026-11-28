@@ -56,7 +56,11 @@ class PlansMixin(TransitionsMixin):
         *,
         as_roots: bool,
         dynamic: Collection[str] = (),
+        sealed_members: bool = False,
     ) -> MembersResult:
+        """Register one chunk. ``sealed_members`` marks ``/members`` on a
+        sealed plan, where an instance expanded before this chunk may not
+        gain edges (``/yield`` may)."""
         now = self.now()
         counts = dict.fromkeys(MembersResult.model_fields, 0)
         by_hash: dict[str, RegistrationItem] = {}
@@ -115,6 +119,8 @@ class PlansMixin(TransitionsMixin):
             elif self.instances[instance_id].body != item.body:
                 raise refuse("instance_body_conflict", f"instance {item.instance_hash}")
             instance_of[item.instance_hash] = instance_id
+        if sealed_members and plan.sealed_at is not None:
+            self._refuse_edge_growth(plan, ordered, instance_of)
         for item in ordered:
             instance = self.instances[instance_of[item.instance_hash]]
             if item.declared_upstreams is not None:
@@ -144,6 +150,41 @@ class PlansMixin(TransitionsMixin):
                 members[item.task_id].is_root = True
             self._observe(plan, self.tasks[item.task_id], item, counts)
         return MembersResult(**counts)
+
+    def _refuse_edge_growth(
+        self,
+        plan: PlanRow,
+        items: Sequence[RegistrationItem],
+        instance_of: Mapping[str, UUID],
+    ) -> None:
+        """``plan_sealed`` for an instance expanded before this chunk that
+        declares an upstream it has no edge to (the registry's sealed-plan
+        rule for ``/members``). Checked before anything of the chunk lands;
+        an unknown upstream is refused as such, as the registry does first."""
+        scope = (plan.deployment_id, plan.settings_hash)
+        grown: list[str] = []
+        for item in items:
+            instance = self.instances[instance_of[item.instance_hash]]
+            if item.declared_upstreams is None or not instance.expanded:
+                continue
+            for upstream_hash in item.declared_upstreams:
+                upstream_id = self.instance_index.get((*scope, upstream_hash))
+                if upstream_id is None:
+                    raise refuse(
+                        "unknown_upstream",
+                        f"upstream {upstream_hash} is not an instance in this scope",
+                        status=400,
+                    )
+                if upstream_id not in instance.upstreams:
+                    grown.append(item.task_id)
+                    break
+        if grown:
+            raise refuse(
+                "plan_sealed",
+                "the plan is sealed: an already-expanded instance cannot gain"
+                " edges through it",
+                task_ids=sorted(grown),
+            )
 
     def _admit(
         self,
@@ -287,14 +328,17 @@ class PlansMixin(TransitionsMixin):
         with self.transaction():
             plan = self.plan(plan_id)
             self._check_sealed(plan, items)
-            return self._register_items(plan, items, as_roots=False)
+            return self._register_items(
+                plan, items, as_roots=False, sealed_members=True
+            )
 
     def _check_sealed(self, plan: PlanRow, items: Sequence[RegistrationItem]) -> None:
         """A sealed plan takes no new static structure through ``/members``:
         only a re-delivery of a member, or a discovery job's result (the
         first expansion of a member admitted unexpanded, with what it
-        reaches in this chunk). New structure after the seal comes through
-        ``/yield``."""
+        reaches in this chunk). A new edge on an instance expanded before
+        the chunk is refused too (:meth:`_refuse_edge_growth`). New structure
+        after the seal comes through ``/yield``."""
         if plan.sealed_at is None:
             return
         members = self.members.get(plan.id, {})
