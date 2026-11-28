@@ -652,6 +652,13 @@ class RemoteFileSystemABC(metaclass=abc.ABCMeta):
             await aiofiles.os.remove(local_path)
             await aiofiles.os.rmdir(local_path.parent)
 
+    async def aclose(self) -> None:
+        """Release what the async operations hold on the running event loop.
+
+        A no-op by default. A file system that keeps a client per loop (S3)
+        closes that loop's client; the next async operation opens a new one.
+        """
+
 
 class RemoteFileTarget(FileTarget):
     def __init__(self, uri: str, rfs: RemoteFileSystemABC) -> None:
@@ -1150,6 +1157,9 @@ class CachedRemoteFileSystem(RemoteFileSystemABC):
     async def exit_readable_proxy_path_aio(self, local_path: Path) -> None:
         """Cache persists, no cleanup needed."""
         pass
+
+    async def aclose(self) -> None:
+        await self.wrapped.aclose()
 
     async def _load_to_cache_atomically_aio(self, uri: str, cache_path: Path) -> None:
         """Async atomic download to cache."""
