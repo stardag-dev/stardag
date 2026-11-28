@@ -8,13 +8,15 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ## v0.31.0 — Large yields register, S3 discovery is faster
 
-Not yet released. Ships together with the registry server `server-v0.10.0`,
-but needs nothing from it: either can be released or upgraded first.
+Released 2026-11-28 together with the registry server `server-v0.10.0`. The
+SDK needs nothing from it: either can be upgraded first.
 
 ### Upgrading
 
 - **No code changes.** Nothing is renamed or removed, and there is no
   migration.
+- **Self-hosted deployments** upgrade with `stardag self-host upgrade`, which
+  now defaults to `0.10.0`.
 - **Against a `server-v0.9.0` registry** large yields register too. A yield
   request that carries closure tasks but none of the yielded children (one
   child whose closure alone spans a request) is refused by the older server
