@@ -9,8 +9,11 @@ ever worked against a real registry, and the in-process fakes did not
 model the seal, so nothing short of a real registry shows the split is
 sent where the registry accepts it.
 
-The DAG is the minimal shape: a root yields ``CHILDREN`` children, each
-requiring leaves of its own, so the yield is about 2.5 chunks. The driver is
+The DAG: a root yields ``CHILDREN`` children, each requiring leaves of its
+own, so the yield is about 2.5 chunks. The first child's leaves alone span
+more than a chunk, so the first request carries closure only: a registry
+that accepts it gets no child in it, an older one is sent a stand-in (the
+SDK covers both; this tier runs the branch's registry). The driver is
 a resident build in this test process, with in-memory targets, so the
 subject is the registration and not Modal: no worker container is involved.
 The leaves are complete before the build (their targets written up front),
@@ -24,7 +27,7 @@ nearly six minutes.
 Observables: the build succeeds and the root's output is the sum over the
 children; the build's plan is sealed with every member completed, yielded
 children and leaves among them; and the root's yield arrived as more than
-one applied ``/yield``.
+one applied ``/yield``, the first of them yielding nothing.
 """
 
 from __future__ import annotations
@@ -49,10 +52,22 @@ pytestmark = [
     pytest.mark.timeout(900),
 ]
 
-# Children plus their leaves: 2,520 items, about 2.5 times the registry's
-# per-request cap of 1000, so the yield spans three requests.
-CHILDREN = 20
+# Children plus their leaves: 2,461 items, about 2.5 times the registry's
+# per-request cap of 1000, so the yield spans three requests. The first
+# child's leaves fill the first request on their own.
+CHILDREN = 11
+FIRST_CHILD_LEAVES = 1200
 LEAVES_PER_CHILD = 125
+LEAVES = FIRST_CHILD_LEAVES + (CHILDREN - 1) * LEAVES_PER_CHILD
+
+
+def leaf_indices(child: int) -> range:
+    """The indices of one child's own leaves."""
+    if child == 0:
+        return range(FIRST_CHILD_LEAVES)
+    start = FIRST_CHILD_LEAVES + (child - 1) * LEAVES_PER_CHILD
+    return range(start, start + LEAVES_PER_CHILD)
+
 
 # How many tasks the driver runs at once. The children finish instantly;
 # this bounds the claims in flight against the one registry container.
@@ -74,10 +89,7 @@ class ChunkChild(sd.Task[int]):
     index: int
 
     def requires(self):
-        return [
-            ChunkLeaf(salt=self.salt, index=self.index * LEAVES_PER_CHILD + j)
-            for j in range(LEAVES_PER_CHILD)
-        ]
+        return [ChunkLeaf(salt=self.salt, index=j) for j in leaf_indices(self.index)]
 
     def run(self):
         self._save(sum(leaf.load() for leaf in self.requires()))
@@ -119,7 +131,7 @@ def test_a_yield_larger_than_a_chunk_registers_and_runs(
         ),
         InMemoryFileTarget.cleared(),
     ):
-        for index in range(CHILDREN * LEAVES_PER_CHILD):
+        for index in range(LEAVES):
             ChunkLeaf(salt=salt, index=index).run()
         summary = sd.build(
             root,
@@ -133,7 +145,7 @@ def test_a_yield_larger_than_a_chunk_registers_and_runs(
         assert summary.status == BuildExitStatus.SUCCESS, (
             f"{summary}\n{describe(build_id)}"
         )
-        assert root.load() == sum(range(CHILDREN * LEAVES_PER_CHILD))
+        assert root.load() == sum(range(LEAVES))
 
     registry = registry_provider.get()
     assert registry.build_get(build_id).status == "completed", describe(build_id)
@@ -145,7 +157,7 @@ def test_a_yield_larger_than_a_chunk_registers_and_runs(
     for index in (0, CHILDREN // 2, CHILDREN - 1):
         for task in (
             ChunkChild(salt=salt, index=index),
-            ChunkLeaf(salt=salt, index=index * LEAVES_PER_CHILD),
+            ChunkLeaf(salt=salt, index=leaf_indices(index)[0]),
         ):
             assert registry.task_get(str(task.id)).status == "completed", task
 
@@ -161,3 +173,7 @@ def test_a_yield_larger_than_a_chunk_registers_and_runs(
         "The root's yield should have arrived as several applied /yield "
         "requests.\n" + describe_events(events)
     )
+    # The registry under test accepts a closure-only request: the first one
+    # yielded nothing, rather than a stand-in.
+    first_yielded = (yields[0].get("event_metadata") or {}).get("yielded")
+    assert first_yielded == [], describe_events(events)
