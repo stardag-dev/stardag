@@ -4,6 +4,29 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [Unreleased]
+
+### SDK
+
+- **S3 targets reuse one async client per event loop** (STA-181).
+  `exists_aio`, `download_aio` and `upload_aio` each opened a new aioboto3
+  client, paying for client construction and a TLS handshake on every call.
+  Discovery checks completion with one `HEAD` per S3-backed task, so that
+  setup dominated: discovering about 500 such tasks took 13 s, about four
+  times what a shared client takes. The client is now created on a loop's
+  first async operation and closed when the loop shuts down its async
+  generators (as `asyncio.run` does), or by `await file_system.aclose()`,
+  a new no-op-by-default method on `RemoteFileSystemABC`. Its connection pool
+  holds 64 connections, above every builder's default
+  `max_concurrent_discover`; set `STARDAG_TARGET_S3_MAX_POOL_CONNECTIONS` to
+  run discovery wider than that.
+- **`build_sequential` shuts its event loop down as `asyncio.run` does.** It
+  runs discovery on a loop of its own, which it stopped and closed without
+  cancelling leftover tasks, closing async generators or shutting down the
+  default executor, so resources held per loop, such as the S3 client above,
+  were never closed. It now does all three, on success, failure and
+  interruption alike, bounded at 30 s.
+
 ## [0.30.2] — 2026-11-16
 
 SDK-only patch: no server change. Task ids are unchanged for every set whose

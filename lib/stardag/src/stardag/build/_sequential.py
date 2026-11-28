@@ -534,9 +534,56 @@ def build_sequential(
                 raise
             return done.result()
         finally:
-            loop.call_soon_threadsafe(loop.stop)
-            thread.join()
-            loop.close()
+            try:
+                _shut_down_loop_threadsafe(loop)
+            finally:
+                loop.call_soon_threadsafe(loop.stop)
+                thread.join()
+                loop.close()
+
+
+#: How long closing the helper loop may take before the build returns anyway.
+_LOOP_SHUTDOWN_TIMEOUT_SECONDS = 30.0
+
+
+async def _shut_down_loop() -> None:
+    """What ``asyncio.run`` does before closing its loop.
+
+    Cancel what is still pending (an engine task whose build failed or was
+    interrupted), then close the loop's async generators, which is what
+    releases resources held per loop, such as a remote file system's shared
+    async client, and finally the default executor.
+    """
+    loop = asyncio.get_running_loop()
+    current = asyncio.current_task()
+    pending = [task for task in asyncio.all_tasks() if task is not current]
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    await loop.shutdown_asyncgens()
+    await loop.shutdown_default_executor()
+
+
+def _shut_down_loop_threadsafe(loop: asyncio.AbstractEventLoop) -> None:
+    """Run :func:`_shut_down_loop` on ``loop``, running on another thread.
+
+    Bounded: a resource that will not close is logged, not waited on forever.
+    """
+    future = asyncio.run_coroutine_threadsafe(_shut_down_loop(), loop)
+    try:
+        future.result(timeout=_LOOP_SHUTDOWN_TIMEOUT_SECONDS)
+    except concurrent.futures.TimeoutError:
+        future.cancel()
+        logger.warning(
+            "The sequential build's event loop did not shut down within "
+            f"{_LOOP_SHUTDOWN_TIMEOUT_SECONDS:.0f}s; closing it anyway."
+        )
+    except Exception:
+        logger.warning(
+            "Shutting down the sequential build's event loop failed.",
+            exc_info=True,
+        )
 
 
 async def build_sequential_aio(
