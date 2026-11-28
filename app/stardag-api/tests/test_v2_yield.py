@@ -356,6 +356,138 @@ async def test_a_yield_larger_than_a_chunk_lands_in_the_sealed_plan(h: Harness):
     assert exc.value.code == "plan_sealed"
 
 
+async def test_a_closure_only_batch_lands_without_a_dynamic_edge(h: Harness):
+    """STA-182 — a batch carrying closure only (``yielded`` empty, ahead of
+    the batch with its children) is applied to the sealed plan: its items
+    are admitted ``static``, the parent gets no dynamic edge to them, keeps
+    its claim, and the plan stays sealed."""
+    parent = item("P")
+    build, plan = await h.planned([parent], [parent], seal=True)
+    execution = await h.start(plan.id, parent)
+    u1, u2 = item("U1"), item("U2")
+
+    result = await h.yield_(plan.id, parent, execution, [u1, u2], [], suspend=False)
+    assert result.members.members_admitted == 2
+    assert result.dynamic_edges_created == 0
+    assert (result.status, result.execution_id) == ("running", execution)
+
+    members = await h.members(plan.id)
+    assert members[u1.task_id]["admitted_by"] == "static"
+    assert members[u2.task_id]["admitted_by"] == "static"
+    deployment = members[u1.task_id]["deployment_id"]
+    edges = await h.edges(deployment)
+    assert not {e for e in edges if e[0] == parent.instance_hash}
+    assert (await h.frontier(build)).sealed
+    (yielded,) = await h.events(parent, types=["task_yielded"])
+    assert yielded["report_applied"]
+
+
+async def test_a_closure_only_batch_cannot_suspend(h: Harness):
+    """A parent suspended on nothing would wait on nothing: a batch that
+    yields nothing and asks to suspend is refused, and nothing lands."""
+    parent = item("P")
+    _, plan = await h.planned([parent], [parent], seal=True)
+    execution = await h.start(plan.id, parent)
+    u = item("U")
+    with pytest.raises(BadRequest) as exc:
+        await h.yield_(plan.id, parent, execution, [u], [], suspend=True)
+    assert exc.value.code == "suspend_without_yielded"
+    assert set(await h.members(plan.id)) == {parent.task_id}
+    assert (await h.task(parent))["status"] == "running"
+
+
+async def test_a_closure_only_batch_is_replayed(h: Harness):
+    """A closure-only batch is recorded like any other: its retry (same
+    ``execution_id`` and ``batch_id``) is replayed, writing nothing."""
+    parent = item("P")
+    _, plan = await h.planned([parent], [parent], seal=True)
+    execution = await h.start(plan.id, parent)
+    batch = uuid4()
+    items = [item("U1"), item("U2")]
+    first = await h.yield_(
+        plan.id, parent, execution, items, [], suspend=False, batch_id=batch
+    )
+    events = len(await h.events())
+    again = await h.yield_(
+        plan.id, parent, execution, items, [], suspend=False, batch_id=batch
+    )
+    assert again.replayed and not first.replayed
+    assert again.members == first.members
+    assert again.dynamic_edges_created == first.dynamic_edges_created == 0
+    assert len(await h.events()) == events
+
+
+async def test_a_yield_whose_middle_batch_is_closure_only(h: Harness):
+    """STA-182 — a yield of three batches in post-order: a child with its
+    leaf, then the closure of a second child alone, then that child with
+    ``suspend``. The parent gets a dynamic edge to each child and to
+    nothing else, is SUSPENDED, and the leaves are what runs first."""
+    parent = item("P")
+    build, plan = await h.planned([parent], [parent], seal=True)
+    execution = await h.start(plan.id, parent)
+    leaf_a = item("LeafA")
+    a = item("A", upstreams=[leaf_a])
+    leaves_b = [item("LeafB", params={"i": i}) for i in range(3)]
+    b = item("B", upstreams=leaves_b)
+
+    first = await h.yield_(plan.id, parent, execution, [leaf_a, a], [a], suspend=False)
+    middle = await h.yield_(plan.id, parent, execution, leaves_b, [], suspend=False)
+    last = await h.yield_(plan.id, parent, execution, [b], [b], suspend=True)
+    assert [r.dynamic_edges_created for r in (first, middle, last)] == [1, 0, 1]
+    assert [r.status for r in (first, middle, last)] == [
+        "running",
+        "running",
+        "suspended",
+    ]
+
+    deployment = (await h.members(plan.id))[a.task_id]["deployment_id"]
+    from_parent = {
+        up for down, up in await h.edges(deployment) if down == parent.instance_hash
+    }
+    assert from_parent == {a.instance_hash, b.instance_hash}
+    frontier = await h.frontier(build)
+    assert frontier.sealed
+    assert task_ids(frontier.runnable) == {i.task_id for i in [leaf_a, *leaves_b]}
+    assert len(await h.events(parent, types=["task_yielded"])) == 3
+
+
+async def test_an_empty_batch_is_still_refused_over_http(
+    client: AsyncClient, h: Harness
+):
+    """A batch with no items at all stays a validation error; one with
+    items and nothing yielded is accepted when it does not suspend."""
+    parent = item("P")
+    _, plan = await h.planned([parent], [parent], seal=True)
+    execution = await h.start(plan.id, parent)
+    path = f"/api/v2/plans/{plan.id}/members/{parent.task_id}/yield"
+    body: dict[str, Any] = {
+        "execution_id": str(execution),
+        "deployment_id": str(plan.deployment_id),
+        "batch_id": str(uuid4()),
+        "items": [],
+        "yielded": [],
+        "suspend": False,
+    }
+    empty = await client.post(path, json=body)
+    assert empty.status_code == 422, empty.text
+    closure_only = await client.post(
+        path, json={**body, "items": [item("U").model_dump(mode="json")]}
+    )
+    assert closure_only.status_code == 200, closure_only.text
+    assert closure_only.json()["dynamic_edges_created"] == 0
+    suspending = await client.post(
+        path,
+        json={
+            **body,
+            "batch_id": str(uuid4()),
+            "items": [item("V").model_dump(mode="json")],
+            "suspend": True,
+        },
+    )
+    assert suspending.status_code == 400, suspending.text
+    assert suspending.json()["detail"]["code"] == "suspend_without_yielded"
+
+
 async def test_yielded_names_items_of_the_batch(h: Harness):
     parent = item("P")
     _, plan = await h.planned([parent], [parent])
