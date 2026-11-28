@@ -142,6 +142,9 @@ class DynamicTask(sd.Task[list[dict]]):
 
 **BUILD CONTRACT**: All yielded tasks are guaranteed complete before the generator resumes.
 
+A yield of any size registers: the SDK splits a yield and its static closure across as many
+registry requests as it needs. `yield []` sends nothing and the generator carries on.
+
 Async variant:
 
 ```python
@@ -252,7 +255,10 @@ class FilterTask(sd.Task[pd.DataFrame]):
 task = FilterTask(categories={"a", "b", "c"})
 ```
 
-`HashableSet` ensures deterministic ordering for consistent task IDs regardless of set insertion order.
+`HashableSet` ensures deterministic ordering for consistent task IDs regardless of set
+insertion order or `PYTHONHASHSEED`. Members are sorted by value where every pair compares,
+otherwise by their canonical JSON, so sets of sets and sets of models hash the same in every
+process (since 0.30.2).
 
 ## StardagBaseModel
 

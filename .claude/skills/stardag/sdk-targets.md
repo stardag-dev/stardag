@@ -182,6 +182,14 @@ Selected automatically when a target root URI starts with `s3://` (needs the `s3
 export STARDAG_TARGET_ROOTS='{"default": "s3://my-bucket/stardag/"}'
 ```
 
+Async operations (`exists_aio`, `download_aio`, `upload_aio`, which discovery's completion
+checks use) share one client per event loop, opened on first use and closed when the loop
+shuts down its async generators, as `asyncio.run` does. `await file_system.aclose()`
+(on any `RemoteFileSystemABC`, a no-op by default) closes it earlier. Its connection pool
+holds 64 connections, above every builder's default `max_concurrent_discover`; to run
+discovery wider, raise it with `STARDAG_TARGET_S3_MAX_POOL_CONNECTIONS` (or
+`S3FileSystem(max_pool_connections=...)`).
+
 ## Custom Target Factory Provider
 
 For advanced use cases, override the target factory:
