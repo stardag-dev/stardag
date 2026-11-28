@@ -83,6 +83,7 @@ class _FakeClientContext:
 
     async def __aexit__(self, *exc_info) -> None:
         assert self.client is not None
+        await asyncio.sleep(self.session.close_latency)
         self.client.closed = True
 
 
@@ -96,6 +97,7 @@ class _FakeSession:
         self.configs: list = []
         self.calls: list[tuple] = []
         self.fail_setups = 0
+        self.close_latency = 0.0
         self._lock = threading.Lock()
 
     def client(self, service_name: str, config=None) -> _FakeClientContext:
@@ -230,6 +232,72 @@ async def test_a_failed_client_construction_is_retried_by_the_next_call():
     assert len(session.created) == 1
     await fs.aclose()
     assert session.created[0].closed
+
+
+async def test_aclose_cancelled_during_a_construction_leaves_the_client_reachable():
+    """Cancelled while waiting for a construction, ``aclose`` changes nothing.
+
+    The entry stays published, so the constructed client is the one every
+    later call reuses (no second pool) and a later ``aclose`` closes it.
+    """
+    session = _FakeSession(setup_latency=0.1)
+    fs = _file_system(session)
+
+    check = asyncio.create_task(fs.exists_aio("s3://bucket/a"))
+    await asyncio.sleep(0.02)  # the check now holds the lock, constructing
+    closing = asyncio.create_task(fs.aclose())
+    await asyncio.sleep(0.02)  # aclose now waits for the lock
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+
+    assert await check
+    assert await fs.exists_aio("s3://bucket/b")
+    assert len(session.created) == 1
+    assert not session.created[0].closed
+
+    await fs.aclose()
+    assert session.created[0].closed
+
+
+async def test_aclose_cancelled_while_closing_still_closes_the_client():
+    session = _FakeSession()
+    session.close_latency = 0.1
+    fs = _file_system(session)
+    assert await fs.exists_aio("s3://bucket/a")
+
+    closing = asyncio.create_task(fs.aclose())
+    await asyncio.sleep(0.02)  # the entry is unpublished, the close under way
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+
+    await asyncio.sleep(0.15)
+    assert session.created[0].closed
+
+
+async def test_a_call_waiting_out_an_aclose_opens_a_reachable_client():
+    """A call that waited on the lock while ``aclose`` took the entry looks up
+    again: its client is published, so ``aclose`` can reach and close it."""
+    session = _FakeSession(setup_latency=0.05)
+    fs = _file_system(session)
+
+    first = asyncio.create_task(fs.exists_aio("s3://bucket/a"))
+    await asyncio.sleep(0.01)  # constructing, under the lock
+    closing = asyncio.create_task(fs.aclose())
+    await asyncio.sleep(0.01)
+    late = asyncio.create_task(fs.exists_aio("s3://bucket/b"))  # waits too
+
+    assert await first
+    await closing
+    assert await late
+
+    assert len(session.created) == 2
+    assert session.created[0].closed
+    assert not session.created[1].closed
+    await fs.aclose()
+    assert session.created[1].closed
+    assert fs._loop_clients == {}
 
 
 async def test_a_cached_wrapper_forwards_aclose(tmp_path: Path):

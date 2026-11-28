@@ -124,23 +124,30 @@ class S3FileSystem(RemoteFileSystemABC):
     async def _client_aio(self) -> AsyncS3Client:
         """This loop's shared async client, created on first use."""
         loop = asyncio.get_running_loop()
-        with self._loop_clients_lock:
-            entry = self._loop_clients.get(loop)
-            if entry is None:
-                for closed in [lp for lp in self._loop_clients if lp.is_closed()]:
-                    del self._loop_clients[closed]
-                entry = self._loop_clients[loop] = _LoopClient()
-        if entry.client is not None:
-            return entry.client
-        # Many coroutines can arrive at a cold loop at once (a discovery walk
-        # starts with a burst of completion checks): one creates the client,
-        # the rest wait for it.
-        async with entry.lock:
-            if entry.client is None:
-                lifetime = self._client_lifetime(loop, entry)
-                entry.client = await anext(lifetime)
-                entry.lifetime = lifetime
-            return entry.client
+        while True:
+            with self._loop_clients_lock:
+                entry = self._loop_clients.get(loop)
+                if entry is None:
+                    for closed in [lp for lp in self._loop_clients if lp.is_closed()]:
+                        del self._loop_clients[closed]
+                    entry = self._loop_clients[loop] = _LoopClient()
+            if entry.client is not None:
+                return entry.client
+            # Many coroutines can arrive at a cold loop at once (a discovery
+            # walk starts with a burst of completion checks): one creates the
+            # client, the rest wait for it.
+            async with entry.lock:
+                with self._loop_clients_lock:
+                    published = self._loop_clients.get(loop) is entry
+                if not published:
+                    # aclose() took the entry while this call waited: look up
+                    # again rather than open a client nothing can reach.
+                    continue
+                if entry.client is None:
+                    lifetime = self._client_lifetime(loop, entry)
+                    entry.client = await anext(lifetime)
+                    entry.lifetime = lifetime
+                return entry.client
 
     async def _client_lifetime(
         self, loop: asyncio.AbstractEventLoop, entry: _LoopClient
@@ -176,13 +183,21 @@ class S3FileSystem(RemoteFileSystemABC):
         """
         loop = asyncio.get_running_loop()
         with self._loop_clients_lock:
-            entry = self._loop_clients.pop(loop, None)
+            entry = self._loop_clients.get(loop)
         if entry is None:
             return
+        # Unpublish only once the lock is held, so that a construction in
+        # flight finishes first. Cancelled while waiting, this has changed
+        # nothing: the entry stays published, and its client reachable.
         async with entry.lock:
+            with self._loop_clients_lock:
+                if self._loop_clients.get(loop) is entry:
+                    del self._loop_clients[loop]
             lifetime, entry.lifetime, entry.client = entry.lifetime, None, None
         if lifetime is not None:
-            await lifetime.aclose()
+            # Unpublished now, so nothing else will close it: finish the
+            # close even if this call is cancelled (which still propagates).
+            await asyncio.shield(_close_lifetime(lifetime))
 
     async def exists_aio(self, uri: str) -> bool:
         """Asynchronously check if the S3 object exists."""
@@ -208,6 +223,10 @@ class S3FileSystem(RemoteFileSystemABC):
         bucket, key = get_bucket_key(uri)
         s3 = await self._client_aio()
         await s3.upload_file(str(source), bucket, key)
+
+
+async def _close_lifetime(lifetime: AsyncGenerator[AsyncS3Client, None]) -> None:
+    await lifetime.aclose()
 
 
 def get_bucket_key(uri: str) -> tuple[str, str]:
