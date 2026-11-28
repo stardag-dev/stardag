@@ -4,7 +4,7 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
-## [0.31.0] — Unreleased
+## [0.31.0] — 2026-11-28
 
 SDK `0.31.0` and server `server-v0.10.0`: large DAGs, discovered faster and
 yielded whole. A yield larger than one registration request (1000 items)
